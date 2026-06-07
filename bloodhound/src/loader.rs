@@ -8,13 +8,23 @@ use log::{info, warn};
 
 use bloodhound_common::*;
 
+use crate::btf_offsets;
 use crate::cli::Cli;
 
 pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
+    // Resolve task_struct field offsets from the *running* kernel's BTF
+    // and inject them as globals before load. Baking compile-time offsets
+    // silently breaks tracing on any kernel build but the one the eBPF
+    // object was compiled against (issue #37).
+    let offsets = btf_offsets::resolve();
+
     // Load BPF programs with global variables set BEFORE loading
     let mut bpf = EbpfLoader::new()
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
+        .set_global("OFF_LOGINUID", &offsets.loginuid, true)
+        .set_global("OFF_SESSIONID", &offsets.sessionid, true)
+        .set_global("OFF_TGID", &offsets.tgid, true)
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/bloodhound-ebpf/bpfel-unknown-none/release/bloodhound-ebpf"

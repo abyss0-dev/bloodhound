@@ -1,3 +1,4 @@
+mod btf_offsets;
 mod cli;
 mod consumer;
 mod deserializer;

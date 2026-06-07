@@ -7,8 +7,7 @@ use bloodhound_common::*;
 
 use crate::filter::get_current_auid;
 use crate::helpers::emit_event;
-use crate::vmlinux::task_struct;
-use crate::{DAEMON_PID, TARGET_AUID};
+use crate::{DAEMON_PID, OFF_TGID, TARGET_AUID};
 
 #[inline(always)]
 unsafe fn is_daemon() -> bool {
@@ -107,17 +106,16 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
     // LSM hook signature: security_task_kill(task_struct *p, siginfo *info, int sig, cred *cred)
     //   ctx.arg(0) = target task_struct *p
     //   ctx.arg(2) = signal number
-    let target_task: *const task_struct = ctx.arg(0);
+    let target_task: *const u8 = ctx.arg(0);
     let sig: i32 = ctx.arg(2);
 
-    // Read the target task's tgid (= userspace PID) via typed struct access.
-    // The field offset is derived from the task_struct definition in vmlinux.rs
-    // (target: kernel 6.8.0-49-generic), replacing the previous hardcoded
-    // offset (0x9a4). See vmlinux.rs for the regeneration procedure.
-    let tgid_ptr = core::ptr::addr_of!((*target_task).tgid);
-    let target_tgid: u32 = bpf_probe_read_kernel(tgid_ptr)
-        .map(|v| v as u32)
-        .unwrap_or(0);
+    // Read the target task's tgid (= userspace PID) via the runtime-resolved
+    // byte offset (`OFF_TGID`, supplied by userspace from kernel BTF — see
+    // issue #37). `tgid` is an `i32`; its bit pattern read as `u32` is the
+    // userspace PID for the thread-group leader.
+    let off = core::ptr::read_volatile(&raw const OFF_TGID) as usize;
+    let tgid_ptr = (target_task as usize + off) as *const u32;
+    let target_tgid: u32 = bpf_probe_read_kernel(tgid_ptr).unwrap_or(0);
 
     let daemon_pid = core::ptr::read_volatile(&raw const DAEMON_PID);
 

@@ -1,151 +1,94 @@
 # eBPF `task_struct` Field Access
 
-Bloodhound reads kernel `task_struct` fields (`loginuid`, `sessionid`,
-`tgid`, `pid`) to identify and filter traced processes. These fields
-are accessed via typed struct definitions in `bloodhound-ebpf/src/vmlinux.rs`.
+Bloodhound reads three scalar kernel `task_struct` fields to identify and
+filter traced processes: `loginuid` and `sessionid` (the auid filter in
+`should_trace()` and the event header) and `tgid` (the LSM `task_kill`
+target-PID check).
 
-## How It Works
+## How It Works: runtime BTF offset resolution ("manual CO-RE")
 
-The `vmlinux.rs` module defines a minimal `task_struct` with only the
-fields bloodhound accesses:
+The byte offset of each field is resolved **at daemon start** from the
+running kernel's own BTF, then injected into the eBPF programs as global
+constants before load. This makes the daemon portable to any BTF-bearing
+kernel without recompilation. See issue #37 for the failure this replaces.
 
-```rust
-#[repr(C)]
-pub struct task_struct {
-    _pad0: [u8; 0x9a0],         // padding → pid
-    pub pid: i32,                // offset 0x9a0
-    pub tgid: i32,               // offset 0x9a4
-    _pad1: [u8; 0xc88 - 0x9a8], // padding → loginuid
-    pub loginuid: kuid_t,        // offset 0xc88
-    pub sessionid: u32,          // offset 0xc8c
-}
-```
+The pieces:
 
-Field access uses `core::ptr::addr_of!` to compute offsets from the
-struct layout, then `bpf_probe_read_kernel` to safely read the value:
+- **Userspace** (`bloodhound::btf_offsets`): a minimal BTF reader parses
+  `/sys/kernel/btf/vmlinux`, finds `struct task_struct`, and returns the
+  byte offsets of `loginuid`, `sessionid`, and `tgid`.
+- **Injection** (`bloodhound::loader`): the resolved offsets are passed
+  via `EbpfLoader::set_global` into the `OFF_LOGINUID` / `OFF_SESSIONID` /
+  `OFF_TGID` globals (declared in `bloodhound-ebpf/src/main.rs`).
+- **eBPF** (`filter.rs`, `lsm_hooks.rs`): each field is read as
+  `bpf_probe_read_kernel((task_base + offset))`. A variable offset is
+  accepted by the verifier, unlike a typed deref that bakes a fixed
+  compile-time offset.
 
-```rust
-let task_ptr = bpf_get_current_task() as *const task_struct;
-let loginuid_ptr = core::ptr::addr_of!((*task_ptr).loginuid);
-let auid = bpf_probe_read_kernel(loginuid_ptr)
-    .map(|kuid| kuid.val)
-    .unwrap_or(u32::MAX);
-```
+The daemon logs the resolved offsets at startup (`Resolved task_struct
+offsets from ...`). If BTF resolution fails it falls back **loudly** (a
+`warn!` line) to the compile-time defaults below, which are correct only
+on the build kernel.
 
-## CO-RE Status
+## Why not typed `vmlinux.rs` struct access?
 
-> **Note:** As of 2026-04, the Rust compiler does not emit
-> `preserve_access_index` BTF relocation markers. The field offsets
-> are fixed at compile time to the target kernel. When rustc gains
-> CO-RE support, the existing code will work as-is — only a recompile
-> is needed.
+The previous approach (issue #1) defined a typed `task_struct` in
+`vmlinux.rs` and used `core::ptr::addr_of!` to compute the offset. Because
+rustc does **not** emit `preserve_access_index` BTF relocations, that
+still compiled to a fixed offset baked to the kernel `vmlinux.rs` was
+generated against (`6.8.0-49-generic`). On any other kernel build the
+fields had drifted, the daemon silently read the wrong bytes, and every
+task-scoped event was dropped in-kernel — only `HEARTBEAT` and `PACKET`
+survived. Runtime resolution sidesteps this without depending on rustc
+gaining CO-RE.
 
-## Current Offsets (kernel `6.8.0-49-generic`, Ubuntu 22.04 HWE)
+> **Scope:** This covers **scalar field offsets** only — all bloodhound
+> needs for these three fields. It is not full CO-RE (no type / enum /
+> field-existence / bitfield relocation). The nested-pointer traversal
+> structs that remain in `vmlinux.rs` (TTY device class, fd → inode →
+> super_block) are still compile-time fixed.
 
-| Field       | Byte Offset | Hex    | Source File      | Used For            |
-|-------------|-------------|--------|------------------|---------------------|
-| `pid`       | 2464        | 0x9a0  | `vmlinux.rs`     | (reference only)    |
-| `tgid`      | 2468        | 0x9a4  | `vmlinux.rs`     | LSM target PID check|
-| `loginuid`  | 3208        | 0xc88  | `vmlinux.rs`     | `should_trace()`    |
-| `sessionid` | 3212        | 0xc8c  | `vmlinux.rs`     | Event header        |
+## Fallback Offsets (kernel `6.8.0-49-generic`, x86_64)
 
-## How to Verify Offsets
+Used only if runtime BTF resolution fails. Defined in
+`TaskStructOffsets::FALLBACK` (userspace) and as the `OFF_*` global
+defaults (eBPF).
 
-### Method 1: BTF dump on the target VM (recommended)
+| Field       | Byte Offset | Hex    | Used For             |
+|-------------|-------------|--------|----------------------|
+| `tgid`      | 2468        | 0x9a4  | LSM target PID check |
+| `loginuid`  | 3208        | 0xc88  | `should_trace()`     |
+| `sessionid` | 3212        | 0xc8c  | Event header         |
 
-SSH into the VM and run:
+## How to Verify Offsets Manually
 
-```bash
-python3 << 'EOF'
-import struct
-
-with open('/sys/kernel/btf/vmlinux', 'rb') as f:
-    data = f.read()
-
-magic, version, flags, hdr_len = struct.unpack_from('<HBBI', data, 0)
-type_off, type_len, str_off, str_len = struct.unpack_from('<IIII', data, 8)
-str_data = data[hdr_len + str_off : hdr_len + str_off + str_len]
-type_data = data[hdr_len + type_off : hdr_len + type_off + type_len]
-
-def get_str(off):
-    end = str_data.index(b'\x00', off)
-    return str_data[off:end].decode()
-
-target_strs = {}
-idx = 0
-while idx < len(str_data):
-    null_pos = str_data.find(b'\x00', idx)
-    if null_pos == -1: break
-    s = str_data[idx:null_pos].decode('utf-8', errors='replace')
-    if s in ('pid', 'tgid', 'task_struct', 'loginuid', 'sessionid'):
-        target_strs[s] = idx
-    idx = null_pos + 1
-
-BTF_KIND_STRUCT = 4
-pos = 0
-type_id = 1
-while pos < len(type_data):
-    name_off, info, size_or_type = struct.unpack_from('<III', type_data, pos)
-    kind = (info >> 24) & 0x1f
-    vlen = info & 0xffff
-    pos += 12
-    is_ts = (kind == BTF_KIND_STRUCT and name_off == target_strs.get('task_struct', -1))
-    if kind in (BTF_KIND_STRUCT, 3):
-        for i in range(vlen):
-            m_name_off, m_type, m_offset = struct.unpack_from('<III', type_data, pos)
-            if is_ts:
-                mname = get_str(m_name_off)
-                if mname in ('pid','tgid','loginuid','sessionid'):
-                    print(f'{mname}: offset=0x{m_offset//8:x} ({m_offset//8})')
-            pos += 12
-    elif kind == 1: pos += 4
-    elif kind == 7: pos += 12
-    elif kind == 10:
-        for _ in range(vlen): pos += 8
-    elif kind == 11: pos += 4
-    elif kind == 12:
-        for _ in range(vlen): pos += 12
-    elif kind == 14: pos += 4
-    elif kind == 16:
-        for _ in range(vlen): pos += 12
-    type_id += 1
-EOF
-```
-
-### Method 2: `pahole` (if installed)
+For debugging, compare the daemon's logged offsets against `pahole` on the
+**same kernel the daemon runs on**:
 
 ```bash
-pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E 'pid|tgid|loginuid|sessionid'
+pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(tgid|loginuid|sessionid)\b'
 ```
 
 > **Note:** `pahole` is provided by the `dwarves` package (`apt install dwarves`).
 
-## ⚠️  Critical Pitfall: Host ≠ VM Kernel
+The byte offset printed by `pahole` should match the `loginuid` /
+`sessionid` / `tgid` values in the daemon's startup log line.
 
-The **build host** (e.g., WSL2 `6.6.87.2-microsoft-standard`) and the
-**target VM** (e.g., `6.8.0-49-generic`) run **different kernels** with
-**different `task_struct` layouts**.
+## Host ≠ VM Kernel (now handled automatically)
 
-Running `pahole` on the host gives host offsets, which are WRONG for the VM:
+The **build host** and the **target VM** run different kernels with
+different `task_struct` layouts. Previously this required regenerating
+`vmlinux.rs` per kernel; the offset drift was silent and easy to miss:
 
-| Field  | Host (WSL2 6.6) | VM (6.8 HWE)  |
-|--------|-----------------|----------------|
-| `tgid` | 0x974 (2420)    | 0x9a4 (2468)   |
+| Field  | WSL2 6.6      | 6.8.0-49 HWE  | 6.8.0-117     |
+|--------|---------------|---------------|---------------|
+| `tgid` | 0x974 (2420)  | 0x9a4 (2468)  | (shifted)     |
+| `loginuid` | 0xc30 (3120) | 0xc88 (3208) | 0xca0 (3232) |
 
-**Always run the verification script on the target VM**, not the build host.
-
-If the wrong offset is used:
-- `loginuid`: `should_trace()` reads garbage → returns `false` → **0 events**
-- `tgid`: LSM `task_kill` reads garbage → never matches `DAEMON_PID` → **kill not blocked**
-
-## When to Re-verify
-
-Re-run the offset verification script whenever:
-1. The VM kernel is upgraded (even minor patch versions can change layout)
-2. Kernel config changes (e.g., enabling/disabling `CONFIG_AUDIT`)
-3. Moving to a different distribution or kernel branch
-
-Then update the struct definition in `bloodhound-ebpf/src/vmlinux.rs`.
+Runtime resolution reads whatever the running kernel reports, so no
+per-kernel code change is needed. If `/sys/kernel/btf/vmlinux` is absent
+or unparseable, the daemon warns and falls back to the table above —
+correct only on `6.8.0-49-generic`.
 
 ## DAC vs LSM Permission Ordering
 
