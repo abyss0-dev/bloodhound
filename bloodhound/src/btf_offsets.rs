@@ -198,7 +198,9 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
             && vlen > 0
             && r.str_at(str_base, name_off)? == "task_struct"
         {
-            return read_task_members(&r, str_base, members_pos, vlen);
+            // For a STRUCT, the third word is the struct's byte size.
+            let struct_size = r.u32(pos + 8)?;
+            return read_task_members(&r, str_base, members_pos, vlen, struct_size);
         }
 
         let extra = trailing_len(kind, vlen)?;
@@ -211,11 +213,18 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
 }
 
 /// Walk a `task_struct`'s members and pick out the three scalar fields.
+///
+/// `struct_size` is the struct's own byte size from BTF, used as a sanity
+/// bound: a resolved offset at or past it means the sequential type walk
+/// desynced (a miscounted trailing record) and produced garbage. Bailing
+/// there turns that into the loud-fallback path in `resolve` rather than
+/// silently feeding a wild offset to the eBPF programs.
 fn read_task_members(
     r: &Reader,
     str_base: usize,
     members_pos: usize,
     vlen: usize,
+    struct_size: u32,
 ) -> Result<TaskStructOffsets> {
     let mut loginuid = None;
     let mut sessionid = None;
@@ -240,11 +249,26 @@ fn read_task_members(
         }
     }
 
-    Ok(TaskStructOffsets {
+    let off = TaskStructOffsets {
         loginuid: loginuid.context("task_struct::loginuid not found in BTF")?,
         sessionid: sessionid.context("task_struct::sessionid not found in BTF")?,
         tgid: tgid.context("task_struct::tgid not found in BTF")?,
-    })
+    };
+
+    for (name, value) in [
+        ("loginuid", off.loginuid),
+        ("sessionid", off.sessionid),
+        ("tgid", off.tgid),
+    ] {
+        if value >= struct_size {
+            bail!(
+                "resolved task_struct::{name} offset 0x{value:x} >= struct size \
+                 0x{struct_size:x} — BTF type walk desynced",
+            );
+        }
+    }
+
+    Ok(off)
 }
 
 /// Size in bytes of a type record's kind-specific trailing data, given
@@ -296,8 +320,22 @@ mod tests {
             self.types.extend_from_slice(&0u32.to_le_bytes()); // INT trailing word
         }
 
-        /// Append a struct with `(member_name, byte_offset)` entries.
+        /// Append a struct with `(member_name, byte_offset)` entries,
+        /// auto-sizing it to just past its last member.
         fn add_struct(&mut self, name: &str, members: &[(&str, u32)], kind_flag: bool) {
+            let size = members.iter().map(|(_, o)| o + 8).max().unwrap_or(0);
+            self.add_struct_sized(name, members, kind_flag, size);
+        }
+
+        /// Like `add_struct` but with an explicit declared size, to drive
+        /// the offset-vs-size sanity guard.
+        fn add_struct_sized(
+            &mut self,
+            name: &str,
+            members: &[(&str, u32)],
+            kind_flag: bool,
+            size: u32,
+        ) {
             let name_off = self.add_string(name);
             let vlen = members.len() as u32;
             let mut info = (BTF_KIND_STRUCT << 24) | vlen;
@@ -306,7 +344,7 @@ mod tests {
             }
             self.types.extend_from_slice(&name_off.to_le_bytes());
             self.types.extend_from_slice(&info.to_le_bytes());
-            self.types.extend_from_slice(&0u32.to_le_bytes()); // size (unused)
+            self.types.extend_from_slice(&size.to_le_bytes()); // struct byte size
             for (mname, byte_off) in members {
                 let m_name_off = self.add_string(mname);
                 let bit_off = byte_off * 8;
@@ -397,6 +435,21 @@ mod tests {
         b.add_struct("task_struct", &[("loginuid", 0xc88)], false);
         let err = parse_task_offsets(&b.build()).unwrap_err();
         assert!(err.to_string().contains("sessionid"));
+    }
+
+    #[test]
+    fn errors_when_offset_exceeds_struct_size() {
+        // A desynced walk yields an offset past the struct's own size; the
+        // sanity guard must reject it rather than feed garbage to eBPF.
+        let mut b = BtfBuilder::new();
+        b.add_struct_sized(
+            "task_struct",
+            &[("tgid", 0x9a4), ("loginuid", 0xc88), ("sessionid", 0xc8c)],
+            false,
+            0x100, // declared far smaller than the offsets
+        );
+        let err = parse_task_offsets(&b.build()).unwrap_err();
+        assert!(err.to_string().contains("desynced"), "got: {err}");
     }
 
     #[test]
