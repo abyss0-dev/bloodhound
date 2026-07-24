@@ -71,9 +71,9 @@ UNIT
 # A configuration is copied into the VM image, but it contains only the
 # registered collector ID and enabled state. It cannot alter BPF or USDT ABI.
 sudo mkdir -p "${MOUNT_DIR}/etc/bloodhound/usdt.d"
-sudo install -m 0644 "${PROJECT_ROOT}/etc/bloodhound/usdt.d/training-shell-v3.toml" \
+sudo install -m 0644 "${PROJECT_ROOT}/e2e/config/usdt.d/training-shell-v3.toml" \
     "${MOUNT_DIR}/etc/bloodhound/usdt.d/training-shell-v3.toml"
-sudo install -m 0644 "${PROJECT_ROOT}/etc/bloodhound/usdt.d/training-peer-v1.toml" \
+sudo install -m 0644 "${PROJECT_ROOT}/e2e/config/usdt.d/training-peer-v1.toml" \
     "${MOUNT_DIR}/etc/bloodhound/usdt.d/training-peer-v1.toml"
 
 # Configure networking for QEMU (guest has no network config from Docker export)
