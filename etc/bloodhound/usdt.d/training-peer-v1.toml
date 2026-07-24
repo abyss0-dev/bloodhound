@@ -1,0 +1,3 @@
+# A second independent, compiled collector used by the privileged E2E gate.
+collector = "training-peer-v1"
+enabled = true

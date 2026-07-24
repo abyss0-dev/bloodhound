@@ -10,6 +10,7 @@ mod loader;
 mod packet_correlator;
 mod serializer;
 mod shutdown;
+mod usdt;
 
 use anyhow::{Context, Result};
 use aya::maps::{ring_buf::RingBuf, PerCpuArray};
@@ -33,8 +34,22 @@ async fn main() -> Result<()> {
     info!("Bloodhound starting: tracing uid={}", args.uid);
     eprintln!("Bloodhound starting: tracing uid={}", args.uid);
 
+    let mut usdt_selections = Vec::new();
+    for path in &args.usdt_config {
+        match usdt::load_selection(path) {
+            Ok(selection) => usdt_selections.push(selection),
+            Err(error) => {
+                // Startup validation is deliberately noisy and structured: a
+                // bad trusted selection is never silently ignored.
+                let event = usdt::selection_failure_diagnostic(path, &error);
+                let _ = Serializer::new().write_event(&event);
+                return Err(error);
+            }
+        }
+    }
+
     // Load and attach BPF programs
-    let mut bpf = loader::load_and_attach(&args)?;
+    let (mut bpf, usdt_diagnostics) = loader::load_and_attach(&args, &usdt_selections)?;
     info!("BPF programs loaded and attached");
     eprintln!("BPF programs loaded and attached");
 
@@ -78,6 +93,9 @@ async fn main() -> Result<()> {
     // ring-buffer `event_rx` so the main select! can interleave both
     // sources without either starving the other.
     let (syn_tx, mut syn_rx) = mpsc::channel::<BehaviorEvent>(64);
+    for diagnostic in usdt_diagnostics {
+        syn_tx.send(diagnostic).await.context("queueing USDT diagnostic")?;
+    }
 
     // Heartbeat task: periodic synthesized events carrying drop deltas
     // and emission counts so downstream consumers can mark intervals

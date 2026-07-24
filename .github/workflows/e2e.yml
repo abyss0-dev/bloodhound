@@ -7,6 +7,20 @@ on:
     branches: [main]
 
 jobs:
+  usdt-unit:
+    name: USDT unit and replay tests
+    runs-on: takumi-runner
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the USDT test image
+        run: docker build --target build -t bloodhound-usdt-test -f Dockerfile.build .
+
+      - name: Run USDT registry and payload tests
+        run: >-
+          docker run --rm bloodhound-usdt-test
+          cargo test --package bloodhound usdt --target x86_64-unknown-linux-musl
+
   e2e:
     name: E2E Tests
     runs-on: takumi-runner
@@ -24,6 +38,13 @@ jobs:
           sudo udevadm control --reload-rules
           sudo udevadm trigger --name-match=kvm
           ls -la /dev/kvm
+
+      - name: Require BPF capability
+        run: |
+          if ! test -r /sys/kernel/btf/vmlinux; then
+            echo "BPF-capable kernel BTF is required for USDT E2E"
+            exit 1
+          fi
 
       - name: Install QEMU & sshpass
         run: |

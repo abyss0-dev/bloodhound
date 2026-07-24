@@ -26,6 +26,9 @@ e2e/*.log
 e2e/qemu.pid
 e2e/qemu.log
 
+# Locally compiled USDT fixture (the test image builds its own fixed-ID copy).
+e2e/fixtures/training-shell-v3
+
 # OS
 .DS_Store
 Thumbs.db

@@ -1,0 +1,4 @@
+# Trusted collector selection only. The collector's target path, Build IDs,
+# provider/probe, operand ABI and BPF program are compiled into Bloodhound.
+collector = "training-shell-v3"
+enabled = true

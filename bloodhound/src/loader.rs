@@ -9,9 +9,9 @@ use log::{info, warn};
 use bloodhound_common::*;
 
 use crate::btf_offsets;
-use crate::cli::Cli;
+use crate::{cli::Cli, deserializer::BehaviorEvent, usdt};
 
-pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
+pub fn load_and_attach(args: &Cli, usdt_selections: &[usdt::Selection]) -> Result<(aya::Ebpf, Vec<BehaviorEvent>)> {
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
@@ -187,8 +187,12 @@ pub fn load_and_attach(args: &Cli) -> Result<aya::Ebpf> {
         }
     }
 
+    let usdt_diagnostics = usdt_selections
+        .iter()
+        .flat_map(|selection| usdt::attach_selected(&mut bpf, selection))
+        .collect();
     info!("All BPF programs attached successfully");
-    Ok(bpf)
+    Ok((bpf, usdt_diagnostics))
 }
 
 fn populate_exclusion_bitmap(bpf: &mut aya::Ebpf) -> Result<()> {

@@ -1,5 +1,29 @@
 # Development and Testing
 
+## USDT collector gates
+
+Run the non-privileged registry, configuration, and collector-payload decoding
+tests with:
+
+```sh
+docker build --target build -t bloodhound-usdt-test -f Dockerfile.build .
+docker run --rm bloodhound-usdt-test \
+  cargo test --package bloodhound usdt --target x86_64-unknown-linux-musl
+```
+
+Run the privileged USDT end-to-end test on a Linux runner that can load BPF
+programs and boot the repository's QEMU test VM with:
+
+```sh
+make build-docker
+(cd e2e && bash scripts/build-rootfs.sh)
+# boot the VM, then:
+(cd e2e/tests && python -m pytest -v test_usdt.py --ssh-port=2222 --ssh-host=localhost)
+```
+
+The E2E workflow treats missing `/sys/kernel/btf/vmlinux` as a failure. It
+does not skip USDT attachment when BPF prerequisites are unavailable.
+
 
 ## Build Environment
 

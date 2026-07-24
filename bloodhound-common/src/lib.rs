@@ -87,6 +87,15 @@ pub enum EventKind {
     LsmInodeUnlink = 204,
     LsmInodeRename = 205,
     LsmTaskFixSetuid = 206,
+
+    // Trusted in-tree USDT collectors. Their payload layouts are collector
+    // owned; VM configuration can only select the already compiled program.
+    UsdtTrainingShellV3 = 240,
+    UsdtTrainingPeerV1 = 241,
+    /// A collector-owned capture failure. Userspace renders it as the
+    /// canonical `DIAGNOSTIC/usdt.collector` event rather than a partial USDT
+    /// semantic event.
+    UsdtTrainingShellV3CaptureError = 242,
 }
 
 impl EventKind {
@@ -151,6 +160,9 @@ impl EventKind {
             204 => Some(Self::LsmInodeUnlink),
             205 => Some(Self::LsmInodeRename),
             206 => Some(Self::LsmTaskFixSetuid),
+            240 => Some(Self::UsdtTrainingShellV3),
+            241 => Some(Self::UsdtTrainingPeerV1),
+            242 => Some(Self::UsdtTrainingShellV3CaptureError),
             _ => None,
         }
     }
@@ -223,6 +235,59 @@ pub struct TtyPayload {
     pub data_len: u16,
     pub _pad: [u8; 2],
     // Followed by: data bytes (data_len)
+}
+
+/// Fixed prefix emitted by the `training-shell-v3` USDT collector.
+///
+/// The bounded UTF-8 command name follows this prefix. No pointer value is
+/// copied into the ring buffer and no field may exceed `command_name_len`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UsdtTrainingShellPayload {
+    pub attach_point_id: u32,
+    pub shell_pid: u32,
+    pub command_id: u64,
+    pub command_kind: u32,
+    pub semantic_flags: u32,
+    pub exit_status: i32,
+    pub command_name_len: u16,
+    pub command_name_truncated: u8,
+    pub _pad: u8,
+}
+
+impl UsdtTrainingShellPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Fixed error payload for a required `training-shell-v3` argument that could
+/// not be read safely. The raw pointer and any surrounding process memory are
+/// deliberately not included.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UsdtTrainingShellCaptureErrorPayload {
+    pub attach_point_id: u32,
+    pub field_id: u8,
+    pub read_error_code: u8,
+    pub _pad: [u8; 2],
+}
+
+impl UsdtTrainingShellCaptureErrorPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Fixed payload emitted by the independent `training-peer-v1` collector.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct UsdtTrainingPeerPayload {
+    pub attach_point_id: u32,
+    pub _pad: u32,
+    pub task_id: u64,
+    pub result: u32,
+    pub _pad2: u32,
+}
+
+impl UsdtTrainingPeerPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
 impl TtyPayload {

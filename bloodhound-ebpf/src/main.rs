@@ -11,6 +11,7 @@ mod layer3_rich;
 mod lsm_hooks;
 mod maps;
 mod packet_tc;
+mod usdt;
 mod vmlinux;
 
 // ── Global Variables ─────────────────────────────────────────────────────────
