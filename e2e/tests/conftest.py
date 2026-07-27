@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import time
 
@@ -154,6 +155,79 @@ def bloodhound_events(ssh_config, scp_cmd, ssh_cmd, tmp_path, request):
         return events
 
     return get_events
+
+
+@pytest.fixture
+def fresh_bloodhound_events(ssh_config, ssh_cmd):
+    """Read the complete current NDJSON file without a session baseline.
+
+    This reader is for tests that stop Bloodhound, create a new output file,
+    and then restart it.  The ordinary ``bloodhound_events`` fixture is not
+    safe for that use because its line-count baseline predates the restart.
+    Incomplete writes are retried by the polling helper below.
+    """
+
+    def get_events():
+        output_path = shlex.quote(ssh_config["output_path"])
+        result = ssh_cmd(f"cat -- {output_path}", user="root")
+        assert result.returncode == 0, result.stderr
+
+        events = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                # The daemon can be appending while the file is read.  A
+                # polling caller will retry; never treat a partial final line
+                # as a malformed event from Bloodhound.
+                continue
+        return events
+
+    return get_events
+
+
+@pytest.fixture
+def wait_until():
+    """Poll a bounded readiness predicate without using a fixed delay."""
+
+    def wait(predicate, description, timeout=15.0, interval=0.1):
+        deadline = time.monotonic() + timeout
+        while True:
+            if predicate():
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Timed out waiting for {description}")
+            time.sleep(interval)
+
+    return wait
+
+
+@pytest.fixture
+def wait_for_matching_events(wait_until):
+    """Poll an event reader until an observable NDJSON condition is true.
+
+    The timeout bounds a real readiness protocol; it is not a delay chosen to
+    make a race less likely.  Callers must provide a predicate over actual
+    NDJSON records, such as the expected collector diagnostic or USDT event.
+    """
+
+    def wait(read_events, predicate, description, timeout=15.0, interval=0.1):
+        latest_events = []
+
+        def is_ready():
+            nonlocal latest_events
+            latest_events = read_events()
+            if predicate(latest_events):
+                return True
+            return False
+
+        wait_until(is_ready, description, timeout=timeout, interval=interval)
+        return latest_events
+
+    return wait
 
 
 @pytest.fixture
