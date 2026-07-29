@@ -178,6 +178,15 @@ class TestTrustedUsdtCollectors:
         wait_for_usdt_daemon,
     ):
         wait_for_usdt_daemon()
+        journal = ssh_cmd(
+            "journalctl -u bloodhound -b --no-pager -o cat",
+            user="root",
+        )
+        assert journal.returncode == 0, journal.stderr
+        assert "USDT collector training-peer-v1 failed to attach" not in journal.stdout, (
+            "training-peer-v1 attachment failed before the fixture executed:\n"
+            f"{journal.stdout}"
+        )
         result = ssh_cmd("/opt/bloodhound/usdt-fixtures/training-peer-v1")
         assert result.returncode == 0, result.stderr
 
