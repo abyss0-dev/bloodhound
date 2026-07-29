@@ -49,7 +49,8 @@ async fn main() -> Result<()> {
     }
 
     // Load and attach BPF programs
-    let (mut bpf, usdt_diagnostics) = loader::load_and_attach(&args, &usdt_selections)?;
+    let (mut bpf, usdt_diagnostics, _usdt_links) =
+        loader::load_and_attach(&args, &usdt_selections)?;
     info!("BPF programs loaded and attached");
     eprintln!("BPF programs loaded and attached");
 
@@ -94,7 +95,10 @@ async fn main() -> Result<()> {
     // sources without either starving the other.
     let (syn_tx, mut syn_rx) = mpsc::channel::<BehaviorEvent>(64);
     for diagnostic in usdt_diagnostics {
-        syn_tx.send(diagnostic).await.context("queueing USDT diagnostic")?;
+        syn_tx
+            .send(diagnostic)
+            .await
+            .context("queueing USDT diagnostic")?;
     }
 
     // Heartbeat task: periodic synthesized events carrying drop deltas

@@ -271,13 +271,60 @@ class TestTrustedUsdtCollectors:
             "abi_incompatible",
         )
 
-    def test_unsupported_semaphore_is_reported_without_attachment(
+    def test_unsupported_architecture_is_rejected_before_attachment(
         self, ssh_cmd, replace_usdt_target, wait_for_matching_events
     ):
         self._rejected_target_events(
             ssh_cmd,
             replace_usdt_target,
             wait_for_matching_events,
-            "/opt/bloodhound/usdt-fixtures/training-shell-v3-semaphore",
-            "semaphore_unavailable",
+            "/opt/bloodhound/usdt-fixtures/training-shell-v3-unsupported-architecture",
+            "unsupported_architecture",
         )
+
+    def test_semaphore_backed_collector_attaches_and_emits(
+        self, ssh_cmd, replace_usdt_target, wait_for_matching_events, wait_for_usdt_daemon
+    ):
+        with replace_usdt_target(
+            "/opt/bloodhound/usdt-fixtures/training-shell-v3-semaphore"
+        ) as fresh_events:
+            wait_for_usdt_daemon()
+            result = ssh_cmd(SHELL_TARGET)
+            assert result.returncode == 0, result.stderr
+            events = wait_for_matching_events(
+                fresh_events,
+                lambda candidate: any(event.get("event") == SHELL_EVENT for event in candidate),
+                "semaphore-backed training-shell-v3 USDT event",
+            )
+            validate_all_events(events)
+            assert_event_exists(
+                events,
+                event_type="USDT",
+                name="abyss0_shell.simple_command_completed",
+                layer="behavior",
+            )
+
+    def test_every_matching_static_location_emits_its_attach_point(
+        self, ssh_cmd, replace_usdt_target, wait_for_matching_events, wait_for_usdt_daemon
+    ):
+        with replace_usdt_target(
+            "/opt/bloodhound/usdt-fixtures/training-shell-v3-multi"
+        ) as fresh_events:
+            wait_for_usdt_daemon()
+            result = ssh_cmd(SHELL_TARGET)
+            assert result.returncode == 0, result.stderr
+            events = wait_for_matching_events(
+                fresh_events,
+                lambda candidate: {
+                    event.get("args", {}).get("attach_point_id")
+                    for event in candidate
+                    if event.get("event") == SHELL_EVENT
+                } >= {0, 1},
+                "USDT events from both static locations",
+            )
+            validate_all_events(events)
+            assert {
+                event["args"]["attach_point_id"]
+                for event in events
+                if event.get("event") == SHELL_EVENT
+            } >= {0, 1}

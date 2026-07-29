@@ -11,7 +11,10 @@ use bloodhound_common::*;
 use crate::btf_offsets;
 use crate::{cli::Cli, deserializer::BehaviorEvent, usdt};
 
-pub fn load_and_attach(args: &Cli, usdt_selections: &[usdt::Selection]) -> Result<(aya::Ebpf, Vec<BehaviorEvent>)> {
+pub fn load_and_attach(
+    args: &Cli,
+    usdt_selections: &[usdt::Selection],
+) -> Result<(aya::Ebpf, Vec<BehaviorEvent>, usdt::AttachmentLinks)> {
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
@@ -41,8 +44,18 @@ pub fn load_and_attach(args: &Cli, usdt_selections: &[usdt::Selection]) -> Resul
     info!("Attaching Layer 2: execve tracepoints...");
     attach_tracepoint(&mut bpf, "sys_enter_execve", "syscalls", "sys_enter_execve")?;
     attach_tracepoint(&mut bpf, "sys_exit_execve", "syscalls", "sys_exit_execve")?;
-    try_attach_tracepoint(&mut bpf, "sys_enter_execveat", "syscalls", "sys_enter_execveat");
-    try_attach_tracepoint(&mut bpf, "sys_exit_execveat", "syscalls", "sys_exit_execveat");
+    try_attach_tracepoint(
+        &mut bpf,
+        "sys_enter_execveat",
+        "syscalls",
+        "sys_enter_execveat",
+    );
+    try_attach_tracepoint(
+        &mut bpf,
+        "sys_exit_execveat",
+        "syscalls",
+        "sys_exit_execveat",
+    );
 
     info!("Attaching Layer 3 Tier 1: raw syscalls...");
     attach_tracepoint(&mut bpf, "raw_sys_enter", "raw_syscalls", "sys_enter")?;
@@ -124,22 +137,36 @@ pub fn load_and_attach(args: &Cli, usdt_selections: &[usdt::Selection]) -> Resul
     // TIER2_BITMAP so Tier 1 deduplicates. When disabled, the BPF programs
     // remain compiled in but unattached, and Tier 1 raw capture continues.
     if args.enable_rich_sendfile {
-        let sf_ok = try_attach_tracepoint(&mut bpf, "sys_enter_sendfile", "syscalls", "sys_enter_sendfile")
-            && try_attach_tracepoint(&mut bpf, "sys_exit_sendfile", "syscalls", "sys_exit_sendfile");
+        let sf_ok = try_attach_tracepoint(
+            &mut bpf,
+            "sys_enter_sendfile",
+            "syscalls",
+            "sys_enter_sendfile",
+        ) && try_attach_tracepoint(
+            &mut bpf,
+            "sys_exit_sendfile",
+            "syscalls",
+            "sys_exit_sendfile",
+        );
         if sf_ok && (NR_SENDFILE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SENDFILE as u32);
             info!("  Attached: sendfile (opt-in via --enable-rich-sendfile)");
         }
-        let sp_ok = try_attach_tracepoint(&mut bpf, "sys_enter_splice", "syscalls", "sys_enter_splice")
-            && try_attach_tracepoint(&mut bpf, "sys_exit_splice", "syscalls", "sys_exit_splice");
+        let sp_ok =
+            try_attach_tracepoint(&mut bpf, "sys_enter_splice", "syscalls", "sys_enter_splice")
+                && try_attach_tracepoint(
+                    &mut bpf,
+                    "sys_exit_splice",
+                    "syscalls",
+                    "sys_exit_splice",
+                );
         if sp_ok && (NR_SPLICE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SPLICE as u32);
             info!("  Attached: splice (opt-in via --enable-rich-sendfile)");
         }
     }
 
-    let mut tier2_bitmap: Array<_, u32> =
-        Array::try_from(bpf.map_mut("TIER2_BITMAP").unwrap())?;
+    let mut tier2_bitmap: Array<_, u32> = Array::try_from(bpf.map_mut("TIER2_BITMAP").unwrap())?;
 
     for nr in successful_syscalls {
         tier2_bitmap.set(nr, 1, 0)?;
@@ -187,17 +214,17 @@ pub fn load_and_attach(args: &Cli, usdt_selections: &[usdt::Selection]) -> Resul
         }
     }
 
+    let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections
         .iter()
-        .flat_map(|selection| usdt::attach_selected(&mut bpf, selection))
+        .flat_map(|selection| usdt::attach_selected(&mut bpf, selection, &mut usdt_links))
         .collect();
     info!("All BPF programs attached successfully");
-    Ok((bpf, usdt_diagnostics))
+    Ok((bpf, usdt_diagnostics, usdt_links))
 }
 
 fn populate_exclusion_bitmap(bpf: &mut aya::Ebpf) -> Result<()> {
-    let mut bitmap: Array<_, u32> =
-        Array::try_from(bpf.map_mut("EXCLUSION_BITMAP").unwrap())?;
+    let mut bitmap: Array<_, u32> = Array::try_from(bpf.map_mut("EXCLUSION_BITMAP").unwrap())?;
     for nr in EXCLUDED_SYSCALLS {
         if (*nr as u32) < BITMAP_SIZE as u32 {
             bitmap.set(*nr as u32, 1, 0)?;
@@ -230,12 +257,7 @@ fn attach_tracepoint(
     Ok(())
 }
 
-fn try_attach_tracepoint(
-    bpf: &mut aya::Ebpf,
-    prog_name: &str,
-    category: &str,
-    name: &str,
-) -> bool {
+fn try_attach_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, category: &str, name: &str) -> bool {
     match attach_tracepoint(bpf, prog_name, category, name) {
         Ok(()) => true,
         Err(e) => {
@@ -291,7 +313,11 @@ fn attach_tc_hooks(bpf: &mut aya::Ebpf) -> Result<()> {
                 .status();
             match status {
                 Ok(s) if s.success() => info!("  clsact qdisc added on {} (via tc command)", iface),
-                Ok(s) => warn!("tc qdisc add clsact on {}: exit code {:?} (may already exist)", iface, s.code()),
+                Ok(s) => warn!(
+                    "tc qdisc add clsact on {}: exit code {:?} (may already exist)",
+                    iface,
+                    s.code()
+                ),
                 Err(e) => warn!("tc command failed on {}: {}", iface, e),
             }
         }
@@ -335,12 +361,7 @@ fn attach_tc_hooks(bpf: &mut aya::Ebpf) -> Result<()> {
     Ok(())
 }
 
-fn attach_lsm(
-    bpf: &mut aya::Ebpf,
-    prog_name: &str,
-    hook_name: &str,
-    btf: &Btf,
-) -> Result<()> {
+fn attach_lsm(bpf: &mut aya::Ebpf, prog_name: &str, hook_name: &str, btf: &Btf) -> Result<()> {
     let program: &mut Lsm = bpf
         .program_mut(prog_name)
         .context(format!("LSM program {} not found", prog_name))?

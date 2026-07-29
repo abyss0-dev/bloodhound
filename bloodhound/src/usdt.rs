@@ -6,16 +6,18 @@
 //! or a memory-read rule.  Those are all collector metadata below.
 
 use std::{
-    fs,
+    ffi::CString,
+    fs, io,
+    os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
 };
 
 use anyhow::{anyhow, bail, Context, Result};
-use serde_json::{json, Value};
 use bloodhound_common::{
     EventKind, UsdtTrainingPeerPayload, UsdtTrainingShellCaptureErrorPayload,
     UsdtTrainingShellPayload,
 };
+use serde_json::{json, Value};
 
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 
@@ -63,23 +65,77 @@ impl Architecture {
 
 // These IDs are intentionally fixed with `-Wl,--build-id=0x...` in
 // e2e/fixtures/Makefile.  They are not values read from configuration.
-const TRAINING_SHELL_V3_BUILD_IDS: &[&str] =
-    &["11223344556677889900aabbccddeeff00112233"];
-const TRAINING_PEER_V1_BUILD_IDS: &[&str] =
-    &["44556677889900aabbccddeeff00112233445566"];
+const TRAINING_SHELL_V3_BUILD_IDS: &[&str] = &["11223344556677889900aabbccddeeff00112233"];
+const TRAINING_PEER_V1_BUILD_IDS: &[&str] = &["44556677889900aabbccddeeff00112233445566"];
 
 const TRAINING_SHELL_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata { name: "shell_pid", source_type: "u32", operand_form: "8@%rdi", output_type: "u32", maximum_size: None, required: true },
-    FieldMetadata { name: "command_id", source_type: "u64", operand_form: "8@%rsi", output_type: "u64", maximum_size: None, required: true },
-    FieldMetadata { name: "command_kind", source_type: "enum", operand_form: "8@%rdx", output_type: "enum", maximum_size: None, required: true },
-    FieldMetadata { name: "command_name", source_type: "utf8_pointer", operand_form: "8@%rcx", output_type: "utf8", maximum_size: Some(64), required: true },
-    FieldMetadata { name: "semantic_flags", source_type: "u32", operand_form: "8@%r8", output_type: "enum", maximum_size: None, required: true },
-    FieldMetadata { name: "exit_status", source_type: "i32", operand_form: "8@%r9", output_type: "i32", maximum_size: None, required: true },
+    FieldMetadata {
+        name: "shell_pid",
+        source_type: "u32",
+        operand_form: "8@%rdi",
+        output_type: "u32",
+        maximum_size: None,
+        required: true,
+    },
+    FieldMetadata {
+        name: "command_id",
+        source_type: "u64",
+        operand_form: "8@%rsi",
+        output_type: "u64",
+        maximum_size: None,
+        required: true,
+    },
+    FieldMetadata {
+        name: "command_kind",
+        source_type: "enum",
+        operand_form: "8@%rdx",
+        output_type: "enum",
+        maximum_size: None,
+        required: true,
+    },
+    FieldMetadata {
+        name: "command_name",
+        source_type: "utf8_pointer",
+        operand_form: "8@%rcx",
+        output_type: "utf8",
+        maximum_size: Some(64),
+        required: true,
+    },
+    FieldMetadata {
+        name: "semantic_flags",
+        source_type: "u32",
+        operand_form: "8@%r8",
+        output_type: "enum",
+        maximum_size: None,
+        required: true,
+    },
+    FieldMetadata {
+        name: "exit_status",
+        source_type: "i32",
+        operand_form: "8@%r9",
+        output_type: "i32",
+        maximum_size: None,
+        required: true,
+    },
 ];
 
 const TRAINING_PEER_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata { name: "task_id", source_type: "u64", operand_form: "8@%rdi", output_type: "u64", maximum_size: None, required: true },
-    FieldMetadata { name: "result", source_type: "enum", operand_form: "8@%rsi", output_type: "enum", maximum_size: None, required: true },
+    FieldMetadata {
+        name: "task_id",
+        source_type: "u64",
+        operand_form: "8@%rdi",
+        output_type: "u64",
+        maximum_size: None,
+        required: true,
+    },
+    FieldMetadata {
+        name: "result",
+        source_type: "enum",
+        operand_form: "8@%rsi",
+        output_type: "enum",
+        maximum_size: None,
+        required: true,
+    },
 ];
 
 const REGISTRY: &[CollectorMetadata] = &[
@@ -153,12 +209,19 @@ pub fn selection_failure_diagnostic(path: &Path, error: &anyhow::Error) -> Behav
 
 fn configured_collector_id(text: &str) -> Option<String> {
     text.lines().find_map(|raw_line| {
-        let line = raw_line.split_once('#').map_or(raw_line, |(before, _)| before).trim();
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before, _)| before)
+            .trim();
         let (key, value) = line.split_once('=')?;
         if key.trim() != "collector" {
             return None;
         }
-        value.trim().strip_prefix('"')?.strip_suffix('"').map(str::to_owned)
+        value
+            .trim()
+            .strip_prefix('"')?
+            .strip_suffix('"')
+            .map(str::to_owned)
     })
 }
 
@@ -167,7 +230,10 @@ pub fn parse_selection(text: &str) -> Result<Selection> {
     let mut enabled = None;
 
     for (line_no, raw_line) in text.lines().enumerate() {
-        let line = raw_line.split_once('#').map_or(raw_line, |(before, _)| before).trim();
+        let line = raw_line
+            .split_once('#')
+            .map_or(raw_line, |(before, _)| before)
+            .trim();
         if line.is_empty() {
             continue;
         }
@@ -288,6 +354,9 @@ pub struct StapsdtProbe {
     /// File offset required by the uprobe API, never a symbol or a config value.
     pub file_offset: u64,
     pub semaphore_address: u64,
+    /// File offset for Linux's uprobe ref-counter interface. `None` means the
+    /// static note does not require a semaphore.
+    pub semaphore_file_offset: Option<u32>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -299,7 +368,9 @@ pub struct VerifiedTarget {
 
 /// Validate path, architecture, Build ID and the collector's exact note ABI.
 /// No attachment can be attempted unless this returns a verified target.
-pub fn verify_target(metadata: &CollectorMetadata) -> std::result::Result<VerifiedTarget, ReasonCode> {
+pub fn verify_target(
+    metadata: &CollectorMetadata,
+) -> std::result::Result<VerifiedTarget, ReasonCode> {
     let path = PathBuf::from(metadata.target_path);
     let data = fs::read(&path).map_err(|_| ReasonCode::TargetBuildIdMismatch)?;
     let elf = ElfView::parse(&data).map_err(|_| ReasonCode::AbiIncompatible)?;
@@ -307,10 +378,16 @@ pub fn verify_target(metadata: &CollectorMetadata) -> std::result::Result<Verifi
         return Err(ReasonCode::UnsupportedArchitecture);
     }
     let build_id = elf.build_id().ok_or(ReasonCode::TargetBuildIdMismatch)?;
-    if !metadata.build_ids.iter().any(|expected| *expected == build_id) {
+    if !metadata
+        .build_ids
+        .iter()
+        .any(|expected| *expected == build_id)
+    {
         return Err(ReasonCode::TargetBuildIdMismatch);
     }
-    let probes = elf.stapsdt_probes().map_err(|_| ReasonCode::AbiIncompatible)?;
+    let probes = elf
+        .stapsdt_probes()
+        .map_err(|_| ReasonCode::AbiIncompatible)?;
     let matching: Vec<_> = probes
         .into_iter()
         .filter(|probe| probe.provider == metadata.provider && probe.name == metadata.probe)
@@ -318,15 +395,23 @@ pub fn verify_target(metadata: &CollectorMetadata) -> std::result::Result<Verifi
     if matching.is_empty() {
         return Err(ReasonCode::ProbeNotFound);
     }
-    if matching.iter().any(|probe| probe.operands != metadata.operands) {
+    if matching
+        .iter()
+        .any(|probe| probe.operands != metadata.operands)
+    {
         return Err(ReasonCode::AbiIncompatible);
     }
-    if matching.iter().any(|probe| probe.semaphore_address != 0) {
-        // Aya 0.13 cannot supply a ref_ctr_offset through its safe UProbe API.
-        // Failing closed is required; do not attach and pretend this is active.
+    if matching
+        .iter()
+        .any(|probe| probe.semaphore_address != 0 && probe.semaphore_file_offset.is_none())
+    {
         return Err(ReasonCode::SemaphoreUnavailable);
     }
-    Ok(VerifiedTarget { path, build_id, probes: matching })
+    Ok(VerifiedTarget {
+        path,
+        build_id,
+        probes: matching,
+    })
 }
 
 /// Attach exactly the precompiled program selected by trusted configuration.
@@ -335,23 +420,56 @@ pub fn verify_target(metadata: &CollectorMetadata) -> std::result::Result<Verifi
 /// PID to Aya so a verified executable is observed for every process that
 /// executes it. Links remain owned by Aya's `Ebpf` instance and are therefore
 /// torn down on daemon shutdown.
-pub fn attach_selected(bpf: &mut aya::Ebpf, selection: &Selection) -> Vec<BehaviorEvent> {
+/// Owns fd-based uprobe links whose reference counters are maintained by the
+/// kernel. Dropping an fd detaches the link and decrements its USDT semaphore.
+#[derive(Default)]
+pub struct AttachmentLinks {
+    semaphore_links: Vec<OwnedFd>,
+}
+
+impl AttachmentLinks {
+    fn checkpoint(&self) -> usize {
+        self.semaphore_links.len()
+    }
+    fn rollback(&mut self, checkpoint: usize) {
+        self.semaphore_links.truncate(checkpoint);
+    }
+}
+
+pub fn attach_selected(
+    bpf: &mut aya::Ebpf,
+    selection: &Selection,
+    links: &mut AttachmentLinks,
+) -> Vec<BehaviorEvent> {
     if !selection.enabled {
-        return vec![diagnostic(&selection.collector_id, ReasonCode::Disabled, None)];
+        return vec![diagnostic(
+            &selection.collector_id,
+            ReasonCode::Disabled,
+            None,
+        )];
     }
     let Some(metadata) = collector(&selection.collector_id) else {
-        return vec![diagnostic(&selection.collector_id, ReasonCode::UnknownCollector, None)];
+        return vec![diagnostic(
+            &selection.collector_id,
+            ReasonCode::UnknownCollector,
+            None,
+        )];
     };
     let target = match verify_target(metadata) {
         Ok(target) => target,
-        Err(reason) => return vec![diagnostic(
-            metadata.id,
-            reason,
-            Some(json!({"target_path": metadata.target_path})),
-        )],
+        Err(reason) => {
+            return vec![diagnostic(
+                metadata.id,
+                reason,
+                Some(json!({"target_path": metadata.target_path})),
+            )]
+        }
     };
     let attach_result: Result<()> = (|| {
+        use aya::programs::uprobe::UProbeLinkId;
         use aya::programs::UProbe;
+        let semaphore_checkpoint = links.checkpoint();
+        let mut aya_links: Vec<(String, UProbeLinkId)> = Vec::new();
         if target.probes.len() > metadata.maximum_attach_points {
             bail!("collector has more static locations than its compiled attach-point programs");
         }
@@ -363,10 +481,40 @@ pub fn attach_selected(bpf: &mut aya::Ebpf, selection: &Selection) -> Vec<Behavi
             };
             let program: &mut UProbe = bpf
                 .program_mut(&program_name)
-                .with_context(|| format!("USDT program {program_name} is not in the embedded object"))?
+                .with_context(|| {
+                    format!("USDT program {program_name} is not in the embedded object")
+                })?
                 .try_into()?;
             program.load()?;
-            program.attach(None, probe.file_offset, &target.path, None)?;
+            let attached: Result<()> = if let Some(semaphore_offset) = probe.semaphore_file_offset {
+                attach_uprobe_with_semaphore(
+                    program,
+                    &target.path,
+                    probe.file_offset,
+                    semaphore_offset,
+                )
+                .map(|fd| {
+                    links.semaphore_links.push(fd);
+                })
+            } else {
+                program
+                    .attach(None, probe.file_offset, &target.path, None)
+                    .map(|link_id| {
+                        aya_links.push((program_name.clone(), link_id));
+                    })
+                    .map_err(Into::into)
+            };
+            if let Err(error) = attached {
+                for (attached_program, link_id) in aya_links.into_iter().rev() {
+                    if let Some(program) = bpf.program_mut(&attached_program) {
+                        if let Ok(program) = <&mut UProbe>::try_from(program) {
+                            let _ = program.detach(link_id);
+                        }
+                    }
+                }
+                links.rollback(semaphore_checkpoint);
+                return Err(error);
+            }
         }
         Ok(())
     })();
@@ -391,8 +539,92 @@ pub fn attach_selected(bpf: &mut aya::Ebpf, selection: &Selection) -> Vec<Behavi
     }
 }
 
+// Aya 0.13's safe UProbe API does not expose the kernel's `ref_ctr_offset`
+// field. Linux encodes it in config[32..63] for the fd-based uprobe PMU. Keep
+// this minimal adapter here so the rest of the collector stays on Aya's normal
+// program lifecycle, while the kernel owns the increment/decrement semantics.
+#[repr(C)]
+#[derive(Default)]
+struct PerfEventAttr {
+    type_: u32,
+    size: u32,
+    config: u64,
+    sample_period: u64,
+    sample_type: u64,
+    read_format: u64,
+    flags: u64,
+    wakeup_events: u32,
+    bp_type: u32,
+    config1: u64,
+    config2: u64,
+}
+
+const PERF_FLAG_FD_CLOEXEC: u64 = 1 << 3;
+const PERF_EVENT_IOC_ENABLE: std::ffi::c_ulong = 0x2400;
+const PERF_EVENT_IOC_SET_BPF: std::ffi::c_ulong = 0x4004_2408;
+// Bloodhound's collector and fixture are x86_64-only. Keeping this syscall
+// declaration local avoids turning Aya's transitive libc dependency into a
+// second public dependency merely to fill the API gap in Aya 0.13.
+const SYS_PERF_EVENT_OPEN_X86_64: std::ffi::c_long = 298;
+
+unsafe extern "C" {
+    fn syscall(number: std::ffi::c_long, ...) -> std::ffi::c_long;
+    fn ioctl(fd: std::ffi::c_int, request: std::ffi::c_ulong, ...) -> std::ffi::c_int;
+}
+
+fn attach_uprobe_with_semaphore(
+    program: &mut aya::programs::UProbe,
+    target: &Path,
+    probe_offset: u64,
+    semaphore_offset: u32,
+) -> Result<OwnedFd> {
+    let pmu_type = fs::read_to_string("/sys/bus/event_source/devices/uprobe/type")
+        .context("reading uprobe PMU type")?
+        .trim()
+        .parse::<u32>()
+        .context("parsing uprobe PMU type")?;
+    let target = CString::new(target.as_os_str().as_encoded_bytes())
+        .context("encoding verified USDT target path")?;
+    let attr = PerfEventAttr {
+        type_: pmu_type,
+        size: std::mem::size_of::<PerfEventAttr>() as u32,
+        config: u64::from(semaphore_offset) << 32,
+        config1: target.as_ptr() as u64,
+        config2: probe_offset,
+        ..Default::default()
+    };
+    let raw_fd = unsafe {
+        syscall(
+            SYS_PERF_EVENT_OPEN_X86_64,
+            &attr,
+            -1_i32,
+            0_i32,
+            -1_i32,
+            PERF_FLAG_FD_CLOEXEC,
+        )
+    };
+    if raw_fd < 0 {
+        return Err(io::Error::last_os_error()).context("opening semaphore-backed uprobe");
+    }
+    let fd = unsafe { OwnedFd::from_raw_fd(raw_fd as i32) };
+    let program_fd = program.fd()?.as_fd().as_raw_fd();
+    if unsafe { ioctl(fd.as_raw_fd(), PERF_EVENT_IOC_SET_BPF, program_fd) } < 0 {
+        return Err(io::Error::last_os_error())
+            .context("attaching BPF program to semaphore-backed uprobe");
+    }
+    if unsafe { ioctl(fd.as_raw_fd(), PERF_EVENT_IOC_ENABLE, 0) } < 0 {
+        return Err(io::Error::last_os_error()).context("enabling semaphore-backed uprobe");
+    }
+    Ok(fd)
+}
+
 /// Decode a fixed, collector-owned byte field into the canonical safe form.
-pub fn bounded_bytes(bytes: &[u8], capture_limit: usize, observed_length: Option<usize>, truncated: bool) -> Value {
+pub fn bounded_bytes(
+    bytes: &[u8],
+    capture_limit: usize,
+    observed_length: Option<usize>,
+    truncated: bool,
+) -> Value {
     use base64::{engine::general_purpose::STANDARD, Engine as _};
     json!({
         "base64": STANDARD.encode(bytes),
@@ -402,7 +634,11 @@ pub fn bounded_bytes(bytes: &[u8], capture_limit: usize, observed_length: Option
     })
 }
 
-pub fn bounded_utf8(bytes: &[u8], capture_limit: usize, truncated: bool) -> std::result::Result<Value, ReasonCode> {
+pub fn bounded_utf8(
+    bytes: &[u8],
+    capture_limit: usize,
+    truncated: bool,
+) -> std::result::Result<Value, ReasonCode> {
     let value = std::str::from_utf8(bytes).map_err(|_| ReasonCode::AbiIncompatible)?;
     Ok(json!({"value": value, "capture_limit": capture_limit, "truncated": truncated}))
 }
@@ -410,7 +646,10 @@ pub fn bounded_utf8(bytes: &[u8], capture_limit: usize, truncated: bool) -> std:
 /// Convert a collector-owned fixed ring-buffer payload to a canonical event.
 /// The core deserializer delegates here generically and contains no collector
 /// IDs, provider/probe names, or field definitions.
-pub fn decode_payload(kind: EventKind, payload: &[u8]) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+pub fn decode_payload(
+    kind: EventKind,
+    payload: &[u8],
+) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
     match kind {
         EventKind::UsdtTrainingShellV3 => decode_training_shell_payload(payload),
         EventKind::UsdtTrainingPeerV1 => decode_training_peer_payload(payload),
@@ -419,7 +658,9 @@ pub fn decode_payload(kind: EventKind, payload: &[u8]) -> Result<(String, String
     }
 }
 
-fn decode_training_shell_capture_error(payload: &[u8]) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_shell_capture_error(
+    payload: &[u8],
+) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
     if payload.len() != UsdtTrainingShellCaptureErrorPayload::SIZE {
         bail!("USDT training-shell capture-error payload has an invalid size");
     }
@@ -449,18 +690,22 @@ fn decode_training_shell_capture_error(payload: &[u8]) -> Result<(String, String
     ))
 }
 
-fn decode_training_shell_payload(payload: &[u8]) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_shell_payload(
+    payload: &[u8],
+) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
     if payload.len() < UsdtTrainingShellPayload::SIZE {
         bail!("USDT training-shell payload too short");
     }
-    let fixed = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingShellPayload) };
+    let fixed =
+        unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingShellPayload) };
     let name_end = UsdtTrainingShellPayload::SIZE
         .checked_add(fixed.command_name_len as usize)
         .ok_or_else(|| anyhow!("USDT command-name length overflow"))?;
-    let command_name = payload.get(UsdtTrainingShellPayload::SIZE..name_end)
+    let command_name = payload
+        .get(UsdtTrainingShellPayload::SIZE..name_end)
         .ok_or_else(|| anyhow!("USDT command-name exceeds payload"))?;
-    let command_name = std::str::from_utf8(command_name)
-        .map_err(|_| anyhow!("USDT command-name is not UTF-8"))?;
+    let command_name =
+        std::str::from_utf8(command_name).map_err(|_| anyhow!("USDT command-name is not UTF-8"))?;
     let command_name_bytes = {
         use base64::{engine::general_purpose::STANDARD, Engine as _};
         STANDARD.encode(command_name.as_bytes())
@@ -493,11 +738,14 @@ fn decode_training_shell_payload(payload: &[u8]) -> Result<(String, String, Stri
     ))
 }
 
-fn decode_training_peer_payload(payload: &[u8]) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_peer_payload(
+    payload: &[u8],
+) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
     if payload.len() != UsdtTrainingPeerPayload::SIZE {
         bail!("USDT training-peer payload has invalid length");
     }
-    let fixed = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingPeerPayload) };
+    let fixed =
+        unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingPeerPayload) };
     Ok((
         "USDT".into(),
         "abyss0_peer.task_finished".into(),
@@ -533,32 +781,105 @@ impl<'a> ElfView<'a> {
             bail!("not an ELF file");
         }
         let class = data[4];
-        let little_endian = match data[5] { 1 => true, 2 => false, _ => bail!("unknown ELF endian") };
-        if !matches!(class, 1 | 2) { bail!("unknown ELF class"); }
+        let little_endian = match data[5] {
+            1 => true,
+            2 => false,
+            _ => bail!("unknown ELF endian"),
+        };
+        if !matches!(class, 1 | 2) {
+            bail!("unknown ELF class");
+        }
         let at = |offset: usize, width: usize| -> Result<&[u8]> {
-            data.get(offset..offset + width).ok_or_else(|| anyhow!("truncated ELF header"))
+            data.get(offset..offset + width)
+                .ok_or_else(|| anyhow!("truncated ELF header"))
         };
         let u16_at = |offset| read_u16(at(offset, 2)?, little_endian);
         let u32_at = |offset| read_u32(at(offset, 4)?, little_endian);
         let u64_at = |offset| read_u64(at(offset, 8)?, little_endian);
-        let (program_offset, section_offset, program_size, program_count, section_size, section_count, section_strings) = if class == 2 {
-            (u64_at(32)?, u64_at(40)?, u16_at(54)?, u16_at(56)?, u16_at(58)?, u16_at(60)?, u16_at(62)?)
+        let (
+            program_offset,
+            section_offset,
+            program_size,
+            program_count,
+            section_size,
+            section_count,
+            section_strings,
+        ) = if class == 2 {
+            (
+                u64_at(32)?,
+                u64_at(40)?,
+                u16_at(54)?,
+                u16_at(56)?,
+                u16_at(58)?,
+                u16_at(60)?,
+                u16_at(62)?,
+            )
         } else {
-            (u32_at(28)? as u64, u32_at(32)? as u64, u16_at(42)?, u16_at(44)?, u16_at(46)?, u16_at(48)?, u16_at(50)?)
+            (
+                u32_at(28)? as u64,
+                u32_at(32)? as u64,
+                u16_at(42)?,
+                u16_at(44)?,
+                u16_at(46)?,
+                u16_at(48)?,
+                u16_at(50)?,
+            )
         };
-        Ok(Self { data, class, little_endian, machine: u16_at(18)?, section_offset, section_size, section_count, section_strings, program_offset, program_size, program_count })
+        Ok(Self {
+            data,
+            class,
+            little_endian,
+            machine: u16_at(18)?,
+            section_offset,
+            section_size,
+            section_count,
+            section_strings,
+            program_offset,
+            program_size,
+            program_count,
+        })
     }
 
     fn section(&self, index: u16) -> Result<Section> {
-        if index >= self.section_count || self.section_size == 0 { bail!("section index out of range"); }
-        let offset = self.section_offset.checked_add(u64::from(index) * u64::from(self.section_size)).ok_or_else(|| anyhow!("section table overflow"))? as usize;
-        let bytes = self.data.get(offset..offset + self.section_size as usize).ok_or_else(|| anyhow!("truncated section table"))?;
-        let u32_at = |offset| read_u32(bytes.get(offset..offset + 4).ok_or_else(|| anyhow!("truncated section"))?, self.little_endian);
-        let u64_at = |offset| read_u64(bytes.get(offset..offset + 8).ok_or_else(|| anyhow!("truncated section"))?, self.little_endian);
+        if index >= self.section_count || self.section_size == 0 {
+            bail!("section index out of range");
+        }
+        let offset = self
+            .section_offset
+            .checked_add(u64::from(index) * u64::from(self.section_size))
+            .ok_or_else(|| anyhow!("section table overflow"))? as usize;
+        let bytes = self
+            .data
+            .get(offset..offset + self.section_size as usize)
+            .ok_or_else(|| anyhow!("truncated section table"))?;
+        let u32_at = |offset| {
+            read_u32(
+                bytes
+                    .get(offset..offset + 4)
+                    .ok_or_else(|| anyhow!("truncated section"))?,
+                self.little_endian,
+            )
+        };
+        let u64_at = |offset| {
+            read_u64(
+                bytes
+                    .get(offset..offset + 8)
+                    .ok_or_else(|| anyhow!("truncated section"))?,
+                self.little_endian,
+            )
+        };
         if self.class == 2 {
-            Ok(Section { name: u32_at(0)?, offset: u64_at(24)?, size: u64_at(32)? })
+            Ok(Section {
+                name: u32_at(0)?,
+                offset: u64_at(24)?,
+                size: u64_at(32)?,
+            })
         } else {
-            Ok(Section { name: u32_at(0)?, offset: u32_at(16)? as u64, size: u32_at(20)? as u64 })
+            Ok(Section {
+                name: u32_at(0)?,
+                offset: u32_at(16)? as u64,
+                size: u32_at(20)? as u64,
+            })
         }
     }
 
@@ -576,21 +897,35 @@ impl<'a> ElfView<'a> {
     }
 
     fn build_id(&self) -> Option<String> {
-        self.section_named(".note.gnu.build-id").ok().flatten().and_then(|notes| {
-            parse_notes(notes, self.little_endian).ok()?.into_iter().find_map(|note| {
-                (note.name == "GNU" && note.kind == 3).then(|| hex(&note.desc))
+        self.section_named(".note.gnu.build-id")
+            .ok()
+            .flatten()
+            .and_then(|notes| {
+                parse_notes(notes, self.little_endian)
+                    .ok()?
+                    .into_iter()
+                    .find_map(|note| {
+                        (note.name == "GNU" && note.kind == 3).then(|| hex(&note.desc))
+                    })
             })
-        })
     }
 
     fn stapsdt_probes(&self) -> Result<Vec<StapsdtProbe>> {
-        let notes = self.section_named(".note.stapsdt")?.ok_or_else(|| anyhow!("no .note.stapsdt"))?;
-        parse_notes(notes, self.little_endian)?.into_iter().filter(|note| note.name == "stapsdt").map(|note| self.parse_stapsdt(note.desc)).collect()
+        let notes = self
+            .section_named(".note.stapsdt")?
+            .ok_or_else(|| anyhow!("no .note.stapsdt"))?;
+        parse_notes(notes, self.little_endian)?
+            .into_iter()
+            .filter(|note| note.name == "stapsdt")
+            .map(|note| self.parse_stapsdt(note.desc))
+            .collect()
     }
 
     fn parse_stapsdt(&self, desc: &'a [u8]) -> Result<StapsdtProbe> {
         let width = if self.class == 2 { 8 } else { 4 };
-        if desc.len() < width * 3 { bail!("short stapsdt descriptor"); }
+        if desc.len() < width * 3 {
+            bail!("short stapsdt descriptor");
+        }
         let number = |offset| {
             if width == 8 {
                 read_u64(&desc[offset..offset + 8], self.little_endian)
@@ -606,19 +941,50 @@ impl<'a> ElfView<'a> {
         let (name, rest) = take_c_string(rest)?;
         let (operands, _) = take_c_string(rest)?;
         let file_offset = self.virtual_to_file_offset(location)?;
-        Ok(StapsdtProbe { provider: provider.into(), name: name.into(), operands: operands.into(), file_offset, semaphore_address })
+        let semaphore_file_offset = if semaphore_address == 0 {
+            None
+        } else {
+            Some(
+                u32::try_from(self.virtual_to_file_offset(semaphore_address)?)
+                    .map_err(|_| anyhow!("USDT semaphore offset exceeds kernel uprobe ABI"))?,
+            )
+        };
+        Ok(StapsdtProbe {
+            provider: provider.into(),
+            name: name.into(),
+            operands: operands.into(),
+            file_offset,
+            semaphore_address,
+            semaphore_file_offset,
+        })
     }
 
     fn virtual_to_file_offset(&self, address: u64) -> Result<u64> {
         for index in 0..self.program_count {
-            let offset = self.program_offset.checked_add(u64::from(index) * u64::from(self.program_size)).ok_or_else(|| anyhow!("program table overflow"))? as usize;
-            let entry = self.data.get(offset..offset + self.program_size as usize).ok_or_else(|| anyhow!("truncated program table"))?;
+            let offset =
+                self.program_offset
+                    .checked_add(u64::from(index) * u64::from(self.program_size))
+                    .ok_or_else(|| anyhow!("program table overflow"))? as usize;
+            let entry = self
+                .data
+                .get(offset..offset + self.program_size as usize)
+                .ok_or_else(|| anyhow!("truncated program table"))?;
             let typ = read_u32(&entry[..4], self.little_endian)?;
-            if typ != 1 { continue; } // PT_LOAD
+            if typ != 1 {
+                continue;
+            } // PT_LOAD
             let (file_offset, virtual_address, file_size) = if self.class == 2 {
-                (read_u64(&entry[8..16], self.little_endian)?, read_u64(&entry[16..24], self.little_endian)?, read_u64(&entry[32..40], self.little_endian)?)
+                (
+                    read_u64(&entry[8..16], self.little_endian)?,
+                    read_u64(&entry[16..24], self.little_endian)?,
+                    read_u64(&entry[32..40], self.little_endian)?,
+                )
             } else {
-                (read_u32(&entry[4..8], self.little_endian)? as u64, read_u32(&entry[8..12], self.little_endian)? as u64, read_u32(&entry[16..20], self.little_endian)? as u64)
+                (
+                    read_u32(&entry[4..8], self.little_endian)? as u64,
+                    read_u32(&entry[8..12], self.little_endian)? as u64,
+                    read_u32(&entry[16..20], self.little_endian)? as u64,
+                )
             };
             if address >= virtual_address && address < virtual_address.saturating_add(file_size) {
                 return Ok(file_offset + address - virtual_address);
@@ -628,23 +994,43 @@ impl<'a> ElfView<'a> {
     }
 }
 
-struct Section { name: u32, offset: u64, size: u64 }
-struct Note<'a> { name: &'a str, kind: u32, desc: &'a [u8] }
+struct Section {
+    name: u32,
+    offset: u64,
+    size: u64,
+}
+struct Note<'a> {
+    name: &'a str,
+    kind: u32,
+    desc: &'a [u8],
+}
 
 fn parse_notes(data: &[u8], little: bool) -> Result<Vec<Note<'_>>> {
     let mut notes = Vec::new();
     let mut offset = 0usize;
     while offset < data.len() {
-        if data.len() - offset < 12 { bail!("truncated note header"); }
+        if data.len() - offset < 12 {
+            bail!("truncated note header");
+        }
         let namesz = read_u32(&data[offset..offset + 4], little)? as usize;
         let descsz = read_u32(&data[offset + 4..offset + 8], little)? as usize;
         let kind = read_u32(&data[offset + 8..offset + 12], little)?;
         offset += 12;
-        let name_end = offset.checked_add(namesz).ok_or_else(|| anyhow!("note name overflow"))?;
-        let name = c_string(data.get(offset..name_end).ok_or_else(|| anyhow!("truncated note name"))?).ok_or_else(|| anyhow!("note name is not UTF-8"))?;
+        let name_end = offset
+            .checked_add(namesz)
+            .ok_or_else(|| anyhow!("note name overflow"))?;
+        let name = c_string(
+            data.get(offset..name_end)
+                .ok_or_else(|| anyhow!("truncated note name"))?,
+        )
+        .ok_or_else(|| anyhow!("note name is not UTF-8"))?;
         offset = align4(name_end);
-        let desc_end = offset.checked_add(descsz).ok_or_else(|| anyhow!("note descriptor overflow"))?;
-        let desc = data.get(offset..desc_end).ok_or_else(|| anyhow!("truncated note descriptor"))?;
+        let desc_end = offset
+            .checked_add(descsz)
+            .ok_or_else(|| anyhow!("note descriptor overflow"))?;
+        let desc = data
+            .get(offset..desc_end)
+            .ok_or_else(|| anyhow!("truncated note descriptor"))?;
         offset = align4(desc_end);
         notes.push(Note { name, kind, desc });
     }
@@ -653,16 +1039,52 @@ fn parse_notes(data: &[u8], little: bool) -> Result<Vec<Note<'_>>> {
 
 fn slice_at(data: &[u8], offset: u64, len: u64) -> Result<&[u8]> {
     let start = usize::try_from(offset).map_err(|_| anyhow!("ELF offset too large"))?;
-    let end = start.checked_add(usize::try_from(len).map_err(|_| anyhow!("ELF length too large"))?).ok_or_else(|| anyhow!("ELF range overflow"))?;
-    data.get(start..end).ok_or_else(|| anyhow!("truncated ELF data"))
+    let end = start
+        .checked_add(usize::try_from(len).map_err(|_| anyhow!("ELF length too large"))?)
+        .ok_or_else(|| anyhow!("ELF range overflow"))?;
+    data.get(start..end)
+        .ok_or_else(|| anyhow!("truncated ELF data"))
 }
-fn align4(value: usize) -> usize { (value + 3) & !3 }
-fn c_string(bytes: &[u8]) -> Option<&str> { std::str::from_utf8(bytes.split(|byte| *byte == 0).next()?).ok() }
-fn take_c_string(bytes: &[u8]) -> Result<(&str, &[u8])> { let end = bytes.iter().position(|byte| *byte == 0).ok_or_else(|| anyhow!("unterminated USDT string"))?; Ok((std::str::from_utf8(&bytes[..end])?, &bytes[end + 1..])) }
-fn hex(bytes: &[u8]) -> String { bytes.iter().map(|byte| format!("{byte:02x}")).collect() }
-fn read_u16(bytes: &[u8], little: bool) -> Result<u16> { let array: [u8; 2] = bytes.try_into().map_err(|_| anyhow!("short u16"))?; Ok(if little { u16::from_le_bytes(array) } else { u16::from_be_bytes(array) }) }
-fn read_u32(bytes: &[u8], little: bool) -> Result<u32> { let array: [u8; 4] = bytes.try_into().map_err(|_| anyhow!("short u32"))?; Ok(if little { u32::from_le_bytes(array) } else { u32::from_be_bytes(array) }) }
-fn read_u64(bytes: &[u8], little: bool) -> Result<u64> { let array: [u8; 8] = bytes.try_into().map_err(|_| anyhow!("short u64"))?; Ok(if little { u64::from_le_bytes(array) } else { u64::from_be_bytes(array) }) }
+fn align4(value: usize) -> usize {
+    (value + 3) & !3
+}
+fn c_string(bytes: &[u8]) -> Option<&str> {
+    std::str::from_utf8(bytes.split(|byte| *byte == 0).next()?).ok()
+}
+fn take_c_string(bytes: &[u8]) -> Result<(&str, &[u8])> {
+    let end = bytes
+        .iter()
+        .position(|byte| *byte == 0)
+        .ok_or_else(|| anyhow!("unterminated USDT string"))?;
+    Ok((std::str::from_utf8(&bytes[..end])?, &bytes[end + 1..]))
+}
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+fn read_u16(bytes: &[u8], little: bool) -> Result<u16> {
+    let array: [u8; 2] = bytes.try_into().map_err(|_| anyhow!("short u16"))?;
+    Ok(if little {
+        u16::from_le_bytes(array)
+    } else {
+        u16::from_be_bytes(array)
+    })
+}
+fn read_u32(bytes: &[u8], little: bool) -> Result<u32> {
+    let array: [u8; 4] = bytes.try_into().map_err(|_| anyhow!("short u32"))?;
+    Ok(if little {
+        u32::from_le_bytes(array)
+    } else {
+        u32::from_be_bytes(array)
+    })
+}
+fn read_u64(bytes: &[u8], little: bool) -> Result<u64> {
+    let array: [u8; 8] = bytes.try_into().map_err(|_| anyhow!("short u64"))?;
+    Ok(if little {
+        u64::from_le_bytes(array)
+    } else {
+        u64::from_be_bytes(array)
+    })
+}
 
 #[cfg(test)]
 mod tests {
@@ -671,17 +1093,66 @@ mod tests {
     #[test]
     fn registry_has_two_distinct_real_collectors() {
         assert_eq!(registered_collectors().len(), 2);
-        assert_ne!(registered_collectors()[0].provider, registered_collectors()[1].provider);
-        assert_ne!(registered_collectors()[0].probe, registered_collectors()[1].probe);
+        assert_ne!(
+            registered_collectors()[0].provider,
+            registered_collectors()[1].provider
+        );
+        assert_ne!(
+            registered_collectors()[0].probe,
+            registered_collectors()[1].probe
+        );
     }
 
     #[test]
     fn selection_has_no_escape_hatches() {
-        let parsed = parse_selection("collector = \"training-shell-v3\"\nenabled = true\n").unwrap();
+        let parsed =
+            parse_selection("collector = \"training-shell-v3\"\nenabled = true\n").unwrap();
         assert_eq!(parsed.collector_id, TRAINING_SHELL_V3_ID);
-        for forbidden in ["bpf_object", "offset", "provider", "probe", "arguments", "field_mapping", "native_code"] {
-            let source = format!("collector = \"training-shell-v3\"\nenabled = true\n{forbidden} = \"no\"\n");
-            assert!(parse_selection(&source).is_err(), "{forbidden} must fail closed");
+        for forbidden in [
+            "bpf_object",
+            "offset",
+            "provider",
+            "probe",
+            "arguments",
+            "field_mapping",
+            "native_code",
+        ] {
+            let source = format!(
+                "collector = \"training-shell-v3\"\nenabled = true\n{forbidden} = \"no\"\n"
+            );
+            assert!(
+                parse_selection(&source).is_err(),
+                "{forbidden} must fail closed"
+            );
+        }
+    }
+
+    #[test]
+    fn every_rejected_selection_has_one_bounded_diagnostic() {
+        for forbidden in [
+            "bpf_object",
+            "offset",
+            "provider",
+            "probe",
+            "arguments",
+            "field_mapping",
+            "native_code",
+        ] {
+            let source = format!(
+                "collector = \"training-shell-v3\"\nenabled = true\n{forbidden} = \"no\"\n"
+            );
+            let error = parse_selection(&source).unwrap_err();
+            let path = std::env::temp_dir().join(format!(
+                "bloodhound-usdt-selection-{forbidden}-{}",
+                std::process::id()
+            ));
+            fs::write(&path, source).unwrap();
+            let diagnostic = selection_failure_diagnostic(&path, &error);
+            fs::remove_file(&path).unwrap();
+            let args = diagnostic.args.unwrap();
+            assert_eq!(args["collector_id"], TRAINING_SHELL_V3_ID);
+            assert_eq!(args["reason_code"], ReasonCode::AbiIncompatible.as_str());
+            assert_eq!(args.as_object().unwrap().len(), 2);
         }
     }
 
@@ -745,7 +1216,8 @@ mod tests {
             .to_vec()
         };
         payload.extend_from_slice(b"echo");
-        let (_, name, _, args, _) = decode_payload(EventKind::UsdtTrainingShellV3, &payload).unwrap();
+        let (_, name, _, args, _) =
+            decode_payload(EventKind::UsdtTrainingShellV3, &payload).unwrap();
         assert_eq!(name, "abyss0_shell.simple_command_completed");
         let args = args.unwrap();
         assert_eq!(args["attach_point_id"], 3);
@@ -769,13 +1241,19 @@ mod tests {
         };
         let (event_type, name, layer, args, _) =
             decode_payload(EventKind::UsdtTrainingShellV3CaptureError, payload).unwrap();
-        assert_eq!((event_type.as_str(), name.as_str(), layer.as_str()), ("DIAGNOSTIC", "usdt.collector", "behavior"));
-        assert_eq!(args.unwrap(), json!({
-            "collector_id": TRAINING_SHELL_V3_ID,
-            "reason_code": "abi_incompatible",
-            "attach_point_id": 2,
-            "argument": "command_name",
-            "read_error_code": "unreadable_user_memory",
-        }));
+        assert_eq!(
+            (event_type.as_str(), name.as_str(), layer.as_str()),
+            ("DIAGNOSTIC", "usdt.collector", "behavior")
+        );
+        assert_eq!(
+            args.unwrap(),
+            json!({
+                "collector_id": TRAINING_SHELL_V3_ID,
+                "reason_code": "abi_incompatible",
+                "attach_point_id": 2,
+                "argument": "command_name",
+                "read_error_code": "unreadable_user_memory",
+            })
+        );
     }
 }

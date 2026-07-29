@@ -37,8 +37,14 @@ Before attachment Bloodhound reads only the configured target path and checks:
 1. ELF architecture;
 2. GNU Build ID against the collector's fixed allowlist;
 3. provider/probe and declared operands from `.note.stapsdt`;
-4. the absence of a semaphore that the current Aya attachment API cannot
-   safely acquire and release.
+4. each static note's semaphore, when present, has a file offset representable
+   by Linux's fd-based uprobe PMU.
+
+Semaphore-backed locations use the kernel `ref_ctr_offset` interface. The
+kernel increments the fixture's reference count only after the link is live
+and decrements it when the link fd is closed during shutdown or attachment
+rollback. Aya owns ordinary uprobe links; Bloodhound owns only these additional
+fd-based links because Aya 0.13 does not expose `ref_ctr_offset`.
 
 No function-symbol fallback, runtime DSO scan, PID filter, or config-provided
 offset is used. A failed check emits a bounded `DIAGNOSTIC` event with
