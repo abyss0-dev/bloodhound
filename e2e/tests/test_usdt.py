@@ -42,9 +42,10 @@ def _bpf_program_run_count(ssh_cmd, name_prefix):
 
     result = ssh_cmd("bpftool -j prog show", user="root")
     assert result.returncode == 0, result.stderr
+    programs = json.loads(result.stdout)
     matches = [
         program
-        for program in json.loads(result.stdout)
+        for program in programs
         if program.get("name", "").startswith(name_prefix)
     ]
     assert len(matches) == 1, programs
@@ -322,10 +323,10 @@ class TestTrustedUsdtCollectors:
             "/opt/bloodhound/usdt-fixtures/training-shell-v3-semaphore"
         ) as fresh_events:
             wait_for_usdt_daemon()
-            before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_s")
+            before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_shell_v3")
             result = ssh_cmd(SHELL_TARGET)
             assert result.returncode == 0, result.stderr
-            assert _bpf_program_run_count(ssh_cmd, "usdt_training_s") > before_runs, (
+            assert _bpf_program_run_count(ssh_cmd, "usdt_training_shell_v3") > before_runs, (
                 "semaphore-backed training-shell-v3 uprobe did not execute when its static probe fired"
             )
             events = wait_for_matching_events(
