@@ -7,6 +7,8 @@ records, never by a fixed post-restart delay.
 
 from contextlib import contextmanager
 
+import json
+
 import pytest
 
 from helpers import assert_event_exists, validate_all_events
@@ -33,6 +35,20 @@ def _diagnostics(events, collector_id, reason_code):
         and event.get("args", {}).get("collector_id") == collector_id
         and event.get("args", {}).get("reason_code") == reason_code
     ]
+
+
+def _bpf_program_run_count(ssh_cmd, name_prefix):
+    """Read the one loaded collector program's kernel run counter."""
+
+    result = ssh_cmd("bpftool -j prog show", user="root")
+    assert result.returncode == 0, result.stderr
+    matches = [
+        program
+        for program in json.loads(result.stdout)
+        if program.get("name", "").startswith(name_prefix)
+    ]
+    assert len(matches) == 1, matches
+    return matches[0]["run_cnt"]
 
 
 @pytest.fixture
@@ -187,8 +203,12 @@ class TestTrustedUsdtCollectors:
             "training-peer-v1 attachment failed before the fixture executed:\n"
             f"{journal.stdout}"
         )
+        before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_p")
         result = ssh_cmd("/opt/bloodhound/usdt-fixtures/training-peer-v1")
         assert result.returncode == 0, result.stderr
+        assert _bpf_program_run_count(ssh_cmd, "usdt_training_p") > before_runs, (
+            "training-peer-v1 uprobe did not execute when its static probe fired"
+        )
 
         events = wait_for_matching_events(
             bloodhound_events,
@@ -301,8 +321,12 @@ class TestTrustedUsdtCollectors:
             "/opt/bloodhound/usdt-fixtures/training-shell-v3-semaphore"
         ) as fresh_events:
             wait_for_usdt_daemon()
+            before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_s")
             result = ssh_cmd(SHELL_TARGET)
             assert result.returncode == 0, result.stderr
+            assert _bpf_program_run_count(ssh_cmd, "usdt_training_s") > before_runs, (
+                "semaphore-backed training-shell-v3 uprobe did not execute when its static probe fired"
+            )
             events = wait_for_matching_events(
                 fresh_events,
                 lambda candidate: any(event.get("event") == SHELL_EVENT for event in candidate),

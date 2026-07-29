@@ -589,10 +589,6 @@ fn attach_uprobe_with_semaphore(
         type_: pmu_type,
         size: std::mem::size_of::<PerfEventAttr>() as u32,
         config: u64::from(semaphore_offset) << 32,
-        // A perf uprobe only delivers samples (and therefore runs the BPF
-        // program) when it has a non-zero period. Aya's safe UProbe path sets
-        // this for ordinary links; this fd-based path must do the same.
-        sample_period: 1,
         config1: target.as_ptr() as u64,
         config2: probe_offset,
         ..Default::default()
