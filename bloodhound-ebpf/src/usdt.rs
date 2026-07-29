@@ -149,10 +149,21 @@ macro_rules! peer_attach_point {
                     _pad2: 0,
                 };
                 let total = EventHeader::SIZE + UsdtTrainingPeerPayload::SIZE;
-                let mut bytes = [0u8; 128];
-                core::ptr::copy_nonoverlapping(&header as *const EventHeader as *const u8, bytes.as_mut_ptr(), EventHeader::SIZE);
-                core::ptr::copy_nonoverlapping(&payload as *const UsdtTrainingPeerPayload as *const u8, bytes.as_mut_ptr().add(EventHeader::SIZE), UsdtTrainingPeerPayload::SIZE);
-                emit_event(&bytes[..total]);
+                let assembly = match ASSEMBLY_BUF.get_ptr_mut(0) {
+                    Some(value) => &mut (*value).buf,
+                    None => return 0,
+                };
+                core::ptr::copy_nonoverlapping(
+                    &header as *const EventHeader as *const u8,
+                    assembly.as_mut_ptr(),
+                    EventHeader::SIZE,
+                );
+                core::ptr::copy_nonoverlapping(
+                    &payload as *const UsdtTrainingPeerPayload as *const u8,
+                    assembly.as_mut_ptr().add(EventHeader::SIZE),
+                    UsdtTrainingPeerPayload::SIZE,
+                );
+                emit_event(&assembly[..total]);
             }
             0
         }
