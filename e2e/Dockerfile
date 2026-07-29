@@ -22,7 +22,7 @@ RUN apt-get update && apt-get install -y \
 # "#49~22.04.1-Ubuntu"), so modules from Ubuntu 24.04's native repo have
 # mismatched modversions CRCs — modprobe fails with "Invalid argument".
 # We add the Jammy (22.04) HWE repo and install the matching modules.
-RUN echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main" > /etc/apt/sources.list.d/jammy-hwe.list && \
+RUN echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" > /etc/apt/sources.list.d/jammy-hwe.list && \
     apt-get update && \
     apt-get install -y --allow-downgrades \
         linux-image-6.8.0-49-generic \
