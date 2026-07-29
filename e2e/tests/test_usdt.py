@@ -47,7 +47,8 @@ def _bpf_program_run_count(ssh_cmd, name_prefix):
         for program in json.loads(result.stdout)
         if program.get("name", "").startswith(name_prefix)
     ]
-    assert len(matches) == 1, matches
+    assert len(matches) == 1, programs
+    assert "run_cnt" in matches[0], matches[0]
     return matches[0]["run_cnt"]
 
 
