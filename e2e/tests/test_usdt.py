@@ -114,6 +114,7 @@ class TestTrustedUsdtCollectors:
         wait_for_matching_events,
         replacement,
         reason_code,
+        run_replaced_target=True,
     ):
         """Reject a target only after its startup diagnostic is observable."""
         with replace_usdt_target(replacement) as fresh_events:
@@ -124,8 +125,9 @@ class TestTrustedUsdtCollectors:
                 ),
                 f"training-shell-v3 {reason_code} diagnostic",
             )
-            result = ssh_cmd(SHELL_TARGET)
-            assert result.returncode == 0, result.stderr
+            if run_replaced_target:
+                result = ssh_cmd(SHELL_TARGET)
+                assert result.returncode == 0, result.stderr
             validate_all_events(events)
             diagnostics = _diagnostics(events, "training-shell-v3", reason_code)
             assert len(diagnostics) == 1, diagnostics
@@ -280,6 +282,7 @@ class TestTrustedUsdtCollectors:
             wait_for_matching_events,
             "/opt/bloodhound/usdt-fixtures/training-shell-v3-unsupported-architecture",
             "unsupported_architecture",
+            run_replaced_target=False,
         )
 
     def test_semaphore_backed_collector_attaches_and_emits(
