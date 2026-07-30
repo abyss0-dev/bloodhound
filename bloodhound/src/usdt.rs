@@ -557,7 +557,14 @@ struct PerfEventAttr {
     bp_type: u32,
     config1: u64,
     config2: u64,
+    // Keep the advertised size identical to Linux's current 128-byte UAPI
+    // shape. The kernel accepts shorter historical layouts, but that omits
+    // the trailing ABI space used when configuring the ref-counter-backed
+    // uprobe PMU on the E2E guest.
+    _reserved: [u64; 7],
 }
+
+const _: [(); 128] = [(); std::mem::size_of::<PerfEventAttr>()];
 
 const PERF_FLAG_FD_CLOEXEC: u64 = 1 << 3;
 const PERF_EVENT_IOC_ENABLE: std::ffi::c_ulong = 0x2400;
