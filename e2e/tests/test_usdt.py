@@ -7,8 +7,6 @@ records, never by a fixed post-restart delay.
 
 from contextlib import contextmanager
 
-import json
-
 import pytest
 
 from helpers import assert_event_exists, validate_all_events
@@ -37,20 +35,23 @@ def _diagnostics(events, collector_id, reason_code):
     ]
 
 
-def _bpf_program_run_count(ssh_cmd, name_prefix):
-    """Read the one loaded collector program's kernel run counter."""
+def _assert_collector_attached(ssh_cmd, collector_id):
+    """Fail with the loader's real error when a collector did not attach.
 
-    result = ssh_cmd("bpftool -j prog show", user="root")
-    assert result.returncode == 0, result.stderr
-    programs = json.loads(result.stdout)
-    matches = [
-        program
-        for program in programs
-        if program.get("name", "").startswith(name_prefix)
-    ]
-    assert len(matches) == 1, programs
-    assert "run_cnt" in matches[0], matches[0]
-    return matches[0]["run_cnt"]
+    The guest kernel deliberately disables BPF run statistics, so ``run_cnt``
+    is not portable evidence.  The fixture -> NDJSON assertion below is the
+    acceptance proof; this guard only makes a loader failure unambiguous.
+    """
+
+    journal = ssh_cmd(
+        "journalctl -u bloodhound -b --no-pager -o cat",
+        user="root",
+    )
+    assert journal.returncode == 0, journal.stderr
+    assert f"USDT collector {collector_id} failed to attach" not in journal.stdout, (
+        f"{collector_id} attachment failed before the fixture executed:\n"
+        f"{journal.stdout}"
+    )
 
 
 @pytest.fixture
@@ -196,21 +197,9 @@ class TestTrustedUsdtCollectors:
         wait_for_usdt_daemon,
     ):
         wait_for_usdt_daemon()
-        journal = ssh_cmd(
-            "journalctl -u bloodhound -b --no-pager -o cat",
-            user="root",
-        )
-        assert journal.returncode == 0, journal.stderr
-        assert "USDT collector training-peer-v1 failed to attach" not in journal.stdout, (
-            "training-peer-v1 attachment failed before the fixture executed:\n"
-            f"{journal.stdout}"
-        )
-        before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_p")
+        _assert_collector_attached(ssh_cmd, "training-peer-v1")
         result = ssh_cmd("/opt/bloodhound/usdt-fixtures/training-peer-v1")
         assert result.returncode == 0, result.stderr
-        assert _bpf_program_run_count(ssh_cmd, "usdt_training_p") > before_runs, (
-            "training-peer-v1 uprobe did not execute when its static probe fired"
-        )
 
         events = wait_for_matching_events(
             bloodhound_events,
@@ -323,12 +312,9 @@ class TestTrustedUsdtCollectors:
             "/opt/bloodhound/usdt-fixtures/training-shell-v3-semaphore"
         ) as fresh_events:
             wait_for_usdt_daemon()
-            before_runs = _bpf_program_run_count(ssh_cmd, "usdt_training_shell_v3")
+            _assert_collector_attached(ssh_cmd, "training-shell-v3")
             result = ssh_cmd(SHELL_TARGET)
             assert result.returncode == 0, result.stderr
-            assert _bpf_program_run_count(ssh_cmd, "usdt_training_shell_v3") > before_runs, (
-                "semaphore-backed training-shell-v3 uprobe did not execute when its static probe fired"
-            )
             events = wait_for_matching_events(
                 fresh_events,
                 lambda candidate: any(event.get("event") == SHELL_EVENT for event in candidate),
