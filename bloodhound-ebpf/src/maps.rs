@@ -18,6 +18,13 @@ pub static EVENTS: RingBuf = RingBuf::with_byte_size(RING_BUFFER_DEFAULT, 0);
 #[map]
 pub static DROP_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
+/// Per-collector execution counters used by the privileged USDT E2E contract.
+/// Slot 0 is training-shell-v3 and slot 1 is training-peer-v1.  They make the
+/// probe -> ring-buffer boundary observable without relying on the guest's
+/// disabled global BPF run statistics.
+#[map]
+pub static USDT_HIT_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(2, 0);
+
 // ── Syscall Entry Maps (enter/exit correlation) ──────────────────────────────
 
 /// Keyed by pid_tgid (u64). Stores execve entry data for sys_exit correlation.

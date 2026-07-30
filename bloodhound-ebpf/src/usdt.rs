@@ -11,7 +11,11 @@ use aya_ebpf::{
 };
 use bloodhound_common::*;
 
-use crate::{filter::get_task_info, helpers::emit_event, maps::ASSEMBLY_BUF};
+use crate::{
+    filter::get_task_info,
+    helpers::{emit_event, record_usdt_hit},
+    maps::ASSEMBLY_BUF,
+};
 
 const COMMAND_NAME_LIMIT: usize = 64;
 
@@ -25,6 +29,7 @@ unsafe fn emit_shell(
     semantic_flags: u32,
     exit_status: i32,
 ) {
+    record_usdt_hit(0);
     // A required pointer that cannot be read must not become a guessed value.
     // The userspace attachment layer treats an incompatible declared ABI as a
     // collector failure; this probe simply declines to emit an unsafe event.
@@ -140,6 +145,7 @@ macro_rules! peer_attach_point {
         #[uprobe]
         pub fn $function(ctx: ProbeContext) -> u32 {
             unsafe {
+                record_usdt_hit(1);
                 let header = get_task_info(EventKind::UsdtTrainingPeerV1 as u8);
                 let payload = UsdtTrainingPeerPayload {
                     attach_point_id: $id,
