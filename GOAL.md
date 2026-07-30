@@ -20,22 +20,22 @@
 
 実装、fixture、USDT ユニット／リプレイ、通常 CI は揃っている。GitHub-hosted runner への移行と、KVM E2E workflow の分離も完了している。
 
-直前の KVM E2E では 51 件が成功し、残る peer と semaphore の 2 件はイベント不達を調べるために追加した BPF 実行回数診断が不完全だったため失敗した。
+通常 CI と USDT ユニット／リプレイは成功している。KVM E2E では通常の `training-shell-v3` イベントは成功し、残る peer と semaphore の 2 件でイベント不達を調査中である。
 
-- peer: `bpftool` の出力に `run_cnt` がなかった。VM で `kernel.bpf_stats_enabled` を有効化していなかった。
-- semaphore: 診断が `usdt_training_s` を探していたが、ロードされるプログラム名は `usdt_training_shell_v3_0` である。
+- peer: uprobe の実行回数は増えるため attach 自体はできている。しかし NDJSON が得られない。今回、eBPF 内の collector hit と `EVENTS.output()` の成功回数を別スロットで記録し、ring buffer への出力成功か、その後の経路かを判別する。
+- semaphore: fixture の静的プローブを発火しても collector hit が増えない。通常の uprobe の ABI と分離した semaphore 付き perf event attach 経路に原因を絞っている。
 
-このため、この時点では peer／semaphore のイベント不達が実装に起因するかをまだ断定しない。診断自身の失敗を先に除去した。
+以前試した `bpftool` の `run_cnt` は、VM が BPF 実行統計を排他的に設定できず観測手段として使えなかった。そのため、ゲストのグローバル設定に依存しない collector 内カウンタへ置き換えた。
 
 ## 現在進行中の試行
 
-`4febe20` (`test(usdt): enable BPF execution diagnostics`) を push 済み。
+`212c20f` (`test(usdt): distinguish peer ring buffer output`) を push 済み。これが現在 GitHub Actions で検証中である。
 
-- E2E VM の `bloodhound.service` 起動前に `kernel.bpf_stats_enabled=1` を設定する。
-- `bpftool -j prog show` から peer と semaphore の BPF プログラム実行回数を、実際のプログラム名で取得する。
-- fixture 実行前後の実行回数を比較する。増えなければ attach／perf event／semaphore 経路を調べ、増えるのに NDJSON がなければ eBPF のイベント組み立て・ring buffer・デシリアライズ経路を調べる。
+- `USDT_HIT_COUNT` map の slot 1 で peer uprobe の実行を、slot 3 で peer の `EVENTS.output()` 成功を、fixture 実行前後で比較する。
+- slot 3 が増えなければ peer のイベント組み立て／ring buffer 出力を調べる。増えるのに NDJSON がなければ userspace の ring buffer 消費・デシリアライズ経路を調べる。
+- semaphore は peer の判定を終えてから、hit が増えない attach／perf event／semaphore 経路だけを一つずつ検証する。
 
-GitHub Actions run `30504329636` の KVM E2E がこの診断変更を実行中。通常 CI (`30504329635`) と USDT ユニット／リプレイ (`30504329639`) は成功している。
+この試行の CI、USDT ユニット／リプレイ、KVM E2E を監視し、失敗した経路だけを次に修正する。
 
 ## 次の判断
 
