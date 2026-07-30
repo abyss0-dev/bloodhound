@@ -169,7 +169,9 @@ macro_rules! peer_attach_point {
                     assembly.as_mut_ptr().add(EventHeader::SIZE),
                     UsdtTrainingPeerPayload::SIZE,
                 );
-                emit_event(&assembly[..total]);
+                if emit_event(&assembly[..total]) {
+                    record_usdt_hit(3);
+                }
             }
             0
         }
