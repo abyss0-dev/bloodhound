@@ -13,6 +13,7 @@ RUN apt-get update && apt-get install -y \
     net-tools \
     linux-tools-generic \
     kmod \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Install kernel modules matching the e2e VM kernel (6.8.0-49-generic from 22.04 HWE).
@@ -21,11 +22,15 @@ RUN apt-get update && apt-get install -y \
 # "#49~22.04.1-Ubuntu"), so modules from Ubuntu 24.04's native repo have
 # mismatched modversions CRCs — modprobe fails with "Invalid argument".
 # We add the Jammy (22.04) HWE repo and install the matching modules.
-RUN echo "deb http://archive.ubuntu.com/ubuntu jammy-updates main" > /etc/apt/sources.list.d/jammy-hwe.list && \
+RUN printf '%s\n' \
+        "deb http://archive.ubuntu.com/ubuntu jammy main universe" \
+        "deb http://archive.ubuntu.com/ubuntu jammy-updates main universe" \
+        > /etc/apt/sources.list.d/jammy-hwe.list && \
     apt-get update && \
     apt-get install -y --allow-downgrades \
         linux-image-6.8.0-49-generic \
-        linux-modules-6.8.0-49-generic && \
+        linux-modules-6.8.0-49-generic \
+        linux-tools-6.8.0-49-generic && \
     depmod -a 6.8.0-49-generic && \
     rm -f /etc/apt/sources.list.d/jammy-hwe.list && \
     rm -rf /var/lib/apt/lists/*
@@ -56,6 +61,12 @@ RUN mkdir -p /opt/test-fixtures && \
     echo "#!/bin/bash" > /opt/test-fixtures/test-script.sh && \
     echo "echo hello" >> /opt/test-fixtures/test-script.sh && \
     chmod +x /opt/test-fixtures/test-script.sh
+
+# Build deterministic static USDT fixture executables inside the E2E image.
+# Their fixed Build IDs are the allowlist in bloodhound/src/usdt.rs.
+COPY fixtures/ /tmp/usdt-fixtures/
+RUN make -C /tmp/usdt-fixtures OUT=/opt/bloodhound/usdt-fixtures && \
+    rm -rf /tmp/usdt-fixtures
 
 # Create directory for bloodhound binary
 RUN mkdir -p /opt/bloodhound

@@ -58,8 +58,8 @@ After=network.target
 Type=simple
 ExecStartPre=-/sbin/modprobe sch_ingress
 ExecStartPre=-/bin/sh -c 'for iface in $(ls /sys/class/net); do tc qdisc add dev $iface clsact 2>/dev/null; done'
-ExecStart=/opt/bloodhound/bloodhound --uid 1000
-StandardOutput=file:/var/log/bloodhound.ndjson
+ExecStart=/opt/bloodhound/bloodhound --uid 1000 --usdt-config /etc/bloodhound/usdt.d/training-shell-v3.toml --usdt-config /etc/bloodhound/usdt.d/training-peer-v1.toml
+StandardOutput=append:/var/log/bloodhound.ndjson
 StandardError=journal
 Restart=always
 RestartSec=1
@@ -67,6 +67,14 @@ RestartSec=1
 [Install]
 WantedBy=multi-user.target
 UNIT
+
+# A configuration is copied into the VM image, but it contains only the
+# registered collector ID and enabled state. It cannot alter BPF or USDT ABI.
+sudo mkdir -p "${MOUNT_DIR}/etc/bloodhound/usdt.d"
+sudo install -m 0644 "${PROJECT_ROOT}/e2e/config/usdt.d/training-shell-v3.toml" \
+    "${MOUNT_DIR}/etc/bloodhound/usdt.d/training-shell-v3.toml"
+sudo install -m 0644 "${PROJECT_ROOT}/e2e/config/usdt.d/training-peer-v1.toml" \
+    "${MOUNT_DIR}/etc/bloodhound/usdt.d/training-peer-v1.toml"
 
 # Configure networking for QEMU (guest has no network config from Docker export)
 sudo mkdir -p "${MOUNT_DIR}/etc/systemd/network"

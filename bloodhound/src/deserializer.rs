@@ -83,6 +83,14 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
     let (event_type, name, layer, args, return_code) = match kind {
         EventKind::TtyRead => parse_tty(payload, "tty_read")?,
         EventKind::TtyWrite => parse_tty(payload, "tty_write")?,
+        EventKind::UsdtTrainingShellV3
+        | EventKind::UsdtTrainingPeerV1
+        | EventKind::UsdtTrainingShellV3CaptureError => {
+            // The USDT registry owns collector-specific payload contracts.
+            // This generic delegation is the only USDT knowledge in the core
+            // syscall/TTY deserializer.
+            crate::usdt::decode_payload(kind, payload)?
+        }
         EventKind::Execve => parse_execve(payload, "execve")?,
         EventKind::Execveat => parse_execve(payload, "execveat")?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
@@ -212,6 +220,7 @@ fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Opti
     let args = serde_json::json!({ "data": encoded });
     Ok(("TTY".into(), name.into(), "intent".into(), Some(args), None))
 }
+
 
 fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < ExecvePayload::SIZE {

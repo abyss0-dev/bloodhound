@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 import subprocess
 import time
 
@@ -59,28 +60,6 @@ def ssh_cmd(ssh_config):
     return run
 
 
-@pytest.fixture(scope="session")
-def scp_cmd(ssh_config):
-    """Build an SCP command for file retrieval (runs as root)."""
-
-    def fetch(remote_path, local_path):
-        full_cmd = [
-            "sshpass",
-            "-p",
-            "root",  # scp runs as root to access /var/log/bloodhound.ndjson
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-P",
-            ssh_config["port"],
-            f"root@{ssh_config['host']}:{remote_path}",
-            local_path,
-        ]
-        subprocess.run(full_cmd, check=True, timeout=30)
-
-    return fetch
-
-
 @pytest.fixture
 def interactive_ssh(ssh_config):
     """Create an interactive SSH session via pexpect (allocates PTY)."""
@@ -105,7 +84,7 @@ def _event_baseline(ssh_config, request):
     """Record the current NDJSON line count before each test.
 
     Since we cannot safely truncate the NDJSON file (the daemon holds it open
-    via systemd StandardOutput=file: and truncating creates NUL-byte gaps),
+    via systemd StandardOutput=append: and truncating creates NUL-byte gaps),
     we instead record how many lines exist BEFORE the test starts and only
     return events generated after that point.
     """
@@ -126,7 +105,7 @@ def _event_baseline(ssh_config, request):
 
 
 @pytest.fixture
-def bloodhound_events(ssh_config, scp_cmd, ssh_cmd, tmp_path, request):
+def bloodhound_events(ssh_config, ssh_cmd, request):
     """Retrieve and parse bloodhound NDJSON output from the VM.
 
     Only returns events generated AFTER the test started (using the baseline
@@ -134,26 +113,100 @@ def bloodhound_events(ssh_config, scp_cmd, ssh_cmd, tmp_path, request):
     """
 
     def get_events():
-        local_file = str(tmp_path / "bloodhound.ndjson")
-        scp_cmd(ssh_config["output_path"], local_file)
-
         baseline = getattr(request.node, "_baseline", 0)
+        output_path = shlex.quote(ssh_config["output_path"])
+        result = ssh_cmd(
+            f"tail -n +{baseline + 1} -- {output_path}",
+            user="root",
+        )
+        assert result.returncode == 0, result.stderr
+
         events = []
-        with open(local_file) as f:
-            for i, line in enumerate(f):
-                if i < baseline:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    # The daemon can be appending while tail reads the file.
+                    # A polling caller retries a partial final line.
                     continue
-                line = line.strip()
-                if line:
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        # Skip corrupted/truncated lines (common after daemon
-                        # crash-loops or if SCP catches a partial write)
-                        continue
         return events
 
     return get_events
+
+
+@pytest.fixture
+def fresh_bloodhound_events(ssh_config, ssh_cmd):
+    """Read the complete current NDJSON file without a session baseline.
+
+    This reader is for tests that stop Bloodhound, create a new output file,
+    and then restart it.  The ordinary ``bloodhound_events`` fixture is not
+    safe for that use because its line-count baseline predates the restart.
+    Incomplete writes are retried by the polling helper below.
+    """
+
+    def get_events():
+        output_path = shlex.quote(ssh_config["output_path"])
+        result = ssh_cmd(f"cat -- {output_path}", user="root")
+        assert result.returncode == 0, result.stderr
+
+        events = []
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                events.append(json.loads(line))
+            except json.JSONDecodeError:
+                # The daemon can be appending while the file is read.  A
+                # polling caller will retry; never treat a partial final line
+                # as a malformed event from Bloodhound.
+                continue
+        return events
+
+    return get_events
+
+
+@pytest.fixture
+def wait_until():
+    """Poll a bounded readiness predicate without using a fixed delay."""
+
+    def wait(predicate, description, timeout=15.0, interval=0.1):
+        deadline = time.monotonic() + timeout
+        while True:
+            if predicate():
+                return
+            if time.monotonic() >= deadline:
+                pytest.fail(f"Timed out waiting for {description}")
+            time.sleep(interval)
+
+    return wait
+
+
+@pytest.fixture
+def wait_for_matching_events(wait_until):
+    """Poll an event reader until an observable NDJSON condition is true.
+
+    The timeout bounds a real readiness protocol; it is not a delay chosen to
+    make a race less likely.  Callers must provide a predicate over actual
+    NDJSON records, such as the expected collector diagnostic or USDT event.
+    """
+
+    def wait(read_events, predicate, description, timeout=15.0, interval=0.1):
+        latest_events = []
+
+        def is_ready():
+            nonlocal latest_events
+            latest_events = read_events()
+            if predicate(latest_events):
+                return True
+            return False
+
+        wait_until(is_ready, description, timeout=timeout, interval=interval)
+        return latest_events
+
+    return wait
 
 
 @pytest.fixture

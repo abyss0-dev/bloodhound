@@ -18,7 +18,7 @@ BehaviorEvent
 |   +-- comm         : string (max 16 bytes)
 |
 +-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT]
+|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
 |   +-- name         : string (hook point name, e.g. "openat", "tty_read")
 |   +-- layer        : enum [intent, tooling, behavior]
 |

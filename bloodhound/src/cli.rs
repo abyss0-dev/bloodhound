@@ -1,4 +1,5 @@
 use clap::Parser;
+use std::path::PathBuf;
 
 #[derive(Parser, Debug)]
 #[command(name = "bloodhound")]
@@ -33,4 +34,10 @@ pub struct Cli {
     /// `HEARTBEAT` events can opt out).
     #[arg(long, default_value_t = 1.0)]
     pub heartbeat_interval: f64,
+
+    /// Trusted USDT collector selection file. When omitted, no USDT collector
+    /// attaches (deny by default). The file can only choose a compiled ID and
+    /// set enabled=true/false; it cannot supply BPF, offsets, probes, or ABI.
+    #[arg(long)]
+    pub usdt_config: Vec<PathBuf>,
 }
