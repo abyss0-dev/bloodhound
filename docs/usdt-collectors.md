@@ -1,5 +1,9 @@
 # Trusted in-tree USDT collectors
 
+> Contributing to this feature? See
+> [Developing trusted USDT collectors](development/usdt-collectors.md) for the
+> architecture, code map, invariants, and change workflow.
+
 Bloodhound can attach a semantic USDT collector only when it is compiled into
 the Bloodhound distribution. This is an extension boundary for fixed training
 materials, not a runtime plugin ABI.

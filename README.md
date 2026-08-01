@@ -129,6 +129,13 @@ See [docs/ebpf-offsets.md](docs/ebpf-offsets.md) for the verification procedure.
 eBPF programs must pass the kernel's BPF verifier at load time. Common
 pitfalls are documented in [docs/build.md](docs/build.md#bpf-verifier-gotchas).
 
+### Feature Development
+
+Developer-facing architecture and contribution guides live under
+[`docs/development/`](docs/development/README.md). Start with
+[Developing trusted USDT collectors](docs/development/usdt-collectors.md) when
+changing the USDT collector registry, eBPF programs, payload ABI, or E2E tests.
+
 ## License
 
 Apache License 2.0 — see [LICENSE](LICENSE).
