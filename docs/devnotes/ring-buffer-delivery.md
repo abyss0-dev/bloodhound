@@ -1,16 +1,16 @@
-# Ring buffer event delivery
+# Ring buffer delivery diagnostics
 
 ## Problem
 
-`training-peer-v1` attached and executed, but its semantic NDJSON event was intermittently missing.
+An eBPF producer can execute successfully while its expected NDJSON event remains missing.
 
-The failure could have been in attachment, eBPF execution, payload assembly, ring-buffer output, userspace consumption, deserialization, or observation.
+The `training-peer-v1` incident exposed how easily attachment, eBPF execution, payload assembly, ring-buffer output, userspace consumption, deserialization, and observation can be confused.
 
 ## Answer
 
 Instrument and verify each delivery boundary in order.
 
-Build the peer payload through the shared per-CPU assembly map, record probe entry separately from successful ring-buffer output, and do not publish daemon readiness before consumer registration.
+Build variable payloads through the established per-CPU assembly map, measure producer entry separately from successful ring-buffer output, and do not publish daemon readiness before consumer registration.
 
 When an event is missing, inspect boundaries in this order:
 

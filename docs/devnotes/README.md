@@ -1,10 +1,10 @@
-# Trusted USDT collector investigation notes
+# Bloodhound development notes
 
-These notes record the failed assumptions, diagnostic steps, and new invariants discovered while implementing PR #40.
+This directory stores reusable engineering knowledge discovered while developing and operating Bloodhound.
 
-They are organized by failure domain rather than commit order.
+Notes should capture a concrete problem, the adopted answer, the evidence behind it, failed attempts, and any operational details worth preserving.
 
-Every topic uses the same order:
+Use the following order for every topic note:
 
 1. Problem
 2. Answer
@@ -12,12 +12,17 @@ Every topic uses the same order:
 4. Failed attempts and mistakes
 5. Notes
 
-- [Acceptance evidence](acceptance-evidence.md): why attach logs and unit tests were insufficient.
-- [Collector scope and note ABI](collector-scope-and-note-abi.md): the configuration boundary and static-note operand model.
+Keep cross-cutting notes in this directory.
+
+Create a subdirectory when several notes share feature-specific background that is not required for general Bloodhound development.
+
+## Cross-cutting topics
+
 - [Readiness and restart boundaries](readiness-and-restarts.md): systemd state, consumer readiness, and output file behavior.
-- [Ring buffer event delivery](ring-buffer-delivery.md): how the peer event was traced across the eBPF-to-NDJSON path.
-- [Semaphore-backed probes](semaphore-backed-probes.md): perf-event attachment and the ELF file-offset requirement.
-- [E2E observer load](e2e-observer-load.md): how the test reader created its own timeout pressure.
+- [Ring buffer delivery diagnostics](ring-buffer-delivery.md): locating failures across the eBPF-to-NDJSON path.
+- [E2E observer load](e2e-observer-load.md): preventing polling from creating its own timeout pressure.
 - [CI and KVM environment](ci-and-kvm.md): runner assumptions and guest dependency failures.
 
-The final acceptance result was 53 passing KVM E2E tests plus successful CI and USDT unit/replay workflows on commit `1e5ffcc`.
+## Feature-specific topics
+
+- [Trusted USDT collectors](usdt-collectors/README.md): static-note validation, collector acceptance, and semaphore-backed probes.
