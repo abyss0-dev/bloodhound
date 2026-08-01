@@ -20,25 +20,9 @@ design source of truth.
 
 ## Architecture
 
-```mermaid
-flowchart LR
-    CONFIG["Selection file<br/>collector ID + enabled"]
-    REGISTRY["Userspace registry<br/>trusted metadata"]
-    ELF["Target ELF<br/>Build ID + .note.stapsdt"]
-    ATTACH["Verified uprobe attachment"]
-    BPF["Collector eBPF program<br/>bounded capture"]
-    ABI["Shared binary payload<br/>EventKind + repr(C) struct"]
-    DECODE["Collector decoder"]
-    OUTPUT["BehaviorEvent<br/>NDJSON"]
-
-    CONFIG --> REGISTRY
-    REGISTRY --> ELF
-    ELF --> ATTACH
-    ATTACH --> BPF
-    BPF --> ABI
-    ABI --> DECODE
-    DECODE --> OUTPUT
-```
+The data path is linear: selection file → trusted registry → target ELF
+validation → verified uprobe attachment → bounded eBPF capture → shared binary
+payload → collector decoder → `BehaviorEvent` NDJSON.
 
 The implementation is split across these ownership boundaries:
 
