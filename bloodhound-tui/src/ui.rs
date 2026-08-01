@@ -10,19 +10,20 @@ use crate::app::{App, HistoryRow, Pane, ProcessTreeRow, Tab};
 use crate::event_model::EventCategory;
 
 /// Primary color palette.
-const HIGHLIGHT_COLOR: Color = Color::Rgb(97, 175, 239);   // Soft blue
-const ACTIVE_BORDER: Color = Color::Rgb(97, 175, 239);     // Blue
-const INACTIVE_BORDER: Color = Color::Rgb(90, 90, 90);     // Dim gray
-const TAB_ACTIVE: Color = Color::Rgb(97, 175, 239);        // Blue
-const PROCESS_COLOR: Color = Color::Rgb(152, 195, 121);    // Green
-const SECURITY_COLOR: Color = Color::Rgb(198, 120, 221);   // Purple
-const FILES_COLOR: Color = Color::Rgb(229, 192, 123);      // Yellow
-const NETWORK_COLOR: Color = Color::Rgb(224, 108, 117);    // Red
-const DIM_TEXT: Color = Color::Rgb(120, 120, 120);          // Dim
-const STATUS_BG: Color = Color::Rgb(40, 44, 52);           // Dark bg
-const TIMESTAMP_COLOR: Color = Color::Rgb(130, 137, 151);     // Muted for timestamps
-const OUTPUT_COLOR: Color = Color::Rgb(86, 182, 194);      // Cyan
-const TREE_COLOR: Color = Color::Rgb(152, 195, 121);       // Green for exec children
+const HIGHLIGHT_COLOR: Color = Color::Rgb(97, 175, 239); // Soft blue
+const ACTIVE_BORDER: Color = Color::Rgb(97, 175, 239); // Blue
+const INACTIVE_BORDER: Color = Color::Rgb(90, 90, 90); // Dim gray
+const TAB_ACTIVE: Color = Color::Rgb(97, 175, 239); // Blue
+const PROCESS_COLOR: Color = Color::Rgb(152, 195, 121); // Green
+const SECURITY_COLOR: Color = Color::Rgb(198, 120, 221); // Purple
+const FILES_COLOR: Color = Color::Rgb(229, 192, 123); // Yellow
+const NETWORK_COLOR: Color = Color::Rgb(224, 108, 117); // Red
+const BEHAVIOR_COLOR: Color = Color::Rgb(86, 182, 194); // Cyan
+const DIM_TEXT: Color = Color::Rgb(120, 120, 120); // Dim
+const STATUS_BG: Color = Color::Rgb(40, 44, 52); // Dark bg
+const TIMESTAMP_COLOR: Color = Color::Rgb(130, 137, 151); // Muted for timestamps
+const OUTPUT_COLOR: Color = Color::Rgb(86, 182, 194); // Cyan
+const TREE_COLOR: Color = Color::Rgb(152, 195, 121); // Green for exec children
 
 /// Render the full UI.
 pub fn draw(f: &mut Frame, app: &App) {
@@ -36,10 +37,7 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     let main_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Percentage(30),
-            Constraint::Percentage(70),
-        ])
+        .constraints([Constraint::Percentage(30), Constraint::Percentage(70)])
         .split(chunks[0]);
 
     draw_history_pane(f, app, main_chunks[0]);
@@ -61,7 +59,11 @@ pub fn draw(f: &mut Frame, app: &App) {
 /// Draw the left pane: command history with tree view.
 fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::History;
-    let border_color = if is_active { ACTIVE_BORDER } else { INACTIVE_BORDER };
+    let border_color = if is_active {
+        ACTIVE_BORDER
+    } else {
+        INACTIVE_BORDER
+    };
 
     let title = format!(" History ({} commands) ", app.commands.len());
     let block = Block::default()
@@ -118,7 +120,10 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", timestamp), Style::default().fg(TIMESTAMP_COLOR)),
+                    Span::styled(
+                        format!("{} ", timestamp),
+                        Style::default().fg(TIMESTAMP_COLOR),
+                    ),
                     Span::styled(arrow, style),
                     Span::styled(cmd_display, style),
                     Span::styled(counter, Style::default().fg(DIM_TEXT)),
@@ -129,7 +134,11 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                 let event = &app.events[exec_child.event_index];
 
                 let indent = "  ".repeat(exec_child.depth);
-                let branch = if exec_child.is_last { "└─ " } else { "├─ " };
+                let branch = if exec_child.is_last {
+                    "└─ "
+                } else {
+                    "├─ "
+                };
                 let pid_str = format!(" :{}", exec_child.pid);
                 let timestamp = app.format_timestamp(event.header.timestamp);
 
@@ -150,7 +159,10 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
                 };
 
                 ListItem::new(Line::from(vec![
-                    Span::styled(format!("{} ", timestamp), Style::default().fg(TIMESTAMP_COLOR)),
+                    Span::styled(
+                        format!("{} ", timestamp),
+                        Style::default().fg(TIMESTAMP_COLOR),
+                    ),
                     Span::styled(format!("{}{}", indent, branch), branch_style),
                     Span::styled(exec_child.label.clone(), label_style),
                     Span::styled(pid_str, Style::default().fg(DIM_TEXT)),
@@ -162,13 +174,11 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
     let mut list_state = ListState::default();
     list_state.select(Some(app.history_cursor));
 
-    let list = List::new(items)
-        .block(block)
-        .highlight_style(
-            Style::default()
-                .bg(Color::Rgb(50, 55, 65))
-                .add_modifier(Modifier::BOLD),
-        );
+    let list = List::new(items).block(block).highlight_style(
+        Style::default()
+            .bg(Color::Rgb(50, 55, 65))
+            .add_modifier(Modifier::BOLD),
+    );
 
     f.render_stateful_widget(list, area, &mut list_state);
 }
@@ -176,14 +186,14 @@ fn draw_history_pane(f: &mut Frame, app: &App, area: Rect) {
 /// Draw the top-right pane: always-visible terminal output.
 fn draw_output_pane(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Output;
-    let border_color = if is_active { ACTIVE_BORDER } else { INACTIVE_BORDER };
+    let border_color = if is_active {
+        ACTIVE_BORDER
+    } else {
+        INACTIVE_BORDER
+    };
 
     let gi = app.selected_group();
-    let lines: Vec<String> = app
-        .tty_output
-        .get(gi)
-        .cloned()
-        .unwrap_or_default();
+    let lines: Vec<String> = app.tty_output.get(gi).cloned().unwrap_or_default();
 
     let title = format!(" Output ({} lines) ", lines.len());
     let block = Block::default()
@@ -210,17 +220,14 @@ fn draw_output_pane(f: &mut Frame, app: &App, area: Rect) {
 
         let mut list_state = ListState::default();
         if is_active && !items.is_empty() {
-            list_state
-                .select(Some(app.output_scroll.min(items.len().saturating_sub(1))));
+            list_state.select(Some(app.output_scroll.min(items.len().saturating_sub(1))));
         }
 
-        let list = List::new(items)
-            .block(block)
-            .highlight_style(
-                Style::default()
-                    .bg(Color::Rgb(50, 55, 65))
-                    .add_modifier(Modifier::BOLD),
-            );
+        let list = List::new(items).block(block).highlight_style(
+            Style::default()
+                .bg(Color::Rgb(50, 55, 65))
+                .add_modifier(Modifier::BOLD),
+        );
 
         f.render_stateful_widget(list, area, &mut list_state);
     }
@@ -229,7 +236,11 @@ fn draw_output_pane(f: &mut Frame, app: &App, area: Rect) {
 /// Draw the bottom-right pane: detail view with tabs.
 fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
     let is_active = app.active_pane == Pane::Detail;
-    let border_color = if is_active { ACTIVE_BORDER } else { INACTIVE_BORDER };
+    let border_color = if is_active {
+        ACTIVE_BORDER
+    } else {
+        INACTIVE_BORDER
+    };
 
     // Split into tab bar + content
     let chunks = Layout::default()
@@ -241,7 +252,8 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
         .split(area);
 
     // Tab bar
-    let tab_titles: Vec<Line> = Tab::ALL_TABS
+    let tab_titles: Vec<Line> = app
+        .available_tabs()
         .iter()
         .map(|t| {
             let label = format!("{}:{}", t.index() + 1, t.label());
@@ -263,7 +275,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(border_color)),
         )
-        .select(app.active_tab.index())
+        .select(app.active_tab_position())
         .highlight_style(Style::default().fg(TAB_ACTIVE));
 
     f.render_widget(tabs, chunks[0]);
@@ -304,6 +316,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 EventCategory::Security => SECURITY_COLOR,
                 EventCategory::Files => FILES_COLOR,
                 EventCategory::Network => NETWORK_COLOR,
+                EventCategory::Behavior => BEHAVIOR_COLOR,
                 EventCategory::Hidden => unreachable!(),
             };
 
@@ -312,6 +325,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
                 EventCategory::Security => "SEC ",
                 EventCategory::Files => "FILE",
                 EventCategory::Network => "NET ",
+                EventCategory::Behavior => "BEHV",
                 EventCategory::Hidden => unreachable!(),
             };
 
@@ -354,13 +368,7 @@ fn draw_detail_pane(f: &mut Frame, app: &App, area: Rect) {
     f.render_stateful_widget(list, chunks[1], &mut list_state);
 }
 
-fn draw_process_tree(
-    f: &mut Frame,
-    app: &App,
-    area: Rect,
-    border_color: Color,
-    is_active: bool,
-) {
+fn draw_process_tree(f: &mut Frame, app: &App, area: Rect, border_color: Color, is_active: bool) {
     let tree_rows = app.process_tree_rows();
 
     if tree_rows.is_empty() {
@@ -422,6 +430,7 @@ fn draw_process_tree(
                     EventCategory::Network => NETWORK_COLOR,
                     EventCategory::Security => SECURITY_COLOR,
                     EventCategory::Process => PROCESS_COLOR,
+                    EventCategory::Behavior => BEHAVIOR_COLOR,
                     EventCategory::Hidden => unreachable!(),
                 };
                 let tag = match cat {
@@ -429,6 +438,7 @@ fn draw_process_tree(
                     EventCategory::Network => "NET ",
                     EventCategory::Security => "SEC ",
                     EventCategory::Process => "PROC",
+                    EventCategory::Behavior => "BEHV",
                     EventCategory::Hidden => unreachable!(),
                 };
                 let branch = if *is_last { "  └─ " } else { "  ├─ " };
@@ -478,11 +488,7 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         "No commands".to_string()
     } else {
         let gi = app.selected_group();
-        format!(
-            "Command {}/{}",
-            gi + 1,
-            app.commands.len()
-        )
+        format!("Command {}/{}", gi + 1, app.commands.len())
     };
 
     let event_count = app
@@ -496,37 +502,48 @@ fn draw_status_bar(f: &mut Frame, app: &App, area: Rect) {
         Pane::Detail => "Events",
     };
 
-    let line = Line::from(vec![
-        Span::styled(
-            format!(" {} ", app.file_path),
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
-        Span::styled(
-            format!("{} events total", app.total_events),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
-        Span::styled(cmd_info, Style::default().fg(HIGHLIGHT_COLOR)),
-        Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
-        Span::styled(
-            format!("{} events", event_count),
-            Style::default().fg(Color::White),
-        ),
-        Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
-        Span::styled(
-            format!("▶ {}", pane_name),
-            Style::default()
-                .fg(HIGHLIGHT_COLOR)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            "   j/k:nav  ⏎:expand  Tab:pane  1-4:tab  q:quit ",
-            Style::default().fg(DIM_TEXT),
-        ),
-    ]);
+    let mut spans = vec![Span::styled(
+        format!(" {} ", app.file_path),
+        Style::default()
+            .fg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+    if let Some(health) = app.collector_health() {
+        spans.push(Span::styled(" │ ", Style::default().fg(DIM_TEXT)));
+        spans.push(Span::styled(health, Style::default().fg(BEHAVIOR_COLOR)));
+    } else {
+        spans.extend([
+            Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
+            Span::styled(
+                format!("{} events total", app.total_events),
+                Style::default().fg(Color::White),
+            ),
+            Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
+            Span::styled(cmd_info, Style::default().fg(HIGHLIGHT_COLOR)),
+            Span::styled(" │ ", Style::default().fg(DIM_TEXT)),
+            Span::styled(
+                format!("{} events", event_count),
+                Style::default().fg(Color::White),
+            ),
+        ]);
+    }
+    spans.push(Span::styled(" │ ", Style::default().fg(DIM_TEXT)));
+    spans.push(Span::styled(
+        format!("▶ {}", pane_name),
+        Style::default()
+            .fg(HIGHLIGHT_COLOR)
+            .add_modifier(Modifier::BOLD),
+    ));
+    let tab_keys = if app.available_tabs().contains(&Tab::Behavior) {
+        "1-5"
+    } else {
+        "1-4"
+    };
+    spans.push(Span::styled(
+        format!("   j/k:nav  ⏎:expand  Tab:pane  {tab_keys}:tab  q:quit "),
+        Style::default().fg(DIM_TEXT),
+    ));
+    let line = Line::from(spans);
 
     let paragraph = Paragraph::new(line).style(Style::default().bg(STATUS_BG));
     f.render_widget(paragraph, area);

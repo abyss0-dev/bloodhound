@@ -20,16 +20,14 @@ pub struct CommandGroup {
 /// that window are assigned to the command.
 ///
 /// TTY events (rendered separately as the command + output panes) and
-/// userspace-synthesised meta events (`LIFECYCLE`, `HEARTBEAT`) are
+/// userspace-synthesised meta events (`LIFECYCLE`, `HEARTBEAT`) and
+/// collector diagnostics are
 /// excluded — they are not user-attributable and would inflate the
 /// detail pane's per-command event counts.
 ///
 /// Events before the first command go to a synthetic "[pre-session]" group.
-pub fn correlate(
-    commands: &[CommandEntry],
-    events: &[BehaviorEvent],
-) -> Vec<CommandGroup> {
-    let is_correlated = |e: &BehaviorEvent| !e.is_tty() && !e.is_synthetic();
+pub fn correlate(commands: &[CommandEntry], events: &[BehaviorEvent]) -> Vec<CommandGroup> {
+    let is_correlated = BehaviorEvent::is_command_correlatable;
 
     if commands.is_empty() {
         // No commands found: put all correlated events in a single group
@@ -143,9 +141,9 @@ mod tests {
     fn test_basic_correlation() {
         let commands = vec![make_cmd("ls", 1.0), make_cmd("pwd", 3.0)];
         let events = vec![
-            make_event_at("execve", 1.5),  // after "ls", before "pwd"
-            make_event_at("openat", 2.0),  // after "ls", before "pwd"
-            make_event_at("execve", 3.5),  // after "pwd"
+            make_event_at("execve", 1.5), // after "ls", before "pwd"
+            make_event_at("openat", 2.0), // after "ls", before "pwd"
+            make_event_at("execve", 3.5), // after "pwd"
         ];
 
         let groups = correlate(&commands, &events);
@@ -175,10 +173,7 @@ mod tests {
     #[test]
     fn test_no_commands() {
         let commands = vec![];
-        let events = vec![
-            make_event_at("openat", 1.0),
-            make_event_at("execve", 2.0),
-        ];
+        let events = vec![make_event_at("openat", 1.0), make_event_at("execve", 2.0)];
 
         let groups = correlate(&commands, &events);
         assert_eq!(groups.len(), 1);
@@ -197,10 +192,14 @@ mod tests {
 
         let groups = correlate(&commands, &events);
         // tty events should be excluded from all groups
-        let all_indices: Vec<usize> = groups.iter().flat_map(|g| &g.event_indices).copied().collect();
+        let all_indices: Vec<usize> = groups
+            .iter()
+            .flat_map(|g| &g.event_indices)
+            .copied()
+            .collect();
         assert!(!all_indices.contains(&0)); // tty_read
         assert!(!all_indices.contains(&1)); // tty_write
-        assert!(all_indices.contains(&2));  // execve
+        assert!(all_indices.contains(&2)); // execve
     }
 
     #[test]
@@ -229,5 +228,17 @@ mod tests {
             );
         }
         assert!(all_indices.contains(&4)); // execve
+    }
+
+    #[test]
+    fn test_collector_diagnostics_excluded_but_usdt_is_correlated() {
+        let commands = vec![make_cmd("echo", 1.0)];
+        let events = vec![
+            make_typed_event_at("DIAGNOSTIC", "usdt.collector", 1.1),
+            make_typed_event_at("USDT", "abyss0_shell.simple_command_completed", 1.2),
+        ];
+
+        let groups = correlate(&commands, &events);
+        assert_eq!(groups[0].event_indices, vec![1]);
     }
 }

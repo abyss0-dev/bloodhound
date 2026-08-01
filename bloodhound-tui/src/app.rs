@@ -20,10 +20,19 @@ pub enum Tab {
     Security,
     Files,
     Network,
+    Behavior,
 }
 
 impl Tab {
-    pub const ALL_TABS: [Tab; 4] = [Tab::Process, Tab::Security, Tab::Files, Tab::Network];
+    pub const BASE_TABS: [Tab; 4] = [Tab::Process, Tab::Security, Tab::Files, Tab::Network];
+    #[cfg(test)]
+    pub const ALL_TABS: [Tab; 5] = [
+        Tab::Process,
+        Tab::Security,
+        Tab::Files,
+        Tab::Network,
+        Tab::Behavior,
+    ];
 
     pub fn label(&self) -> &'static str {
         match self {
@@ -31,6 +40,7 @@ impl Tab {
             Tab::Security => "Security",
             Tab::Files => "Files",
             Tab::Network => "Network",
+            Tab::Behavior => "Behavior",
         }
     }
 
@@ -40,6 +50,7 @@ impl Tab {
             Tab::Security => 1,
             Tab::Files => 2,
             Tab::Network => 3,
+            Tab::Behavior => 4,
         }
     }
 
@@ -52,6 +63,7 @@ impl Tab {
             Tab::Security => category == EventCategory::Security,
             Tab::Files => category == EventCategory::Files,
             Tab::Network => category == EventCategory::Network,
+            Tab::Behavior => category == EventCategory::Behavior,
         }
     }
 }
@@ -144,6 +156,9 @@ pub struct App {
 
     /// Expanded process-root nodes (by event index) in the Process tab tree view.
     pub process_expanded: HashSet<usize>,
+
+    available_tabs: Vec<Tab>,
+    collector_health: Option<String>,
 }
 
 /// Inputs required to construct an [`App`].
@@ -174,6 +189,41 @@ impl App {
             fd_table,
         } = init;
         let total_events = events.len();
+        let mut available_tabs = Tab::BASE_TABS.to_vec();
+        if events.iter().any(BehaviorEvent::is_usdt) {
+            available_tabs.push(Tab::Behavior);
+        }
+        let mut diagnostic_count = 0usize;
+        let mut first_diagnostic = None;
+        for event in events
+            .iter()
+            .filter(|event| event.is_collector_diagnostic())
+        {
+            diagnostic_count += 1;
+            if first_diagnostic.is_none() {
+                let collector = event
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.get("collector_id"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                let reason = event
+                    .args
+                    .as_ref()
+                    .and_then(|args| args.get("reason_code"))
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("unknown");
+                first_diagnostic = Some(format!("{collector} {reason}"));
+            }
+        }
+        let collector_health = match diagnostic_count {
+            0 => None,
+            1 => Some(format!(
+                "USDT: {}",
+                first_diagnostic.as_deref().unwrap_or("unknown unknown")
+            )),
+            count => Some(format!("USDT: {count} diagnostics")),
+        };
         let expanded = vec![false; commands.len()];
         Self {
             commands,
@@ -193,13 +243,15 @@ impl App {
             tz_offset,
             fd_table,
             process_expanded: HashSet::new(),
+            available_tabs,
+            collector_health,
         }
     }
 
     /// Convert a monotonic eBPF timestamp to a display string in the configured timezone.
     pub fn format_timestamp(&self, mono_secs: f64) -> String {
-        let wall_utc = self.boot_time_utc
-            + chrono::Duration::milliseconds((mono_secs * 1000.0) as i64);
+        let wall_utc =
+            self.boot_time_utc + chrono::Duration::milliseconds((mono_secs * 1000.0) as i64);
         let wall_local = wall_utc.with_timezone(&self.tz_offset);
         wall_local.format("%H:%M:%S").to_string()
     }
@@ -212,7 +264,10 @@ impl App {
             if self.expanded.get(gi).copied().unwrap_or(false) {
                 if let Some(children) = self.exec_trees.get(gi) {
                     for (ci, _) in children.iter().enumerate() {
-                        rows.push(HistoryRow::Exec { group: gi, child: ci });
+                        rows.push(HistoryRow::Exec {
+                            group: gi,
+                            child: ci,
+                        });
                     }
                 }
             }
@@ -450,11 +505,7 @@ impl App {
             }
             Pane::Output => {
                 let gi = self.selected_group();
-                let count = self
-                    .tty_output
-                    .get(gi)
-                    .map(|v| v.len())
-                    .unwrap_or(0);
+                let count = self.tty_output.get(gi).map(|v| v.len()).unwrap_or(0);
                 self.output_scroll = count.saturating_sub(1);
             }
             Pane::Detail => {
@@ -473,14 +524,43 @@ impl App {
     }
 
     pub fn set_tab(&mut self, tab: Tab) {
+        if !self.available_tabs.contains(&tab) {
+            return;
+        }
         self.active_tab = tab;
         self.detail_scroll = 0;
     }
 
     pub fn next_tab(&mut self) {
-        let current = self.active_tab.index();
-        let next = (current + 1) % Tab::ALL_TABS.len();
-        self.active_tab = Tab::ALL_TABS[next];
+        let current = self.active_tab_position();
+        let next = (current + 1) % self.available_tabs.len();
+        self.active_tab = self.available_tabs[next];
         self.detail_scroll = 0;
+    }
+
+    pub fn previous_tab(&mut self) {
+        let current = self.active_tab_position();
+        let previous = if current == 0 {
+            self.available_tabs.len() - 1
+        } else {
+            current - 1
+        };
+        self.active_tab = self.available_tabs[previous];
+        self.detail_scroll = 0;
+    }
+
+    pub fn available_tabs(&self) -> &[Tab] {
+        &self.available_tabs
+    }
+
+    pub fn active_tab_position(&self) -> usize {
+        self.available_tabs
+            .iter()
+            .position(|tab| *tab == self.active_tab)
+            .unwrap_or(0)
+    }
+
+    pub fn collector_health(&self) -> Option<&str> {
+        self.collector_health.as_deref()
     }
 }
