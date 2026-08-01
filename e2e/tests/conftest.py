@@ -60,28 +60,6 @@ def ssh_cmd(ssh_config):
     return run
 
 
-@pytest.fixture(scope="session")
-def scp_cmd(ssh_config):
-    """Build an SCP command for file retrieval (runs as root)."""
-
-    def fetch(remote_path, local_path):
-        full_cmd = [
-            "sshpass",
-            "-p",
-            "root",  # scp runs as root to access /var/log/bloodhound.ndjson
-            "scp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-P",
-            ssh_config["port"],
-            f"root@{ssh_config['host']}:{remote_path}",
-            local_path,
-        ]
-        subprocess.run(full_cmd, check=True, timeout=30)
-
-    return fetch
-
-
 @pytest.fixture
 def interactive_ssh(ssh_config):
     """Create an interactive SSH session via pexpect (allocates PTY)."""
@@ -106,7 +84,7 @@ def _event_baseline(ssh_config, request):
     """Record the current NDJSON line count before each test.
 
     Since we cannot safely truncate the NDJSON file (the daemon holds it open
-    via systemd StandardOutput=file: and truncating creates NUL-byte gaps),
+    via systemd StandardOutput=append: and truncating creates NUL-byte gaps),
     we instead record how many lines exist BEFORE the test starts and only
     return events generated after that point.
     """
@@ -127,7 +105,7 @@ def _event_baseline(ssh_config, request):
 
 
 @pytest.fixture
-def bloodhound_events(ssh_config, scp_cmd, ssh_cmd, tmp_path, request):
+def bloodhound_events(ssh_config, ssh_cmd, request):
     """Retrieve and parse bloodhound NDJSON output from the VM.
 
     Only returns events generated AFTER the test started (using the baseline
@@ -135,23 +113,24 @@ def bloodhound_events(ssh_config, scp_cmd, ssh_cmd, tmp_path, request):
     """
 
     def get_events():
-        local_file = str(tmp_path / "bloodhound.ndjson")
-        scp_cmd(ssh_config["output_path"], local_file)
-
         baseline = getattr(request.node, "_baseline", 0)
+        output_path = shlex.quote(ssh_config["output_path"])
+        result = ssh_cmd(
+            f"tail -n +{baseline + 1} -- {output_path}",
+            user="root",
+        )
+        assert result.returncode == 0, result.stderr
+
         events = []
-        with open(local_file) as f:
-            for i, line in enumerate(f):
-                if i < baseline:
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    events.append(json.loads(line))
+                except json.JSONDecodeError:
+                    # The daemon can be appending while tail reads the file.
+                    # A polling caller retries a partial final line.
                     continue
-                line = line.strip()
-                if line:
-                    try:
-                        events.append(json.loads(line))
-                    except json.JSONDecodeError:
-                        # Skip corrupted/truncated lines (common after daemon
-                        # crash-loops or if SCP catches a partial write)
-                        continue
         return events
 
     return get_events

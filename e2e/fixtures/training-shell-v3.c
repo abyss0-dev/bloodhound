@@ -11,7 +11,11 @@
 
 // A real writable semaphore symbol for the static-USDT fixture. The Linux
 // uprobe PMU increments it while a semaphore-backed link is active.
-volatile unsigned short usdt_semaphore __attribute__((used));
+// Keep the reference counter file-backed. A zero-initialized symbol in .bss
+// has no ELF file offset, so the kernel's uprobe ref_ctr_offset interface
+// cannot register it even though the virtual address appears in .note.stapsdt.
+volatile unsigned short usdt_semaphore
+    __attribute__((section(".probes"), used)) = 0;
 
 #define STRINGIFY_INNER(value) #value
 #define STRINGIFY(value) STRINGIFY_INNER(value)

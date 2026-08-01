@@ -2,8 +2,7 @@
 
 最終更新: 2026-08-01  
 対象 PR: [#40](https://github.com/abyss0-dev/bloodhound/pull/40)  
-ブランチ: `agent/trusted-static-usdt-collectors`  
-基準コミット: `5a7170a` (`docs: update USDT goal status`)
+ブランチ: `agent/trusted-static-usdt-collectors`
 
 このファイルは再開時のための事実メモである。推測を確定事項として扱わない。
 
@@ -11,72 +10,55 @@
 
 信頼する静的 USDT プローブだけを in-tree レジストリから収集する。対象 ELF のパス・アーキテクチャ・Build ID と `.note.stapsdt` ABI を検証し、許可済み static probe のイベントを eBPF の `EVENTS` ring buffer から userspace の `deserialize()` を経て NDJSON まで届ける。
 
-完了には少なくとも以下が必要である。
+完了条件は以下である。
 
-- `training-shell-v3` と独立した `training-peer-v1` がそれぞれ期待する USDT NDJSON を E2E で出す。
-- semaphore 付き `training-shell-v3` が attach され、実際に probe を発火して NDJSON を出す。
+- `training-shell-v3` と独立した `training-peer-v1` が期待する USDT NDJSON を出す。
+- semaphore 付き `training-shell-v3` が attach され、probe 発火後に NDJSON を出す。
 - 非許可 Build ID、欠落 probe、未対応 ABI／アーキテクチャ、必須引数読出し失敗を構造化診断で扱う。
 - 複数 static location を `attach_point_id` 付きで扱う。
-- GitHub-hosted の通常 CI、USDT unit/replay、KVM 専用 E2E がすべて成功する。
+- 通常 CI、USDT unit/replay、KVM E2E が current PR head で成功する。
 
-## 現在の検証結果
+## 解決した問題
 
-最新の GitHub Actions（2026-07-30、`5a7170a`）:
+### Ring buffer consumer readiness
 
-| workflow | 結果 | 根拠 |
-| --- | --- | --- |
-| CI | 成功 | run `30510779772` |
-| USDT Unit and Replay Tests | 成功 | run `30510779774` |
-| KVM E2E Tests | 失敗 | run `30510779775`: 51 passed, 2 failed |
+`BPF programs loaded and attached` は BPF attach 直後、ring buffer consumer が Tokio reactor に登録される前に出ていた。E2E はこの marker を readiness boundary として fixture を実行するため、再起動直後の singleton event が次の発火まで userspace に届かない場合があった。
 
-通常の `training-shell-v3`、診断、複数 location、Build ID／ABI 検証を含む 51 E2E は通っている。未達は以下の二経路だけである。
+修正後は consumer が `AsyncFd` を生成したことを oneshot で main に通知し、その後に marker を出す。consumer は待機前にも ring buffer を drain し、登録前後に入った pending record を回収する。
 
-### Blocker 1: `training-peer-v1` の userspace 到達
+### E2E NDJSON observation load
 
-確定した観測:
+通常 reader は polling 1回ごとに NDJSON 全体を SCP して全行を parse していた。長い suite では約11 MB／5.8万行を100 ms間隔で読み直し、観測処理自身が I/O 負荷と timeout を作っていた。
 
-- collector は attach 済みで、fixture 実行後に peer uprobe の `USDT_HIT_COUNT` slot 1 が増える。
-- 同じ実行で `EVENTS.output()` 成功を記録する slot 3 も増える。
-- その後 15 秒待っても `abyss0_peer.task_finished` の NDJSON がない。
+修正後は test 開始時の line baseline 以降だけを remote `tail` で読む。service の出力は再起動後も offset を保つ `StandardOutput=append:` とし、baseline と追記位置を一致させる。
 
-したがって、現時点の blocker は peer の attach または ring buffer への eBPF 出力ではない。ring buffer の userspace 消費、`deserialize()`、または NDJSON 出力・観測のどこで peer event が失われるかを実データで特定する必要がある。
+### Semaphore fixture ELF layout
 
-まだ未確定の事項:
+semaphore symbol は `.bss` にあり ELF の file-backed 範囲外だったため、kernel の `ref_ctr_offset` に登録できなかった。symbol を writable な `.probes` `PROGBITS` section に置き、実ファイル offset を持たせた。
 
-- ring buffer consumer が peer record を受け取っていないのか。
-- consumer は受け取るが、event header/payload の整合性で deserialize が失敗しているのか。
-- deserialize は成功するが、出力先または E2E の fresh NDJSON reader で失われるのか。
+## ローカル検証結果
 
-次の作業は、この経路に限って受信・deserialize・出力の境界を観測できるようにすることである。semaphore の実装修正と同時には行わない。
+2026-08-01 の最終差分に対して以下を確認した。
 
-### Blocker 2: semaphore 付き static probe が発火しない
+- Docker release build: 成功。
+- focused USDT E2E: `11 passed`。
+- `shutdown -> automatic restart -> training-shell-v3` 反復: 5/5 成功。
+- 全 KVM E2E: `53 passed in 464.95s`。
+- USDT unit: `9 passed; 0 failed`。
+- 変更した Rust file の rustfmt check: 成功。
+- `git diff --check`: 成功。
 
-確定した観測:
+workspace 全体の `cargo fmt --check` は今回触っていない既存 Rust file が現 toolchain の rustfmt と一致せず失敗するため、差分外を一括整形していない。
 
-- semaphore fixture に差し替えて daemon を再起動すると、`BPF programs loaded and attached` が出る。
-- fixture 実行後も shell collector の `USDT_HIT_COUNT` slot 0 は全 CPU で 0 のままである。
-- したがって NDJSON や deserialize より前、semaphore 用 perf-event uprobe attach 経路が実際の probe 発火につながっていない。
+## 残作業
 
-現在の実装は `bloodhound/src/usdt.rs` の `attach_uprobe_with_semaphore()` で `perf_event_open`、`PERF_EVENT_IOC_SET_BPF`、`PERF_EVENT_IOC_ENABLE` を使う。次は peer を解決後、この経路の perf event 属性、semaphore file offset、カーネルが登録した event の順に一項目ずつ検証する。
+- 最終差分を commit/push する。
+- PR #40 の current head で通常 CI、USDT unit/replay、KVM E2E がすべて成功することを確認する。
 
-## 既に試し、結論が出たこと
-
-- `bpftool` の BPF `run_cnt` で発火を測る案: 使用不可。guest で `kernel.bpf_stats_enabled` を設定しようとすると exclusivity flag により変更できず、`run_cnt` が出なかった。現在は guest グローバル設定に依存しない `USDT_HIT_COUNT` を使用する。
-- semaphore perf event attribute を小さな独自構造体で渡す案: 不十分だった。Aya と同じ 128 byte の `perf_event_attr` ABI に修正したが、semaphore probe はなお発火しない。
-- peer が ring buffer に書けないという仮説: 否定された。slot 3 が増えるため `EVENTS.output()` は成功している。
-- peer attach 失敗という仮説: 否定された。slot 1 が増えるため、静的 probe の uprobe は実行されている。
-
-## 過去の勘違いと訂正
-
-- **`systemctl is-active` を daemon 準備完了と見なした。** `Type=simple` では process 起動しか保証しない。現在のE2Eは current daemon PID の journal に正確な `BPF programs loaded and attached` が出るまで待つ。
-- **再起動後も通常の NDJSON 行数基準を再利用した。** `StandardOutput=file:` の再起動で捕捉状態が壊れる。現在は fixture 差替えごとに空の NDJSON を用意し、fresh reader で待つ。
-- **BPF program `run_cnt` を普遍的な観測手段と考えた。** guest の BPF stats 設定に依存するため、このVMでは使えない。
-- **peer のイベント不達を attach／ring buffer 出力の失敗と推定した。** collector 内の二段階カウンタにより、両方成功していると判明した。
-- **semaphore の attach 完了ログを発火の証拠と扱った。** 現在の hit counter は、attach success と実際の uprobe 実行が別であることを示している。
-
-## 実装上の留意点
+## 実装上の境界
 
 - 設定から BPF/native code、任意 offset、provider/probe、operand、field mapping を与えない。選択できるのは登録済み collector ID と `enabled` だけである。
 - static USDT operand は通常の関数 ABI ではなく GAS operand として扱う。
-- fixture → static probe → `EVENTS` → `deserialize()` → NDJSON の E2E を成功条件とし、attach ログや unit test だけで完了としない。
+- fixture → static probe → `EVENTS` → `deserialize()` → NDJSON の E2E を成功条件とし、attach log や unit test だけで完了としない。
 - VM の fixture 差替え・service restart を行うテストは並列実行しない。失敗時にも canonical fixture、service、backup 不在を `finally` で復旧する。
+- BPF `run_cnt` は guest の `kernel.bpf_stats_enabled` に依存するため acceptance evidence に使わない。

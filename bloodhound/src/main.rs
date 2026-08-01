@@ -51,8 +51,6 @@ async fn main() -> Result<()> {
     // Load and attach BPF programs
     let (mut bpf, usdt_diagnostics, _usdt_links) =
         loader::load_and_attach(&args, &usdt_selections)?;
-    info!("BPF programs loaded and attached");
-    eprintln!("BPF programs loaded and attached");
 
     // Set up shutdown handler
     let shutdown_tx = shutdown::shutdown_signal();
@@ -81,13 +79,19 @@ async fn main() -> Result<()> {
     let map = bpf.take_map("EVENTS").unwrap();
     let ring_buf = RingBuf::try_from(map)?;
     let (event_tx, mut event_rx) = mpsc::channel::<Vec<u8>>(4096);
+    let (consumer_ready_tx, consumer_ready_rx) = tokio::sync::oneshot::channel();
 
     // Spawn ring buffer consumer task
     let consumer_handle = tokio::spawn(async move {
-        if let Err(e) = consumer::consume_ring_buffer(ring_buf, event_tx).await {
+        if let Err(e) = consumer::consume_ring_buffer(ring_buf, event_tx, consumer_ready_tx).await {
             eprintln!("Ring buffer consumer error: {}", e);
         }
     });
+    consumer_ready_rx
+        .await
+        .context("ring buffer consumer exited before becoming ready")?;
+    info!("BPF programs loaded and attached");
+    eprintln!("BPF programs loaded and attached");
 
     // Synthesized-event channel for userspace-generated events
     // (lifecycle announcements and heartbeats). Kept separate from the
