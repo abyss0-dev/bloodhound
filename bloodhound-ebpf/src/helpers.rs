@@ -1,7 +1,7 @@
 use aya_ebpf::helpers::bpf_probe_read_user_str_bytes;
 use bloodhound_common::MAX_PATH_SIZE;
 
-use crate::maps::{DROP_COUNT, EVENTS, SCRATCH_BUF, USDT_HIT_COUNT};
+use crate::maps::{DROP_COUNT, EVENTS, SCRATCH_BUF};
 
 /// Read a user-space string into the per-CPU scratch buffer at the given index.
 /// Returns the number of bytes read (including null terminator), or 0 on failure.
@@ -42,13 +42,6 @@ pub unsafe fn emit_event(data: &[u8]) -> bool {
 #[inline(always)]
 pub unsafe fn increment_drop_count() {
     if let Some(ptr) = DROP_COUNT.get_ptr_mut(0) {
-        *ptr = (*ptr).wrapping_add(1);
-    }
-}
-
-#[inline(always)]
-pub unsafe fn record_usdt_hit(collector_slot: u32) {
-    if let Some(ptr) = USDT_HIT_COUNT.get_ptr_mut(collector_slot) {
         *ptr = (*ptr).wrapping_add(1);
     }
 }

@@ -8,6 +8,7 @@
 use std::{
     ffi::CString,
     fs, io,
+    io::Read,
     os::fd::{AsFd, AsRawFd, FromRawFd, OwnedFd},
     path::{Path, PathBuf},
 };
@@ -67,6 +68,7 @@ impl Architecture {
 // e2e/fixtures/Makefile.  They are not values read from configuration.
 const TRAINING_SHELL_V3_BUILD_IDS: &[&str] = &["11223344556677889900aabbccddeeff00112233"];
 const TRAINING_PEER_V1_BUILD_IDS: &[&str] = &["44556677889900aabbccddeeff00112233445566"];
+const TRAINING_SHELL_COMMAND_NAME_LIMIT: usize = 64;
 
 const TRAINING_SHELL_FIELDS: &[FieldMetadata] = &[
     FieldMetadata {
@@ -359,20 +361,29 @@ pub struct StapsdtProbe {
     pub semaphore_file_offset: Option<u32>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct VerifiedTarget {
-    pub path: PathBuf,
-    pub build_id: String,
-    pub probes: Vec<StapsdtProbe>,
+#[derive(Debug)]
+struct VerifiedTarget {
+    probes: Vec<StapsdtProbe>,
+    file: fs::File,
+}
+
+impl VerifiedTarget {
+    /// Address the already-open, already-verified inode during attachment.
+    /// Keeping `file` alive prevents a replacement at `path` from changing the
+    /// executable to which the uprobe is attached.
+    fn attachment_path(&self) -> PathBuf {
+        PathBuf::from(format!("/proc/self/fd/{}", self.file.as_raw_fd()))
+    }
 }
 
 /// Validate path, architecture, Build ID and the collector's exact note ABI.
 /// No attachment can be attempted unless this returns a verified target.
-pub fn verify_target(
-    metadata: &CollectorMetadata,
-) -> std::result::Result<VerifiedTarget, ReasonCode> {
+fn verify_target(metadata: &CollectorMetadata) -> std::result::Result<VerifiedTarget, ReasonCode> {
     let path = PathBuf::from(metadata.target_path);
-    let data = fs::read(&path).map_err(|_| ReasonCode::TargetBuildIdMismatch)?;
+    let mut file = fs::File::open(&path).map_err(|_| ReasonCode::TargetBuildIdMismatch)?;
+    let mut data = Vec::new();
+    file.read_to_end(&mut data)
+        .map_err(|_| ReasonCode::TargetBuildIdMismatch)?;
     let elf = ElfView::parse(&data).map_err(|_| ReasonCode::AbiIncompatible)?;
     if elf.machine != metadata.architecture.elf_machine() {
         return Err(ReasonCode::UnsupportedArchitecture);
@@ -408,9 +419,8 @@ pub fn verify_target(
         return Err(ReasonCode::SemaphoreUnavailable);
     }
     Ok(VerifiedTarget {
-        path,
-        build_id,
         probes: matching,
+        file,
     })
 }
 
@@ -470,6 +480,7 @@ pub fn attach_selected(
         use aya::programs::UProbe;
         let semaphore_checkpoint = links.checkpoint();
         let mut aya_links: Vec<(String, UProbeLinkId)> = Vec::new();
+        let attachment_path = target.attachment_path();
         if target.probes.len() > metadata.maximum_attach_points {
             bail!("collector has more static locations than its compiled attach-point programs");
         }
@@ -489,7 +500,7 @@ pub fn attach_selected(
             let attached: Result<()> = if let Some(semaphore_offset) = probe.semaphore_file_offset {
                 attach_uprobe_with_semaphore(
                     program,
-                    &target.path,
+                    &attachment_path,
                     probe.file_offset,
                     semaphore_offset,
                 )
@@ -498,7 +509,7 @@ pub fn attach_selected(
                 })
             } else {
                 program
-                    .attach(None, probe.file_offset, &target.path, None)
+                    .attach(None, probe.file_offset, &attachment_path, None)
                     .map(|link_id| {
                         aya_links.push((program_name.clone(), link_id));
                     })
@@ -557,10 +568,9 @@ struct PerfEventAttr {
     bp_type: u32,
     config1: u64,
     config2: u64,
-    // Keep the advertised size identical to Linux's current 128-byte UAPI
-    // shape. The kernel accepts shorter historical layouts, but that omits
-    // the trailing ABI space used when configuring the ref-counter-backed
-    // uprobe PMU on the E2E guest.
+    // Keep the advertised size identical to the 128-byte perf_event_attr ABI
+    // supported by the target guest. All fields after config2 remain zero; the
+    // ref-counter offset itself is encoded in the upper half of config.
     _reserved: [u64; 7],
 }
 
@@ -705,9 +715,19 @@ fn decode_training_shell_payload(
     }
     let fixed =
         unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingShellPayload) };
+    let command_name_len = fixed.command_name_len as usize;
+    if command_name_len > TRAINING_SHELL_COMMAND_NAME_LIMIT {
+        bail!("USDT command-name exceeds its compiled capture limit");
+    }
+    if fixed.command_name_truncated > 1 {
+        bail!("USDT command-name truncation flag is invalid");
+    }
     let name_end = UsdtTrainingShellPayload::SIZE
-        .checked_add(fixed.command_name_len as usize)
+        .checked_add(command_name_len)
         .ok_or_else(|| anyhow!("USDT command-name length overflow"))?;
+    if payload.len() != name_end {
+        bail!("USDT training-shell payload has invalid length");
+    }
     let command_name = payload
         .get(UsdtTrainingShellPayload::SIZE..name_end)
         .ok_or_else(|| anyhow!("USDT command-name exceeds payload"))?;
@@ -736,8 +756,8 @@ fn decode_training_shell_payload(
             "shell_pid": fixed.shell_pid,
             "command_id": fixed.command_id,
             "command_kind": command_kind,
-            "command_name": { "value": command_name, "capture_limit": 64, "truncated": fixed.command_name_truncated != 0 },
-            "command_name_bytes": { "base64": command_name_bytes, "capture_limit": 64, "observed_length": fixed.command_name_len, "truncated": fixed.command_name_truncated != 0 },
+            "command_name": { "value": command_name, "capture_limit": TRAINING_SHELL_COMMAND_NAME_LIMIT, "truncated": fixed.command_name_truncated != 0 },
+            "command_name_bytes": { "base64": command_name_bytes, "capture_limit": TRAINING_SHELL_COMMAND_NAME_LIMIT, "observed_length": fixed.command_name_len, "truncated": fixed.command_name_truncated != 0 },
             "semantic_flags": flags,
             "exit_status": fixed.exit_status,
         })),
@@ -797,7 +817,10 @@ impl<'a> ElfView<'a> {
             bail!("unknown ELF class");
         }
         let at = |offset: usize, width: usize| -> Result<&[u8]> {
-            data.get(offset..offset + width)
+            let end = offset
+                .checked_add(width)
+                .ok_or_else(|| anyhow!("ELF header range overflow"))?;
+            data.get(offset..end)
                 .ok_or_else(|| anyhow!("truncated ELF header"))
         };
         let u16_at = |offset| read_u16(at(offset, 2)?, little_endian);
@@ -851,26 +874,37 @@ impl<'a> ElfView<'a> {
         if index >= self.section_count || self.section_size == 0 {
             bail!("section index out of range");
         }
-        let offset = self
-            .section_offset
-            .checked_add(u64::from(index) * u64::from(self.section_size))
-            .ok_or_else(|| anyhow!("section table overflow"))? as usize;
+        let offset = usize::try_from(
+            self.section_offset
+                .checked_add(u64::from(index) * u64::from(self.section_size))
+                .ok_or_else(|| anyhow!("section table overflow"))?,
+        )
+        .map_err(|_| anyhow!("section table offset too large"))?;
+        let end = offset
+            .checked_add(self.section_size as usize)
+            .ok_or_else(|| anyhow!("section table range overflow"))?;
         let bytes = self
             .data
-            .get(offset..offset + self.section_size as usize)
+            .get(offset..end)
             .ok_or_else(|| anyhow!("truncated section table"))?;
-        let u32_at = |offset| {
+        let u32_at = |offset: usize| {
+            let end = offset
+                .checked_add(4)
+                .ok_or_else(|| anyhow!("section field range overflow"))?;
             read_u32(
                 bytes
-                    .get(offset..offset + 4)
+                    .get(offset..end)
                     .ok_or_else(|| anyhow!("truncated section"))?,
                 self.little_endian,
             )
         };
-        let u64_at = |offset| {
+        let u64_at = |offset: usize| {
+            let end = offset
+                .checked_add(8)
+                .ok_or_else(|| anyhow!("section field range overflow"))?;
             read_u64(
                 bytes
-                    .get(offset..offset + 8)
+                    .get(offset..end)
                     .ok_or_else(|| anyhow!("truncated section"))?,
                 self.little_endian,
             )
@@ -968,15 +1002,25 @@ impl<'a> ElfView<'a> {
 
     fn virtual_to_file_offset(&self, address: u64) -> Result<u64> {
         for index in 0..self.program_count {
-            let offset =
+            let offset = usize::try_from(
                 self.program_offset
                     .checked_add(u64::from(index) * u64::from(self.program_size))
-                    .ok_or_else(|| anyhow!("program table overflow"))? as usize;
+                    .ok_or_else(|| anyhow!("program table overflow"))?,
+            )
+            .map_err(|_| anyhow!("program table offset too large"))?;
+            let end = offset
+                .checked_add(self.program_size as usize)
+                .ok_or_else(|| anyhow!("program table range overflow"))?;
             let entry = self
                 .data
-                .get(offset..offset + self.program_size as usize)
+                .get(offset..end)
                 .ok_or_else(|| anyhow!("truncated program table"))?;
-            let typ = read_u32(&entry[..4], self.little_endian)?;
+            let typ = read_u32(
+                entry
+                    .get(..4)
+                    .ok_or_else(|| anyhow!("program header is too short"))?,
+                self.little_endian,
+            )?;
             if typ != 1 {
                 continue;
             } // PT_LOAD
@@ -994,7 +1038,9 @@ impl<'a> ElfView<'a> {
                 )
             };
             if address >= virtual_address && address < virtual_address.saturating_add(file_size) {
-                return Ok(file_offset + address - virtual_address);
+                return file_offset
+                    .checked_add(address - virtual_address)
+                    .ok_or_else(|| anyhow!("USDT file offset overflow"));
             }
         }
         bail!("USDT location is outside a loadable ELF segment")
@@ -1031,14 +1077,14 @@ fn parse_notes(data: &[u8], little: bool) -> Result<Vec<Note<'_>>> {
                 .ok_or_else(|| anyhow!("truncated note name"))?,
         )
         .ok_or_else(|| anyhow!("note name is not UTF-8"))?;
-        offset = align4(name_end);
+        offset = align4(name_end)?;
         let desc_end = offset
             .checked_add(descsz)
             .ok_or_else(|| anyhow!("note descriptor overflow"))?;
         let desc = data
             .get(offset..desc_end)
             .ok_or_else(|| anyhow!("truncated note descriptor"))?;
-        offset = align4(desc_end);
+        offset = align4(desc_end)?;
         notes.push(Note { name, kind, desc });
     }
     Ok(notes)
@@ -1052,8 +1098,11 @@ fn slice_at(data: &[u8], offset: u64, len: u64) -> Result<&[u8]> {
     data.get(start..end)
         .ok_or_else(|| anyhow!("truncated ELF data"))
 }
-fn align4(value: usize) -> usize {
-    (value + 3) & !3
+fn align4(value: usize) -> Result<usize> {
+    Ok(value
+        .checked_add(3)
+        .ok_or_else(|| anyhow!("ELF note alignment overflow"))?
+        & !3)
 }
 fn c_string(bytes: &[u8]) -> Option<&str> {
     std::str::from_utf8(bytes.split(|byte| *byte == 0).next()?).ok()
@@ -1230,6 +1279,73 @@ mod tests {
         assert_eq!(args["attach_point_id"], 3);
         assert_eq!(args["command_name"]["value"], "echo");
         assert_eq!(args["command_name_bytes"]["base64"], "ZWNobw==");
+    }
+
+    #[test]
+    fn shell_decode_rejects_noncanonical_payload_lengths_and_bounds() {
+        let fixed = UsdtTrainingShellPayload {
+            attach_point_id: 0,
+            shell_pid: 1,
+            command_id: 1,
+            command_kind: 0,
+            semantic_flags: 0,
+            exit_status: 0,
+            command_name_len: 4,
+            command_name_truncated: 0,
+            _pad: 0,
+        };
+        let mut payload = unsafe {
+            std::slice::from_raw_parts(
+                &fixed as *const UsdtTrainingShellPayload as *const u8,
+                UsdtTrainingShellPayload::SIZE,
+            )
+            .to_vec()
+        };
+        payload.extend_from_slice(b"echo");
+        payload.push(0);
+        assert!(decode_training_shell_payload(&payload).is_err());
+
+        let mut oversized = fixed;
+        oversized.command_name_len = (TRAINING_SHELL_COMMAND_NAME_LIMIT + 1) as u16;
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                &oversized as *const UsdtTrainingShellPayload as *const u8,
+                UsdtTrainingShellPayload::SIZE,
+            )
+        };
+        assert!(decode_training_shell_payload(payload).is_err());
+
+        let mut invalid_flag = fixed;
+        invalid_flag.command_name_truncated = 2;
+        let payload = unsafe {
+            std::slice::from_raw_parts(
+                &invalid_flag as *const UsdtTrainingShellPayload as *const u8,
+                UsdtTrainingShellPayload::SIZE,
+            )
+        };
+        assert!(decode_training_shell_payload(payload).is_err());
+    }
+
+    #[test]
+    fn malformed_elf_table_offsets_fail_closed() {
+        let mut data = vec![0u8; 64];
+        data[..4].copy_from_slice(b"\x7fELF");
+        data[4] = 2;
+        data[5] = 1;
+        data[18..20].copy_from_slice(&62u16.to_le_bytes());
+        data[40..48].copy_from_slice(&u64::MAX.to_le_bytes());
+        data[58..60].copy_from_slice(&64u16.to_le_bytes());
+        data[60..62].copy_from_slice(&1u16.to_le_bytes());
+
+        let elf = ElfView::parse(&data).unwrap();
+        assert!(elf.section(0).is_err());
+
+        data[40..48].copy_from_slice(&0u64.to_le_bytes());
+        data[32..40].copy_from_slice(&u64::MAX.to_le_bytes());
+        data[54..56].copy_from_slice(&56u16.to_le_bytes());
+        data[56..58].copy_from_slice(&1u16.to_le_bytes());
+        let elf = ElfView::parse(&data).unwrap();
+        assert!(elf.virtual_to_file_offset(0).is_err());
     }
 
     #[test]

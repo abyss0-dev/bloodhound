@@ -41,3 +41,5 @@ Negative cases must produce one bounded collector diagnostic and no partial sema
 - `2e50a97` replaced internal counters as acceptance with fixture event assertions.
 - `390d14b` added collector hit counters.
 - `212c20f` separated peer entry from successful ring-buffer output.
+- The counters were removed after locating the fault. The durable acceptance
+  contract remains fixture execution followed by the expected NDJSON event.

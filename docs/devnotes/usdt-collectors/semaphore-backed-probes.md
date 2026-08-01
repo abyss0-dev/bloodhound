@@ -43,3 +43,5 @@ volatile unsigned short usdt_semaphore
 - `20d0b26` enabled the raw perf event after BPF program installation.
 - `8b0a59e` corrected the `perf_event_attr` ABI size.
 - `1e5ffcc` moved the fixture counter into a file-backed ELF section.
+- The eBPF hit counter used during this investigation was temporary and is not
+  part of the production collector hot path.

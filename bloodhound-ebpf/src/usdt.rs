@@ -4,18 +4,10 @@
 //! collector's fixed path, architecture, Build ID, provider/probe and note ABI
 //! before attaching one of these programs at an exact static-note location.
 
-use aya_ebpf::{
-    helpers::bpf_probe_read_user_str_bytes,
-    macros::uprobe,
-    programs::ProbeContext,
-};
+use aya_ebpf::{helpers::bpf_probe_read_user_str_bytes, macros::uprobe, programs::ProbeContext};
 use bloodhound_common::*;
 
-use crate::{
-    filter::get_task_info,
-    helpers::{emit_event, record_usdt_hit},
-    maps::ASSEMBLY_BUF,
-};
+use crate::{filter::get_task_info, helpers::emit_event, maps::ASSEMBLY_BUF};
 
 const COMMAND_NAME_LIMIT: usize = 64;
 
@@ -29,10 +21,9 @@ unsafe fn emit_shell(
     semantic_flags: u32,
     exit_status: i32,
 ) {
-    record_usdt_hit(0);
     // A required pointer that cannot be read must not become a guessed value.
-    // The userspace attachment layer treats an incompatible declared ABI as a
-    // collector failure; this probe simply declines to emit an unsafe event.
+    // Emit only a bounded capture-error payload; userspace converts it to
+    // `DIAGNOSTIC/usdt.collector`, and no partial semantic event is emitted.
     if command_name.is_null() {
         emit_shell_capture_error(attach_point_id, 3, 1);
         return;
@@ -145,7 +136,6 @@ macro_rules! peer_attach_point {
         #[uprobe]
         pub fn $function(ctx: ProbeContext) -> u32 {
             unsafe {
-                record_usdt_hit(1);
                 let header = get_task_info(EventKind::UsdtTrainingPeerV1 as u8);
                 let payload = UsdtTrainingPeerPayload {
                     attach_point_id: $id,
@@ -169,9 +159,7 @@ macro_rules! peer_attach_point {
                     assembly.as_mut_ptr().add(EventHeader::SIZE),
                     UsdtTrainingPeerPayload::SIZE,
                 );
-                if emit_event(&assembly[..total]) {
-                    record_usdt_hit(3);
-                }
+                emit_event(&assembly[..total]);
             }
             0
         }

@@ -44,4 +44,7 @@ When an event is missing, inspect boundaries in this order:
 - `6adf027` exposed peer attachment failures in E2E.
 - `2505d2f` moved peer output to the shared assembly map.
 - `390d14b` and `212c20f` added entry and output boundary counters.
+- Those counters were temporary investigation instrumentation and were removed
+  before merge; production collectors do not pay a per-event map-update cost
+  solely for E2E diagnostics.
 - `1e5ffcc` closed consumer startup and pending-record readiness gaps.

@@ -54,20 +54,6 @@ def _assert_collector_attached(ssh_cmd, collector_id):
     )
 
 
-def _usdt_hit_count(ssh_cmd, collector_slot):
-    """Return the raw per-CPU hit-counter representation for one collector."""
-
-    key = " ".join(
-        f"{byte:02x}" for byte in collector_slot.to_bytes(4, byteorder="little")
-    )
-    result = ssh_cmd(
-        f"bpftool map lookup name USDT_HIT_COUNT key hex {key}",
-        user="root",
-    )
-    assert result.returncode == 0, result.stderr
-    return result.stdout
-
-
 @pytest.fixture
 def replace_usdt_target(ssh_cmd, fresh_bloodhound_events):
     """Temporarily replace the fixed collector target and recover the VM.
@@ -212,16 +198,8 @@ class TestTrustedUsdtCollectors:
     ):
         wait_for_usdt_daemon()
         _assert_collector_attached(ssh_cmd, "training-peer-v1")
-        before_hits = _usdt_hit_count(ssh_cmd, 1)
-        before_emits = _usdt_hit_count(ssh_cmd, 3)
         result = ssh_cmd("/opt/bloodhound/usdt-fixtures/training-peer-v1")
         assert result.returncode == 0, result.stderr
-        assert _usdt_hit_count(ssh_cmd, 1) != before_hits, (
-            "training-peer-v1 uprobe did not execute when its static probe fired"
-        )
-        assert _usdt_hit_count(ssh_cmd, 3) != before_emits, (
-            "training-peer-v1 uprobe could not write its event to the ring buffer"
-        )
 
         events = wait_for_matching_events(
             bloodhound_events,
@@ -335,12 +313,8 @@ class TestTrustedUsdtCollectors:
         ) as fresh_events:
             wait_for_usdt_daemon()
             _assert_collector_attached(ssh_cmd, "training-shell-v3")
-            before_hits = _usdt_hit_count(ssh_cmd, 0)
             result = ssh_cmd(SHELL_TARGET)
             assert result.returncode == 0, result.stderr
-            assert _usdt_hit_count(ssh_cmd, 0) != before_hits, (
-                "semaphore-backed training-shell-v3 uprobe did not execute when its static probe fired"
-            )
             events = wait_for_matching_events(
                 fresh_events,
                 lambda candidate: any(event.get("event") == SHELL_EVENT for event in candidate),

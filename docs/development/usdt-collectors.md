@@ -45,6 +45,8 @@ Every collector change must preserve these properties:
   and attachment limit are compiled metadata.
 - Attachment happens only after the target architecture, Build ID, static note,
   exact operand string, and semaphore offset are validated.
+- Validation and attachment use the same open executable inode; a path
+  replacement between those phases must not redirect the uprobe.
 - Probe locations come only from `.note.stapsdt`; there is no symbol fallback,
   runtime DSO scan, configured offset, or configured PID.
 - eBPF emits fixed-size scalars and explicitly bounded byte strings. It never
