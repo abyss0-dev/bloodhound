@@ -9,7 +9,7 @@ on:
 jobs:
   usdt-unit:
     name: USDT unit and replay tests
-    runs-on: ubuntu-24.04
+    runs-on: takumi-runner
     steps:
       - uses: actions/checkout@v4
 
