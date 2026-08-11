@@ -18,8 +18,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Enter | KeyCode::Char(' ') => {
             if app.active_pane == crate::app::Pane::History {
                 app.toggle_expand();
-            } else if app.active_pane == crate::app::Pane::Detail
-                && app.active_tab == Tab::Process
+            } else if app.active_pane == crate::app::Pane::Detail && app.active_tab == Tab::Process
             {
                 app.toggle_process_expand();
             }
@@ -39,6 +38,7 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
         KeyCode::Char('2') => app.set_tab(Tab::Security),
         KeyCode::Char('3') => app.set_tab(Tab::Files),
         KeyCode::Char('4') => app.set_tab(Tab::Network),
+        KeyCode::Char('5') => app.set_tab(Tab::Behavior),
 
         // Tab cycling with 'h'/'l' in detail pane
         KeyCode::Char('l') | KeyCode::Right => {
@@ -46,17 +46,8 @@ pub fn handle_key(app: &mut App, key: KeyEvent) {
                 app.next_tab();
             }
         }
-        KeyCode::Char('h') | KeyCode::Left => {
-            if app.active_pane == crate::app::Pane::Detail {
-                // Previous tab
-                let current = app.active_tab.index();
-                let prev = if current == 0 {
-                    Tab::ALL_TABS.len() - 1
-                } else {
-                    current - 1
-                };
-                app.set_tab(Tab::ALL_TABS[prev]);
-            }
+        KeyCode::Char('h') | KeyCode::Left if app.active_pane == crate::app::Pane::Detail => {
+            app.previous_tab();
         }
 
         _ => {}

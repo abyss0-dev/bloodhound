@@ -42,8 +42,12 @@ fn utc_offset() -> FixedOffset {
 }
 
 fn load_app(fixture: &str) -> App {
-    crate::build_app_from_path(&fixture_path(fixture), utc_offset(), Some(pinned_boot_time()))
-        .expect("fixture should parse cleanly")
+    crate::build_app_from_path(
+        &fixture_path(fixture),
+        utc_offset(),
+        Some(pinned_boot_time()),
+    )
+    .expect("fixture should parse cleanly")
 }
 
 fn render(app: &App) -> String {
@@ -121,10 +125,7 @@ fn detail_pane_excludes_lifecycle_and_heartbeat() {
 
     // Sanity: the fixture must actually contain lifecycle events at the
     // raw layer, otherwise this test is tautologically true.
-    let has_lifecycle = app
-        .events
-        .iter()
-        .any(|e| e.event.event_type == "LIFECYCLE");
+    let has_lifecycle = app.events.iter().any(|e| e.event.event_type == "LIFECYCLE");
     assert!(
         has_lifecycle,
         "03_process_lifecycle.ndjson should contain LIFECYCLE events",
@@ -136,7 +137,7 @@ fn detail_pane_excludes_lifecycle_and_heartbeat() {
     // coincide with a heartbeat.
     for gi in 0..app.commands.len().min(5) {
         app.history_cursor = gi;
-        for &tab in &Tab::ALL_TABS {
+        for &tab in &Tab::BASE_TABS {
             app.set_tab(tab);
             let rendered = render(&app);
             assert!(
@@ -176,9 +177,37 @@ fn active_pane_highlight_moves_on_tab() {
 fn tab_switching_filters_detail_pane() {
     let mut app = load_app("01_file_exploration.ndjson");
 
-    for &tab in &Tab::ALL_TABS {
+    for &tab in &Tab::BASE_TABS {
         app.set_tab(tab);
         let name = format!("tab_{}", tab.label().to_lowercase());
         insta::assert_snapshot!(name, render(&app));
     }
+}
+
+#[test]
+fn usdt_trace_adds_behavior_tab_and_aggregates_collector_health() {
+    let mut app = load_app("07_usdt_behavior.ndjson");
+    assert_eq!(app.available_tabs(), &Tab::ALL_TABS);
+    app.set_tab(Tab::Behavior);
+
+    let rendered = render(&app);
+    assert!(rendered.contains("5:Behavior"));
+    assert!(rendered.contains("abyss0_shell · COMMAND echo [builtin] exit=0"));
+    assert!(rendered.contains("abyss0_peer · TASK 17 finished ok"));
+    assert!(rendered.contains("future_provider · some_probe alpha=first zeta=last"));
+    assert!(rendered.contains("USDT: training-shell-v3 abi_incompatible"));
+    assert!(!rendered.contains("usdt.collector"));
+    assert!(rendered.contains("1-5:tab"));
+}
+
+#[test]
+fn trace_without_usdt_keeps_four_stable_tabs() {
+    let mut app = load_app("01_file_exploration.ndjson");
+    assert_eq!(app.available_tabs(), &Tab::BASE_TABS);
+    app.set_tab(Tab::Behavior);
+    assert_eq!(app.active_tab, Tab::Process);
+
+    let rendered = render(&app);
+    assert!(!rendered.contains("5:Behavior"));
+    assert!(rendered.contains("1-4:tab"));
 }

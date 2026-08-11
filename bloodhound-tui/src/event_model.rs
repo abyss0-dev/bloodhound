@@ -115,6 +115,7 @@ pub enum EventCategory {
     Security,
     Files,
     Network,
+    Behavior,
     /// Events that should not appear in any tab (tty shown in Output pane,
     /// raw Layer 2 syscalls are too low-level for user-facing display).
     Hidden,
@@ -123,6 +124,13 @@ pub enum EventCategory {
 impl BehaviorEvent {
     /// Categorize this event for tab filtering.
     pub fn category(&self) -> EventCategory {
+        if self.is_usdt() {
+            return EventCategory::Behavior;
+        }
+        if self.is_collector_diagnostic() {
+            return EventCategory::Hidden;
+        }
+
         match self.event.name.as_str() {
             "execve" | "execveat" | "clone" | "clone3" | "process_start" | "process_fork"
             | "process_exit" => EventCategory::Process,
@@ -130,13 +138,12 @@ impl BehaviorEvent {
             "ingress" | "egress" | "connect" | "bind" | "listen" | "socket" | "sendto"
             | "recvfrom" => EventCategory::Network,
 
-            "openat" | "read" | "write" | "mkdir" | "mkdirat" | "rmdir" | "unlink"
-            | "unlinkat" | "rename" | "renameat2" | "symlink" | "symlinkat" | "link"
-            | "linkat" | "chmod" | "fchmod" | "fchmodat" | "chown" | "fchown" | "fchownat"
-            | "truncate" | "ftruncate" | "chdir" | "fchdir" | "mount" | "umount2"
-            | "mmap" | "dup" | "dup2" | "dup3" | "fcntl" | "pread64" | "pwrite64" | "readv"
-            | "writev" | "sendfile" | "splice" | "file_open" | "inode_unlink"
-            | "inode_rename" => EventCategory::Files,
+            "openat" | "read" | "write" | "mkdir" | "mkdirat" | "rmdir" | "unlink" | "unlinkat"
+            | "rename" | "renameat2" | "symlink" | "symlinkat" | "link" | "linkat" | "chmod"
+            | "fchmod" | "fchmodat" | "chown" | "fchown" | "fchownat" | "truncate"
+            | "ftruncate" | "chdir" | "fchdir" | "mount" | "umount2" | "mmap" | "dup" | "dup2"
+            | "dup3" | "fcntl" | "pread64" | "pwrite64" | "readv" | "writev" | "sendfile"
+            | "splice" | "file_open" | "inode_unlink" | "inode_rename" => EventCategory::Files,
 
             "task_kill" | "bpf" | "ptrace_access_check" | "task_fix_setuid" => {
                 EventCategory::Security
@@ -181,6 +188,19 @@ impl BehaviorEvent {
         )
     }
 
+    pub fn is_usdt(&self) -> bool {
+        self.event.event_type == "USDT"
+    }
+
+    pub fn is_collector_diagnostic(&self) -> bool {
+        self.event.event_type == "DIAGNOSTIC" && self.event.name == "usdt.collector"
+    }
+
+    /// Whether this event belongs in a user command's time window.
+    pub fn is_command_correlatable(&self) -> bool {
+        !self.is_tty() && !self.is_synthetic() && self.event.event_type != "DIAGNOSTIC"
+    }
+
     /// True when a Tier 1 raw `SYSCALL` event describes a syscall that
     /// also has Tier 2 rich coverage.
     ///
@@ -205,6 +225,10 @@ impl BehaviorEvent {
     /// names. If `fd_table` is provided, `read`/`write` resolve their fd to
     /// the originating path (built from prior `openat` events).
     pub fn summary_line(&self, fd_table: Option<&HashMap<(u32, u32), String>>) -> String {
+        if self.is_usdt() {
+            return self.usdt_summary_line();
+        }
+
         let pid = self.header.pid;
         let rc = self
             .return_code
@@ -214,10 +238,7 @@ impl BehaviorEvent {
         let (action, detail) = match self.event.name.as_str() {
             "execve" | "execveat" => {
                 let detail = if let Some(args) = &self.args {
-                    let filename = args
-                        .get("filename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("?");
                     let argv = args
                         .get("argv")
                         .and_then(|v| v.as_array())
@@ -256,10 +277,7 @@ impl BehaviorEvent {
             // openat → READ / WRITE based on flags.
             "openat" => {
                 if let Some(args) = &self.args {
-                    let filename = args
-                        .get("filename")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("?");
+                    let filename = args.get("filename").and_then(|v| v.as_str()).unwrap_or("?");
                     let empty = Vec::new();
                     let flags: Vec<&str> = args
                         .get("flags")
@@ -285,9 +303,7 @@ impl BehaviorEvent {
             "mkdir" | "mkdirat" => ("CREATE", self.format_path_detail()),
             "unlink" | "unlinkat" | "rmdir" => ("DELETE", self.format_path_detail()),
             "rename" | "renameat2" => ("RENAME", self.format_two_path_detail()),
-            "symlink" | "symlinkat" | "link" | "linkat" => {
-                ("LINK", self.format_two_path_detail())
-            }
+            "symlink" | "symlinkat" | "link" | "linkat" => ("LINK", self.format_two_path_detail()),
             "chmod" | "fchmodat" => ("PERM", self.format_path_detail()),
             "fchmod" => ("PERM", self.format_fd_detail()),
             "chown" | "fchownat" => ("OWNER", self.format_path_detail()),
@@ -381,6 +397,84 @@ impl BehaviorEvent {
         format!("{}{} (pid:{}{})", action, detail, pid, rc)
     }
 
+    fn usdt_summary_line(&self) -> String {
+        let (provider, probe) = self
+            .event
+            .name
+            .split_once('.')
+            .unwrap_or(("usdt", self.event.name.as_str()));
+        let args = self.args.as_ref();
+
+        let detail = match self.event.name.as_str() {
+            "abyss0_shell.simple_command_completed" => {
+                let name = args
+                    .and_then(|a| a.get("command_name"))
+                    .and_then(|v| v.get("value").or(Some(v)))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                let kind = args
+                    .and_then(|a| a.get("command_kind"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
+                let exit = args
+                    .and_then(|a| a.get("exit_status"))
+                    .and_then(|v| v.as_i64())
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "?".to_string());
+                let flags = args
+                    .and_then(|a| a.get("semantic_flags"))
+                    .and_then(|v| v.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    })
+                    .filter(|v| !v.is_empty())
+                    .map(|v| format!(" flags={v}"))
+                    .unwrap_or_default();
+                format!("COMMAND {name} [{kind}] exit={exit}{flags}")
+            }
+            "abyss0_peer.task_finished" => {
+                let task_id = args
+                    .and_then(|a| a.get("task_id"))
+                    .map(compact_json_value)
+                    .unwrap_or_else(|| "?".to_string());
+                let result = args
+                    .and_then(|a| a.get("result"))
+                    .map(compact_json_value)
+                    .unwrap_or_else(|| "unknown".to_string());
+                format!("TASK {task_id} finished {result}")
+            }
+            _ => {
+                let fields = args
+                    .and_then(|v| v.as_object())
+                    .map(|object| {
+                        let mut entries = object.iter().collect::<Vec<_>>();
+                        entries.sort_unstable_by_key(|(key, _)| *key);
+                        entries
+                            .into_iter()
+                            .take(6)
+                            .map(|(key, value)| format!("{key}={}", compact_json_value(value)))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .unwrap_or_default();
+                if fields.is_empty() {
+                    probe.to_string()
+                } else {
+                    format!("{probe} {fields}")
+                }
+            }
+        };
+
+        truncate_chars(
+            format!("{provider} · {detail} (pid:{})", self.header.pid),
+            160,
+        )
+    }
+
     fn format_rw_detail(&self, fd_table: Option<&HashMap<(u32, u32), String>>) -> String {
         let Some(args) = &self.args else {
             return String::new();
@@ -426,6 +520,37 @@ impl BehaviorEvent {
     }
 }
 
+fn compact_json_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Null => "null".to_string(),
+        serde_json::Value::Bool(_) | serde_json::Value::Number(_) => value.to_string(),
+        serde_json::Value::String(value) => truncate_chars(value.clone(), 48),
+        serde_json::Value::Array(values) => {
+            let items = values
+                .iter()
+                .take(3)
+                .map(compact_json_value)
+                .collect::<Vec<_>>()
+                .join(",");
+            let suffix = if values.len() > 3 { ",…" } else { "" };
+            format!("[{items}{suffix}]")
+        }
+        serde_json::Value::Object(_) => "{…}".to_string(),
+    }
+}
+
+fn truncate_chars(value: String, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value;
+    }
+    let mut shortened = value
+        .chars()
+        .take(max_chars.saturating_sub(1))
+        .collect::<String>();
+    shortened.push('…');
+    shortened
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -454,10 +579,22 @@ mod tests {
 
     #[test]
     fn test_category_process() {
-        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "clone").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "clone3").category(), EventCategory::Process);
+        assert_eq!(
+            make_event("TRACEPOINT", "execve").category(),
+            EventCategory::Process
+        );
+        assert_eq!(
+            make_event("TRACEPOINT", "execveat").category(),
+            EventCategory::Process
+        );
+        assert_eq!(
+            make_event("TRACEPOINT", "clone").category(),
+            EventCategory::Process
+        );
+        assert_eq!(
+            make_event("TRACEPOINT", "clone3").category(),
+            EventCategory::Process
+        );
         assert_eq!(
             make_event("LIFECYCLE", "process_start").category(),
             EventCategory::Process,
@@ -474,17 +611,38 @@ mod tests {
 
     #[test]
     fn test_category_network() {
-        assert_eq!(make_event("PACKET", "ingress").category(), EventCategory::Network);
-        assert_eq!(make_event("TRACEPOINT", "connect").category(), EventCategory::Network);
+        assert_eq!(
+            make_event("PACKET", "ingress").category(),
+            EventCategory::Network
+        );
+        assert_eq!(
+            make_event("TRACEPOINT", "connect").category(),
+            EventCategory::Network
+        );
     }
 
     #[test]
     fn test_category_files() {
-        assert_eq!(make_event("TRACEPOINT", "openat").category(), EventCategory::Files);
-        assert_eq!(make_event("TRACEPOINT", "mkdir").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "file_open").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "inode_unlink").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "inode_rename").category(), EventCategory::Files);
+        assert_eq!(
+            make_event("TRACEPOINT", "openat").category(),
+            EventCategory::Files
+        );
+        assert_eq!(
+            make_event("TRACEPOINT", "mkdir").category(),
+            EventCategory::Files
+        );
+        assert_eq!(
+            make_event("LSM", "file_open").category(),
+            EventCategory::Files
+        );
+        assert_eq!(
+            make_event("LSM", "inode_unlink").category(),
+            EventCategory::Files
+        );
+        assert_eq!(
+            make_event("LSM", "inode_rename").category(),
+            EventCategory::Files
+        );
         // Rich-extraction events that previously fell through to Security.
         for name in [
             "mmap", "dup", "dup2", "dup3", "fcntl", "pread64", "pwrite64", "readv", "writev",
@@ -500,17 +658,35 @@ mod tests {
 
     #[test]
     fn test_category_security() {
-        assert_eq!(make_event("LSM", "task_kill").category(), EventCategory::Security);
+        assert_eq!(
+            make_event("LSM", "task_kill").category(),
+            EventCategory::Security
+        );
         assert_eq!(make_event("LSM", "bpf").category(), EventCategory::Security);
-        assert_eq!(make_event("LSM", "ptrace_access_check").category(), EventCategory::Security);
-        assert_eq!(make_event("LSM", "task_fix_setuid").category(), EventCategory::Security);
+        assert_eq!(
+            make_event("LSM", "ptrace_access_check").category(),
+            EventCategory::Security
+        );
+        assert_eq!(
+            make_event("LSM", "task_fix_setuid").category(),
+            EventCategory::Security
+        );
     }
 
     #[test]
     fn test_category_hidden() {
-        assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
-        assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);
-        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Hidden);
+        assert_eq!(
+            make_event("TTY", "tty_read").category(),
+            EventCategory::Hidden
+        );
+        assert_eq!(
+            make_event("TTY", "tty_write").category(),
+            EventCategory::Hidden
+        );
+        assert_eq!(
+            make_event("SYSCALL", "42").category(),
+            EventCategory::Hidden
+        );
         assert_eq!(
             make_event("HEARTBEAT", "heartbeat").category(),
             EventCategory::Hidden,
@@ -520,6 +696,43 @@ mod tests {
             make_event("TRACEPOINT", "some_future_event").category(),
             EventCategory::Hidden,
         );
+    }
+
+    #[test]
+    fn test_usdt_category_and_known_summary() {
+        let mut event = make_event("USDT", "abyss0_shell.simple_command_completed");
+        event.args = Some(serde_json::json!({
+            "command_name": {"value": "echo"},
+            "command_kind": "builtin",
+            "exit_status": 0,
+            "semantic_flags": ["SELF_PID_EXPANDED"]
+        }));
+        assert_eq!(event.category(), EventCategory::Behavior);
+        assert_eq!(
+            event.summary_line(None),
+            "abyss0_shell · COMMAND echo [builtin] exit=0 flags=SELF_PID_EXPANDED (pid:42)"
+        );
+    }
+
+    #[test]
+    fn test_unknown_usdt_summary_is_stable_and_bounded() {
+        let mut event = make_event("USDT", "future_provider.some_probe");
+        event.args = Some(serde_json::json!({
+            "zeta": "last",
+            "alpha": "first",
+            "payload": "x".repeat(300)
+        }));
+        let summary = event.summary_line(None);
+        assert!(summary.starts_with("future_provider · some_probe alpha=first payload="));
+        assert!(summary.contains('…'));
+        assert!(summary.chars().count() <= 160);
+    }
+
+    #[test]
+    fn test_collector_diagnostic_is_hidden_and_not_correlatable() {
+        let event = make_event("DIAGNOSTIC", "usdt.collector");
+        assert_eq!(event.category(), EventCategory::Hidden);
+        assert!(!event.is_command_correlatable());
     }
 
     #[test]
@@ -542,7 +755,14 @@ mod tests {
         let json = r#"{"header":{"timestamp":1.0,"auid":1000,"sessionid":42,"pid":100,"comm":"bash"},"event":{"type":"TTY","name":"tty_read","layer":"intent"},"args":{"data":"bHM="}}"#;
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert!(event.is_tty_read());
-        let data = event.args.as_ref().unwrap().get("data").unwrap().as_str().unwrap();
+        let data = event
+            .args
+            .as_ref()
+            .unwrap()
+            .get("data")
+            .unwrap()
+            .as_str()
+            .unwrap();
         assert_eq!(data, "bHM="); // base64 for "ls"
     }
 
@@ -635,15 +855,47 @@ mod tests {
     #[test]
     fn test_summary_file_actions() {
         let cases = [
-            ("mkdir", serde_json::json!({"filename":"/tmp/d"}), "CREATE /tmp/d"),
-            ("unlink", serde_json::json!({"filename":"/tmp/x"}), "DELETE /tmp/x"),
-            ("rmdir", serde_json::json!({"filename":"/tmp/d"}), "DELETE /tmp/d"),
-            ("chmod", serde_json::json!({"filename":"/etc/c"}), "PERM /etc/c"),
+            (
+                "mkdir",
+                serde_json::json!({"filename":"/tmp/d"}),
+                "CREATE /tmp/d",
+            ),
+            (
+                "unlink",
+                serde_json::json!({"filename":"/tmp/x"}),
+                "DELETE /tmp/x",
+            ),
+            (
+                "rmdir",
+                serde_json::json!({"filename":"/tmp/d"}),
+                "DELETE /tmp/d",
+            ),
+            (
+                "chmod",
+                serde_json::json!({"filename":"/etc/c"}),
+                "PERM /etc/c",
+            ),
             ("fchmod", serde_json::json!({"fd":5}), "PERM fd=5"),
-            ("chown", serde_json::json!({"filename":"/var/log"}), "OWNER /var/log"),
-            ("truncate", serde_json::json!({"filename":"/tmp/l"}), "TRUNC /tmp/l"),
-            ("chdir", serde_json::json!({"filename":"/home/u"}), "CHDIR /home/u"),
-            ("umount2", serde_json::json!({"filename":"/mnt"}), "UMOUNT /mnt"),
+            (
+                "chown",
+                serde_json::json!({"filename":"/var/log"}),
+                "OWNER /var/log",
+            ),
+            (
+                "truncate",
+                serde_json::json!({"filename":"/tmp/l"}),
+                "TRUNC /tmp/l",
+            ),
+            (
+                "chdir",
+                serde_json::json!({"filename":"/home/u"}),
+                "CHDIR /home/u",
+            ),
+            (
+                "umount2",
+                serde_json::json!({"filename":"/mnt"}),
+                "UMOUNT /mnt",
+            ),
         ];
         for (name, args, expected_prefix) in cases {
             let e = make_event_with_args(name, args);
@@ -651,7 +903,9 @@ mod tests {
             assert!(
                 s.starts_with(expected_prefix),
                 "{} → {} (expected prefix {})",
-                name, s, expected_prefix
+                name,
+                s,
+                expected_prefix
             );
         }
     }
@@ -662,7 +916,9 @@ mod tests {
             "rename",
             serde_json::json!({"oldpath":"a.txt","newpath":"b.txt"}),
         );
-        assert!(rename.summary_line(None).starts_with("RENAME a.txt → b.txt"));
+        assert!(rename
+            .summary_line(None)
+            .starts_with("RENAME a.txt → b.txt"));
 
         let symlink = make_event_with_args(
             "symlink",
@@ -676,7 +932,9 @@ mod tests {
             "mount",
             serde_json::json!({"oldpath":"/dev/sda1","newpath":"/mnt"}),
         );
-        assert!(mount.summary_line(None).starts_with("MOUNT /dev/sda1 → /mnt"));
+        assert!(mount
+            .summary_line(None)
+            .starts_with("MOUNT /dev/sda1 → /mnt"));
     }
 
     #[test]
