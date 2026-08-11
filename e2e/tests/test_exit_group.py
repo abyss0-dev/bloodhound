@@ -89,6 +89,24 @@ def test_fatal_signal_emits_one_signal_exit(
     assert exits[0]["args"]["signal"] == signal.SIGTERM
 
 
+def test_last_worker_reports_the_group_leader_exit_status(
+    ssh_cmd, bloodhound_events, wait_for_matching_events
+):
+    # SYS_exit terminates only the calling thread. The worker therefore emits
+    # the last sched_process_exit after the leader (and its exit_code) is gone.
+    script = (
+        "import ctypes,os,threading,time; "
+        "threading.Thread(target=lambda: time.sleep(0.2)).start(); "
+        "print(os.getpid(),flush=True); ctypes.CDLL(None).syscall(60,42)"
+    )
+    pid = _pid_from(ssh_cmd(python_command(script)))
+    events = _wait_for_one_exit(wait_for_matching_events, bloodhound_events, pid)
+    exits = _exits(events, pid)
+    assert len(exits) == 1
+    assert exits[0]["args"]["exit_kind"] == "code"
+    assert exits[0]["args"]["exit_code"] == 42
+
+
 def test_short_lived_process_has_complete_identity_and_ordering(
     ssh_cmd, bloodhound_events, wait_for_matching_events
 ):

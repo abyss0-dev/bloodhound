@@ -10,7 +10,9 @@ use aya_ebpf::{
     programs::RawTracePointContext,
     EbpfContext,
 };
-use bloodhound_common::{EventHeader, EventKind, ProcessExitPayload, ProcessForkPayload};
+use bloodhound_common::{
+    select_process_exit_status, EventHeader, EventKind, ProcessExitPayload, ProcessForkPayload,
+};
 
 use crate::filter::{
     get_task_info, get_task_info_from_task, process_ref_from_task, should_trace,
@@ -75,6 +77,7 @@ unsafe fn try_process_fork(ctx: &RawTracePointContext) -> Result<(), i64> {
     let parent_ref = process_ref_from_task(parent).unwrap_or(KernelProcessRef {
         tgid: fork_header.pid,
         start_boottime_ns: 0,
+        group_leader: core::ptr::null(),
     });
     let Some(child_ref) = process_ref_from_task(child) else {
         return Ok(());
@@ -139,13 +142,15 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         return Ok(());
     };
     let exit_off = core::ptr::read_volatile(&raw const OFF_EXIT_CODE) as usize;
-    let task_status = bpf_probe_read_kernel((task as usize + exit_off) as *const i32)
+    let leader_status = bpf_probe_read_kernel(
+        (process_ref.group_leader as usize + exit_off) as *const i32,
+    )
         .map_err(|_| -1i64)?;
     let group_exit_off =
         core::ptr::read_volatile(&raw const OFF_SIGNAL_GROUP_EXIT_CODE) as usize;
     let group_status = bpf_probe_read_kernel((signal as usize + group_exit_off) as *const i32)
         .map_err(|_| -1i64)?;
-    let raw_status = if group_status != 0 { group_status } else { task_status };
+    let raw_status = select_process_exit_status(group_status, leader_status);
 
     let mut header = get_task_info(EventKind::ProcessExit as u8);
     header.pid = process_ref.tgid;

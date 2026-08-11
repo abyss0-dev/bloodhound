@@ -13,6 +13,7 @@ use crate::{
 pub struct KernelProcessRef {
     pub tgid: u32,
     pub start_boottime_ns: u64,
+    pub group_leader: *const u8,
 }
 
 #[inline(always)]
@@ -34,7 +35,11 @@ pub unsafe fn process_ref_from_task(task: *const u8) -> Option<KernelProcessRef>
     if tgid == 0 || start_boottime_ns == 0 {
         return None;
     }
-    Some(KernelProcessRef { tgid, start_boottime_ns })
+    Some(KernelProcessRef {
+        tgid,
+        start_boottime_ns,
+        group_leader: leader,
+    })
 }
 
 #[inline(always)]

@@ -53,6 +53,13 @@ pub fn load_and_attach(
     // Populate port exclusion map
     populate_excluded_ports(&mut bpf, &args.exclude_ports)?;
 
+    // Lifecycle identity is authoritative for every behavior event. Attach it
+    // first so startup cannot enqueue clone/exec observations before the
+    // corresponding process_fork edge is observable.
+    info!("Attaching kernel process lifecycle hooks...");
+    attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
+    attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
+
     info!("Attaching Layer 2: execve tracepoints...");
     attach_tracepoint(&mut bpf, "sys_enter_execve", "syscalls", "sys_enter_execve")?;
     attach_tracepoint(&mut bpf, "sys_exit_execve", "syscalls", "sys_exit_execve")?;
@@ -225,10 +232,6 @@ pub fn load_and_attach(
             info!("  Attached LSM: {}", hook_name);
         }
     }
-
-    info!("Attaching kernel process lifecycle hooks...");
-    attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
-    attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
 
     let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections

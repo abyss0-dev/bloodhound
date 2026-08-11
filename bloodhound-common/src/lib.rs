@@ -410,6 +410,21 @@ impl ProcessExitPayload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
+/// Select the wait status for a whole-process exit. `group_exit_status` is
+/// authoritative for exit_group/fatal-signal teardown; otherwise Linux
+/// reports the thread-group leader's status even if another thread exits last.
+#[inline(always)]
+pub const fn select_process_exit_status(
+    group_exit_status: i32,
+    group_leader_status: i32,
+) -> i32 {
+    if group_exit_status != 0 {
+        group_exit_status
+    } else {
+        group_leader_status
+    }
+}
+
 impl ClonePayload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
@@ -1203,6 +1218,12 @@ mod tests {
             SendfileSplicePayload::SIZE,
             mem::size_of::<SendfileSplicePayload>()
         );
+    }
+
+    #[test]
+    fn process_exit_status_uses_the_group_leader_without_group_exit() {
+        assert_eq!(select_process_exit_status(9, 42 << 8), 9);
+        assert_eq!(select_process_exit_status(0, 42 << 8), 42 << 8);
     }
 
     // ── Syscall metadata correctness ─────────────────────────────────────

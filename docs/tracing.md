@@ -137,6 +137,10 @@ reference is `(tgid, group_leader.start_boottime_ns)`. This covers short-lived
 processes, PID reuse, signal termination, and multithreaded teardown without
 interpreting raw exit syscalls in userspace.
 
+The lifecycle raw tracepoints are attached before every behavior producer.
+This keeps clone and exec observations collected during startup from preceding
+the authoritative `process_fork` edge for the same process.
+
 The group-leader pointer and both identity fields must all be readable and
 non-zero. A failed leader lookup never falls back to a thread's own start time.
 At fork, the child event header reads audit/session metadata and `comm` from the
