@@ -40,6 +40,7 @@ pub struct TaskStructOffsets {
     pub start_boottime: u32,
     pub signal: u32,
     pub exit_code: u32,
+    pub comm: u32,
     pub signal_live: u32,
     pub signal_group_exit_code: u32,
 }
@@ -232,6 +233,7 @@ fn read_task_members(
     let mut start_boottime = None;
     let mut signal = None;
     let mut exit_code = None;
+    let mut comm = None;
 
     for i in 0..vlen {
         let m = members_pos + i * 12;
@@ -253,6 +255,7 @@ fn read_task_members(
             "start_boottime" => start_boottime = Some(byte_offset),
             "signal" => signal = Some(byte_offset),
             "exit_code" => exit_code = Some(byte_offset),
+            "comm" => comm = Some(byte_offset),
             _ => {}
         }
     }
@@ -266,6 +269,7 @@ fn read_task_members(
         start_boottime: start_boottime.context("task_struct::start_boottime not found in BTF")?,
         signal: signal.context("task_struct::signal not found in BTF")?,
         exit_code: exit_code.context("task_struct::exit_code not found in BTF")?,
+        comm: comm.context("task_struct::comm not found in BTF")?,
         signal_live: 0,
         signal_group_exit_code: 0,
     };
@@ -279,6 +283,7 @@ fn read_task_members(
         ("start_boottime", off.start_boottime),
         ("signal", off.signal),
         ("exit_code", off.exit_code),
+        ("comm", off.comm),
     ] {
         if value >= struct_size {
             bail!(
@@ -437,6 +442,7 @@ mod tests {
                 ("start_boottime", 0xa20),
                 ("signal", 0x8d0),
                 ("exit_code", 0x9f0),
+                ("comm", 0xb00),
                 ("loginuid", 0xc88),
                 ("sessionid", 0xc8c),
             ],
@@ -446,6 +452,7 @@ mod tests {
         assert_eq!(off.loginuid, 0xc88);
         assert_eq!(off.sessionid, 0xc8c);
         assert_eq!(off.tgid, 0x9a4);
+        assert_eq!(off.comm, 0xb00);
     }
 
     #[test]
@@ -462,6 +469,7 @@ mod tests {
                 ("start_boottime", 0xa20),
                 ("signal", 0x8d0),
                 ("exit_code", 0x9f0),
+                ("comm", 0xb00),
                 ("loginuid", 0xca0),
                 ("sessionid", 0xca4),
             ],
@@ -485,6 +493,7 @@ mod tests {
                 ("start_boottime", 0xa20),
                 ("signal", 0x8d0),
                 ("exit_code", 0x9f0),
+                ("comm", 0xb00),
                 ("loginuid", 0xc88),
                 ("sessionid", 0xc8c),
             ],
@@ -529,6 +538,7 @@ mod tests {
                 ("start_boottime", 0xa20),
                 ("signal", 0x8d0),
                 ("exit_code", 0x9f0),
+                ("comm", 0xb00),
                 ("loginuid", 0xc88),
                 ("sessionid", 0xc8c),
             ],
@@ -566,6 +576,7 @@ mod tests {
         }
         let offsets = read_and_parse(SYS_BTF).expect("running kernel BTF must satisfy contract");
         assert!(offsets.start_boottime > 0);
+        assert!(offsets.comm > 0);
         assert!(offsets.signal_live > 0);
         assert!(offsets.signal_group_exit_code > 0);
     }

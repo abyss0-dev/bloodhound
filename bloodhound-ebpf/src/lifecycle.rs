@@ -12,7 +12,10 @@ use aya_ebpf::{
 };
 use bloodhound_common::{EventHeader, EventKind, ProcessExitPayload, ProcessForkPayload};
 
-use crate::filter::{get_task_info, process_ref_from_task, should_trace};
+use crate::filter::{
+    get_task_info, get_task_info_from_task, process_ref_from_task, should_trace,
+    KernelProcessRef,
+};
 use crate::helpers::emit_event;
 use crate::layer3_rich::pending_clone_flags;
 use crate::{
@@ -68,8 +71,14 @@ unsafe fn try_process_fork(ctx: &RawTracePointContext) -> Result<(), i64> {
     let pid_off = core::ptr::read_volatile(&raw const OFF_PID) as usize;
     let child_pid = bpf_probe_read_kernel((child as usize + pid_off) as *const u32)
         .map_err(|_| -1i64)?;
-    let parent_ref = process_ref_from_task(parent);
-    let child_ref = process_ref_from_task(child);
+    let mut fork_header = get_task_info(EventKind::ProcessFork as u8);
+    let parent_ref = process_ref_from_task(parent).unwrap_or(KernelProcessRef {
+        tgid: fork_header.pid,
+        start_boottime_ns: 0,
+    });
+    let Some(child_ref) = process_ref_from_task(child) else {
+        return Ok(());
+    };
 
     // A CLONE_THREAD child has a distinct task PID but inherits its TGID. It
     // does not create a new process instance and therefore emits no semantic
@@ -78,13 +87,12 @@ unsafe fn try_process_fork(ctx: &RawTracePointContext) -> Result<(), i64> {
         return Ok(());
     }
 
-    let mut child_header = get_task_info(EventKind::ProcessStart as u8);
+    let mut child_header = get_task_info_from_task(EventKind::ProcessStart as u8, child);
     child_header.pid = child_ref.tgid;
     child_header.ppid = parent_ref.tgid;
     child_header.process_start_boottime_ns = child_ref.start_boottime_ns;
     emit_fixed::<u8>(&child_header, None);
 
-    let mut fork_header = get_task_info(EventKind::ProcessFork as u8);
     fork_header.pid = parent_ref.tgid;
     fork_header.process_start_boottime_ns = parent_ref.start_boottime_ns;
     let payload = ProcessForkPayload {
@@ -127,10 +135,9 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         return Ok(());
     }
 
-    let process_ref = process_ref_from_task(task);
-    if process_ref.tgid == 0 || process_ref.start_boottime_ns == 0 {
+    let Some(process_ref) = process_ref_from_task(task) else {
         return Ok(());
-    }
+    };
     let exit_off = core::ptr::read_volatile(&raw const OFF_EXIT_CODE) as usize;
     let task_status = bpf_probe_read_kernel((task as usize + exit_off) as *const i32)
         .map_err(|_| -1i64)?;

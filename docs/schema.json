@@ -54,7 +54,7 @@
         "type": {
           "type": "string",
           "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM", "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC"],
-          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector health state."
+          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector or process-identity health state."
         },
         "name": {
           "type": "string",

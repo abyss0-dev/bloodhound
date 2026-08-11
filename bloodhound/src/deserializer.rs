@@ -86,7 +86,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         pid: header.pid,
         ppid: if header.ppid != 0 { Some(header.ppid) } else { None },
         comm: comm_to_string(&header.comm),
-        process_ref: (header.process_start_boottime_ns != 0).then_some(ProcessRefJson {
+        process_ref: (header.pid != 0 && header.process_start_boottime_ns != 0).then_some(ProcessRefJson {
             tgid: header.pid,
             start_boottime_ns: header.process_start_boottime_ns,
         }),
@@ -457,21 +457,31 @@ fn parse_process_fork(payload: &[u8]) -> Result<(String, String, String, Option<
         bail!("process_fork payload too short");
     }
     let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ProcessForkPayload) };
+    let mut args = serde_json::Map::new();
+    if p.parent_tgid != 0 && p.parent_start_boottime_ns != 0 {
+        args.insert(
+            "parent_ref".into(),
+            serde_json::json!({
+                "tgid": p.parent_tgid,
+                "start_boottime_ns": p.parent_start_boottime_ns,
+            }),
+        );
+    }
+    if p.child_tgid != 0 && p.child_start_boottime_ns != 0 {
+        args.insert(
+            "child_ref".into(),
+            serde_json::json!({
+                "tgid": p.child_tgid,
+                "start_boottime_ns": p.child_start_boottime_ns,
+            }),
+        );
+    }
+    args.insert("clone_flags".into(), serde_json::json!(decode_clone_flags(p.clone_flags)));
     Ok((
         "LIFECYCLE".into(),
         "process_fork".into(),
         "behavior".into(),
-        Some(serde_json::json!({
-            "parent_ref": {
-                "tgid": p.parent_tgid,
-                "start_boottime_ns": p.parent_start_boottime_ns,
-            },
-            "child_ref": {
-                "tgid": p.child_tgid,
-                "start_boottime_ns": p.child_start_boottime_ns,
-            },
-            "clone_flags": decode_clone_flags(p.clone_flags),
-        })),
+        Some(serde_json::Value::Object(args)),
         None,
     ))
 }
@@ -782,20 +792,24 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option
     }
     let tk = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmTaskKillPayload) };
 
-    let args = serde_json::json!({
-        "target_pid": tk.target_pid,
-        "signal": tk.signal,
-        "target_ref": {
-            "tgid": tk.target_pid,
-            "start_boottime_ns": tk.target_start_boottime_ns,
-        },
-    });
+    let mut args = serde_json::Map::new();
+    args.insert("target_pid".into(), serde_json::json!(tk.target_pid));
+    args.insert("signal".into(), serde_json::json!(tk.signal));
+    if tk.target_pid != 0 && tk.target_start_boottime_ns != 0 {
+        args.insert(
+            "target_ref".into(),
+            serde_json::json!({
+                "tgid": tk.target_pid,
+                "start_boottime_ns": tk.target_start_boottime_ns,
+            }),
+        );
+    }
 
     Ok((
         "LSM".into(),
         "task_kill".into(),
         "behavior".into(),
-        Some(args),
+        Some(serde_json::Value::Object(args)),
         Some(tk.return_code as i64),
     ))
 }
@@ -1283,6 +1297,21 @@ mod tests {
     }
 
     #[test]
+    fn process_fork_omits_an_unavailable_parent_identity() {
+        let payload = ProcessForkPayload {
+            parent_tgid: 1234,
+            child_tgid: 4321,
+            parent_start_boottime_ns: 0,
+            child_start_boottime_ns: 100,
+            clone_flags: 0,
+        };
+        let event = deserialize(&build_event(EventKind::ProcessFork, &payload)).unwrap();
+        let args = event.args.unwrap();
+        assert!(args.get("parent_ref").is_none());
+        assert_eq!(args["child_ref"]["start_boottime_ns"], 100);
+    }
+
+    #[test]
     fn process_exit_decodes_normal_and_signal_statuses() {
         let normal = ProcessExitPayload { raw_status: 42 << 8, _pad: 0 };
         let signaled = ProcessExitPayload { raw_status: 9 | 0x80, _pad: 0 };
@@ -1307,6 +1336,21 @@ mod tests {
         assert_eq!(event.event.name, "task_kill");
         assert_eq!(event.event.layer, "behavior");
         assert_eq!(event.args.unwrap()["target_ref"]["start_boottime_ns"], 77);
+    }
+
+    #[test]
+    fn lsm_task_kill_omits_an_unavailable_target_identity() {
+        let payload = LsmTaskKillPayload {
+            target_pid: 100,
+            signal: 9,
+            target_start_boottime_ns: 0,
+            return_code: 0,
+            _pad: 0,
+        };
+        let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
+        let args = event.args.unwrap();
+        assert!(args.get("target_ref").is_none());
+        assert_eq!(args["target_pid"], 100);
     }
 
     #[test]

@@ -167,7 +167,7 @@ impl BehaviorEvent {
         self.event.name == "tty_read" || self.event.name == "tty_write"
     }
 
-    /// Semantic lifecycle events and userspace heartbeat events.
+    /// Semantic lifecycle, heartbeat, and bounded diagnostic events.
     ///
     /// These are metadata rather than user actions and must be kept out
     /// of command-group correlation and the detail pane — they
@@ -175,7 +175,10 @@ impl BehaviorEvent {
     /// real syscall activity. Tree construction and identity resolution
     /// consume them via a separate path.
     pub fn is_synthetic(&self) -> bool {
-        matches!(self.event.event_type.as_str(), "LIFECYCLE" | "HEARTBEAT")
+        matches!(
+            self.event.event_type.as_str(),
+            "LIFECYCLE" | "HEARTBEAT" | "DIAGNOSTIC"
+        )
     }
 
     /// True when a Tier 1 raw `SYSCALL` event describes a syscall that
@@ -556,6 +559,7 @@ mod tests {
         assert!(make_event("LIFECYCLE", "process_fork").is_synthetic());
         assert!(make_event("LIFECYCLE", "process_exit").is_synthetic());
         assert!(make_event("HEARTBEAT", "heartbeat").is_synthetic());
+        assert!(make_event("DIAGNOSTIC", "process.identity").is_synthetic());
         assert!(!make_event("TRACEPOINT", "execve").is_synthetic());
         assert!(!make_event("SYSCALL", "231").is_synthetic());
         assert!(!make_event("TTY", "tty_read").is_synthetic());

@@ -2,7 +2,7 @@
 
 Bloodhound resolves the kernel fields needed both to filter events and to
 identify a process instance: `task_struct::{loginuid,sessionid,pid,tgid,
-group_leader,start_boottime,signal,exit_code}` and
+group_leader,start_boottime,signal,exit_code,comm}` and
 `signal_struct::{live,group_exit_code}`.
 
 ## How It Works: runtime BTF offset resolution ("manual CO-RE")
@@ -52,7 +52,7 @@ For debugging, compare the daemon's logged offsets against `pahole` on the
 **same kernel the daemon runs on**:
 
 ```bash
-pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(pid|tgid|group_leader|start_boottime|signal|exit_code|loginuid|sessionid)\b'
+pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(pid|tgid|group_leader|start_boottime|signal|exit_code|comm|loginuid|sessionid)\b'
 pahole -C signal_struct /sys/kernel/btf/vmlinux | grep -E '\b(live|group_exit_code)\b'
 ```
 

@@ -91,7 +91,8 @@ observable events.
 
 `task_kill.args.target_ref` identifies the target process instance. A
 successful `task_kill` event records signal delivery only; it is not evidence
-that the target exited.
+that the target exited. If the stable target identity cannot be read,
+`target_ref` is omitted rather than populated with a zero start time.
 
 ### event.type SYSCALL
 
@@ -117,11 +118,20 @@ has a different `start_boottime_ns`. It is not comparable across boots or PID
 namespaces without capture metadata establishing that those boundaries match.
 Bloodhound does not manufacture a PID-only stable reference.
 
+If kernel task state cannot supply a complete stable reference, the affected
+`process_ref`, `parent_ref`, or `target_ref` is omitted. Bloodhound emits at
+most one `DIAGNOSTIC/process.identity` event for each of the three bounded
+sources (`event_header`, `process_fork.parent_ref`, and
+`task_kill.target_ref`) during a run. Its reason code is
+`stable_process_ref_unavailable`; `observed_tgid` is diagnostic context only
+and is not a stable identity.
+
 - `process_start` is emitted for a newly created thread group, including one
   that exits before userspace can read `/proc`. `args.process_ref` repeats the
   header reference. For a process that predates attachment, userspace emits the
   same event before its first observed behavior event using the reference
-  already captured from kernel task state.
+  already captured from kernel task state. Kernel-created start metadata is
+  read from the child task supplied by `sched_process_fork`.
 - `process_fork` follows the child `process_start` and carries
   `args.parent_ref`, `args.child_ref`, and decoded `args.clone_flags`.
   `CLONE_THREAD` creation emits neither event. `clone3` flags come from

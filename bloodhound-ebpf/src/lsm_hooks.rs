@@ -29,7 +29,10 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
         Err(_) => [0u8; COMM_SIZE],
     };
     let sessionid = crate::filter::get_current_sessionid();
-    let process_ref = process_ref_from_task(aya_ebpf::helpers::bpf_get_current_task() as *const u8);
+    let process_start_boottime_ns =
+        process_ref_from_task(aya_ebpf::helpers::bpf_get_current_task() as *const u8)
+            .map(|process_ref| process_ref.start_boottime_ns)
+            .unwrap_or(0);
 
     let header = EventHeader {
         kind,
@@ -39,7 +42,7 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
         sessionid,
         pid,
         ppid: 0,
-        process_start_boottime_ns: process_ref.start_boottime_ns,
+        process_start_boottime_ns,
         comm,
     };
 
@@ -118,7 +121,9 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
     let off = core::ptr::read_volatile(&raw const OFF_TGID) as usize;
     let tgid_ptr = (target_task as usize + off) as *const u32;
     let target_tgid: u32 = bpf_probe_read_kernel(tgid_ptr).unwrap_or(0);
-    let target_ref = process_ref_from_task(target_task);
+    let target_start_boottime_ns = process_ref_from_task(target_task)
+        .map(|process_ref| process_ref.start_boottime_ns)
+        .unwrap_or(0);
 
     let daemon_pid = core::ptr::read_volatile(&raw const DAEMON_PID);
 
@@ -127,7 +132,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
         let payload = LsmTaskKillPayload {
             target_pid: target_tgid,
             signal: sig as u32,
-            target_start_boottime_ns: target_ref.start_boottime_ns,
+            target_start_boottime_ns,
             return_code: -1,
             _pad: 0,
         };
@@ -142,7 +147,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
         let payload = LsmTaskKillPayload {
             target_pid: target_tgid,
             signal: sig as u32,
-            target_start_boottime_ns: target_ref.start_boottime_ns,
+            target_start_boottime_ns,
             return_code: 0,
             _pad: 0,
         };

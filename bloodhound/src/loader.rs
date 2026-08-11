@@ -33,6 +33,7 @@ pub fn load_and_attach(
         .set_global("OFF_START_BOOTTIME", &offsets.start_boottime, true)
         .set_global("OFF_SIGNAL", &offsets.signal, true)
         .set_global("OFF_EXIT_CODE", &offsets.exit_code, true)
+        .set_global("OFF_COMM", &offsets.comm, true)
         .set_global("OFF_SIGNAL_LIVE", &offsets.signal_live, true)
         .set_global(
             "OFF_SIGNAL_GROUP_EXIT_CODE",

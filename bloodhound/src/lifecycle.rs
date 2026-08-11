@@ -6,7 +6,7 @@
 //! is first encountered through another event. It never infers fork or exit
 //! from raw syscalls.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
@@ -14,32 +14,59 @@ use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson, Process
 
 pub struct LifecycleSynthesizer {
     active: HashMap<u32, ProcessRefJson>,
+    identity_diagnostics: HashSet<IdentityDiagnosticSource>,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+enum IdentityDiagnosticSource {
+    EventHeader,
+    ForkParent,
+    TaskKillTarget,
+}
+
+impl IdentityDiagnosticSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::EventHeader => "event_header",
+            Self::ForkParent => "process_fork.parent_ref",
+            Self::TaskKillTarget => "task_kill.target_ref",
+        }
+    }
 }
 
 impl LifecycleSynthesizer {
     pub fn new() -> Self {
         Self {
             active: HashMap::new(),
+            identity_diagnostics: HashSet::new(),
         }
     }
 
     /// Emit a process_start before the first observed event for a process that
     /// existed before the kernel fork hook was attached.
     pub fn before(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
+        let mut emitted = Vec::new();
+        if let Some(source) = unavailable_identity_source(event) {
+            if self.identity_diagnostics.insert(source) {
+                emitted.push(make_identity_diagnostic(event, source));
+            }
+        }
+
         let Some(process_ref) = event.header.process_ref else {
-            return Vec::new();
+            return emitted;
         };
 
         if event.event.event_type == "LIFECYCLE" && event.event.name == "process_start" {
             self.active.insert(process_ref.tgid, process_ref);
-            return Vec::new();
+            return emitted;
         }
 
         if self.active.get(&process_ref.tgid) == Some(&process_ref) {
-            return Vec::new();
+            return emitted;
         }
         self.active.insert(process_ref.tgid, process_ref);
-        vec![make_process_start(event, process_ref)]
+        emitted.push(make_process_start(event, process_ref));
+        emitted
     }
 
     /// Kernel hooks already emitted fork/exit. Userspace only releases its
@@ -53,6 +80,70 @@ impl LifecycleSynthesizer {
             }
         }
         Vec::new()
+    }
+}
+
+fn unavailable_identity_source(event: &BehaviorEvent) -> Option<IdentityDiagnosticSource> {
+    let args = event.args.as_ref();
+    if event.event.event_type == "LIFECYCLE"
+        && event.event.name == "process_fork"
+        && args.and_then(|value| value.get("parent_ref")).is_none()
+    {
+        return Some(IdentityDiagnosticSource::ForkParent);
+    }
+    if event.event.name == "task_kill"
+        && args.and_then(|value| value.get("target_ref")).is_none()
+    {
+        return Some(IdentityDiagnosticSource::TaskKillTarget);
+    }
+    if event.header.pid != 0
+        && event.header.process_ref.is_none()
+        && !matches!(
+            event.event.event_type.as_str(),
+            "PACKET" | "HEARTBEAT" | "DIAGNOSTIC"
+        )
+    {
+        return Some(IdentityDiagnosticSource::EventHeader);
+    }
+    None
+}
+
+fn make_identity_diagnostic(
+    triggering: &BehaviorEvent,
+    source: IdentityDiagnosticSource,
+) -> BehaviorEvent {
+    let observed_tgid = if source == IdentityDiagnosticSource::TaskKillTarget {
+        triggering
+            .args
+            .as_ref()
+            .and_then(|args| args.get("target_pid"))
+            .and_then(|value| value.as_u64())
+            .unwrap_or(0)
+    } else {
+        u64::from(triggering.header.pid)
+    };
+    BehaviorEvent {
+        header: EventHeaderJson {
+            timestamp: triggering.header.timestamp,
+            auid: triggering.header.auid,
+            sessionid: triggering.header.sessionid,
+            pid: 0,
+            ppid: None,
+            comm: String::new(),
+            process_ref: None,
+        },
+        event: EventTypeJson {
+            event_type: "DIAGNOSTIC".into(),
+            name: "process.identity".into(),
+            layer: "behavior".into(),
+        },
+        proc: None,
+        args: Some(json!({
+            "reason_code": "stable_process_ref_unavailable",
+            "source": source.as_str(),
+            "observed_tgid": observed_tgid,
+        })),
+        return_code: None,
     }
 }
 
@@ -164,6 +255,50 @@ mod tests {
         let mut life = LifecycleSynthesizer::new();
         let mut ev = event(42, 100, "TRACEPOINT", "openat");
         ev.header.process_ref = None;
-        assert!(life.before(&ev).is_empty());
+        let emitted = life.before(&ev);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].event.event_type, "DIAGNOSTIC");
+        assert_eq!(emitted[0].event.name, "process.identity");
+        assert_eq!(emitted[0].args.as_ref().unwrap()["source"], "event_header");
+        assert!(life.before(&ev).is_empty(), "diagnostic must be bounded");
+    }
+
+    #[test]
+    fn unavailable_fork_parent_emits_one_bounded_diagnostic() {
+        let mut life = LifecycleSynthesizer::new();
+        let mut fork = event(42, 100, "LIFECYCLE", "process_fork");
+        fork.header.process_ref = None;
+        fork.args = Some(json!({
+            "child_ref": { "tgid": 43, "start_boottime_ns": 200 },
+            "clone_flags": ["0x0"]
+        }));
+
+        let emitted = life.before(&fork);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(
+            emitted[0].args.as_ref().unwrap()["source"],
+            "process_fork.parent_ref"
+        );
+        assert!(life.before(&fork).is_empty(), "diagnostic must be bounded");
+    }
+
+    #[test]
+    fn unavailable_task_kill_target_emits_one_bounded_diagnostic() {
+        let mut life = LifecycleSynthesizer::new();
+        let start = event(42, 100, "LIFECYCLE", "process_start");
+        life.before(&start);
+        let mut task_kill = event(42, 100, "LSM", "task_kill");
+        task_kill.args = Some(json!({ "target_pid": 43, "signal": 0 }));
+
+        let emitted = life.before(&task_kill);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(
+            emitted[0].args.as_ref().unwrap()["source"],
+            "task_kill.target_ref"
+        );
+        assert!(
+            life.before(&task_kill).is_empty(),
+            "diagnostic must be bounded"
+        );
     }
 }

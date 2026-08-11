@@ -65,6 +65,9 @@ pub static mut OFF_SIGNAL: u32 = 0;
 pub static mut OFF_EXIT_CODE: u32 = 0;
 
 #[no_mangle]
+pub static mut OFF_COMM: u32 = 0;
+
+#[no_mangle]
 pub static mut OFF_SIGNAL_LIVE: u32 = 0;
 
 #[no_mangle]
