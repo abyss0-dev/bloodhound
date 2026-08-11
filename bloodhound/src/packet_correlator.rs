@@ -150,6 +150,7 @@ mod tests {
                 pid: 0,
                 ppid: None,
                 comm: String::new(),
+                process_ref: None,
             },
             event: EventTypeJson {
                 event_type: "PACKET".to_string(),
@@ -171,6 +172,7 @@ mod tests {
                 pid: 42,
                 ppid: Some(1),
                 comm: "curl".to_string(),
+                process_ref: None,
             },
             event: EventTypeJson {
                 event_type: "TRACEPOINT".to_string(),
@@ -309,4 +311,3 @@ mod tests {
         assert_eq!(pkt.header.auid, 1000);
     }
 }
-

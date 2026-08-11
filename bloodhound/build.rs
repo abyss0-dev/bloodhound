@@ -39,7 +39,7 @@ fn main() {
     let mut cmd = Command::new("rustup");
     cmd.args([
         "run",
-        "nightly",
+        "nightly-2026-07-29",
         "cargo",
         "build",
         "--manifest-path",

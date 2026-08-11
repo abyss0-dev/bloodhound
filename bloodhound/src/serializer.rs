@@ -59,6 +59,7 @@ mod tests {
                 pid: 42,
                 ppid: Some(1),
                 comm: "test".to_string(),
+                process_ref: None,
             },
             event: EventTypeJson {
                 event_type: "TRACEPOINT".to_string(),

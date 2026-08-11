@@ -78,6 +78,14 @@ pub struct EventHeader {
     #[serde(default)]
     pub ppid: Option<u32>,
     pub comm: String,
+    #[serde(default)]
+    pub process_ref: Option<ProcessRef>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct ProcessRef {
+    pub tgid: u32,
+    pub start_boottime_ns: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,10 +167,10 @@ impl BehaviorEvent {
         self.event.name == "tty_read" || self.event.name == "tty_write"
     }
 
-    /// Userspace-synthesised meta events (`LIFECYCLE`, `HEARTBEAT`).
+    /// Semantic lifecycle events and userspace heartbeat events.
     ///
-    /// These are not user-attributable behavioural events and must be
-    /// kept out of command-group correlation and the detail pane — they
+    /// These are metadata rather than user actions and must be kept out
+    /// of command-group correlation and the detail pane — they
     /// would otherwise inflate per-command event counts and obscure
     /// real syscall activity. Tree construction and identity resolution
     /// consume them via a separate path.
@@ -428,6 +436,7 @@ mod tests {
                 pid: 42,
                 ppid: Some(1),
                 comm: "test".to_string(),
+                process_ref: None,
             },
             event: EventType {
                 event_type: event_type.to_string(),

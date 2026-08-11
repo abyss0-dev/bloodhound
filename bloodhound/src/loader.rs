@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use aya::{
     maps::Array,
-    programs::{KProbe, Lsm, SchedClassifier, TcAttachType, TracePoint},
+    programs::{KProbe, Lsm, RawTracePoint, SchedClassifier, TcAttachType, TracePoint},
     Btf, EbpfLoader,
 };
 use log::{info, warn};
@@ -19,7 +19,7 @@ pub fn load_and_attach(
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
     // object was compiled against (issue #37).
-    let offsets = btf_offsets::resolve();
+    let offsets = btf_offsets::resolve()?;
 
     // Load BPF programs with global variables set BEFORE loading
     let mut bpf = EbpfLoader::new()
@@ -28,6 +28,17 @@ pub fn load_and_attach(
         .set_global("OFF_LOGINUID", &offsets.loginuid, true)
         .set_global("OFF_SESSIONID", &offsets.sessionid, true)
         .set_global("OFF_TGID", &offsets.tgid, true)
+        .set_global("OFF_PID", &offsets.pid, true)
+        .set_global("OFF_GROUP_LEADER", &offsets.group_leader, true)
+        .set_global("OFF_START_BOOTTIME", &offsets.start_boottime, true)
+        .set_global("OFF_SIGNAL", &offsets.signal, true)
+        .set_global("OFF_EXIT_CODE", &offsets.exit_code, true)
+        .set_global("OFF_SIGNAL_LIVE", &offsets.signal_live, true)
+        .set_global(
+            "OFF_SIGNAL_GROUP_EXIT_CODE",
+            &offsets.signal_group_exit_code,
+            true,
+        )
         .load(aya::include_bytes_aligned!(concat!(
             env!("OUT_DIR"),
             "/bloodhound-ebpf/bpfel-unknown-none/release/bloodhound-ebpf"
@@ -214,6 +225,10 @@ pub fn load_and_attach(
         }
     }
 
+    info!("Attaching kernel process lifecycle hooks...");
+    attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
+    attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
+
     let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections
         .iter()
@@ -221,6 +236,16 @@ pub fn load_and_attach(
         .collect();
     info!("All BPF programs attached successfully");
     Ok((bpf, usdt_diagnostics, usdt_links))
+}
+
+fn attach_raw_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, name: &str) -> Result<()> {
+    let program: &mut RawTracePoint = bpf
+        .program_mut(prog_name)
+        .context(format!("program {prog_name} not found"))?
+        .try_into()?;
+    program.load()?;
+    program.attach(name)?;
+    Ok(())
 }
 
 fn populate_exclusion_bitmap(bpf: &mut aya::Ebpf) -> Result<()> {

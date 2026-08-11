@@ -4,7 +4,36 @@ use aya_ebpf::helpers::{
 };
 use bloodhound_common::{EventHeader, COMM_SIZE};
 
-use crate::{DAEMON_PID, OFF_LOGINUID, OFF_SESSIONID, TARGET_AUID};
+use crate::{
+    DAEMON_PID, OFF_GROUP_LEADER, OFF_LOGINUID, OFF_SESSIONID, OFF_START_BOOTTIME,
+    OFF_TGID, TARGET_AUID,
+};
+
+#[derive(Clone, Copy)]
+pub struct KernelProcessRef {
+    pub tgid: u32,
+    pub start_boottime_ns: u64,
+}
+
+#[inline(always)]
+pub unsafe fn process_ref_from_task(task: *const u8) -> KernelProcessRef {
+    if task.is_null() {
+        return KernelProcessRef { tgid: 0, start_boottime_ns: 0 };
+    }
+    let leader_off = core::ptr::read_volatile(&raw const OFF_GROUP_LEADER) as usize;
+    let leader_ptr = (task as usize + leader_off) as *const *const u8;
+    let leader = bpf_probe_read_kernel(leader_ptr).unwrap_or(core::ptr::null());
+    let leader = if leader.is_null() { task } else { leader };
+    let tgid_off = core::ptr::read_volatile(&raw const OFF_TGID) as usize;
+    let start_off = core::ptr::read_volatile(&raw const OFF_START_BOOTTIME) as usize;
+    KernelProcessRef {
+        tgid: bpf_probe_read_kernel((leader as usize + tgid_off) as *const u32).unwrap_or(0),
+        start_boottime_ns: bpf_probe_read_kernel(
+            (leader as usize + start_off) as *const u64,
+        )
+        .unwrap_or(0),
+    }
+}
 
 /// Read auid (loginuid.val) from the current task's task_struct.
 ///
@@ -70,6 +99,7 @@ pub unsafe fn get_task_info(kind: u8) -> EventHeader {
     let sessionid = get_current_sessionid();
     let pid_tgid = bpf_get_current_pid_tgid();
     let tgid = (pid_tgid >> 32) as u32;
+    let process_ref = process_ref_from_task(bpf_get_current_task() as *const u8);
 
     let comm = match bpf_get_current_comm() {
         Ok(c) => c,
@@ -85,6 +115,7 @@ pub unsafe fn get_task_info(kind: u8) -> EventHeader {
         sessionid,
         pid: tgid,
         ppid: 0,
+        process_start_boottime_ns: process_ref.start_boottime_ns,
         comm,
     }
 }

@@ -1,12 +1,16 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1582
+assertion_line: 1992
 expression: to_json(&event)
 ---
 {
   "args": {
     "signal": 9,
-    "target_pid": 100
+    "target_pid": 100,
+    "target_ref": {
+      "start_boottime_ns": 77,
+      "tgid": 100
+    }
   },
   "event": {
     "layer": "behavior",

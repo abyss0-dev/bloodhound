@@ -4,7 +4,7 @@ use serde::Serialize;
 use bloodhound_common::*;
 
 /// Deserialized BehaviorEvent ready for JSON serialization.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BehaviorEvent {
     pub header: EventHeaderJson,
     pub event: EventTypeJson,
@@ -16,7 +16,7 @@ pub struct BehaviorEvent {
     pub return_code: Option<i64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct EventHeaderJson {
     pub timestamp: f64,
     pub auid: u32,
@@ -25,9 +25,17 @@ pub struct EventHeaderJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ppid: Option<u32>,
     pub comm: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_ref: Option<ProcessRefJson>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
+pub struct ProcessRefJson {
+    pub tgid: u32,
+    pub start_boottime_ns: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct EventTypeJson {
     #[serde(rename = "type")]
     pub event_type: String,
@@ -35,7 +43,7 @@ pub struct EventTypeJson {
     pub layer: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ProcInfo {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub main_executable: Option<String>,
@@ -78,9 +86,13 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         pid: header.pid,
         ppid: if header.ppid != 0 { Some(header.ppid) } else { None },
         comm: comm_to_string(&header.comm),
+        process_ref: (header.process_start_boottime_ns != 0).then_some(ProcessRefJson {
+            tgid: header.pid,
+            start_boottime_ns: header.process_start_boottime_ns,
+        }),
     };
 
-    let (event_type, name, layer, args, return_code) = match kind {
+    let (event_type, name, layer, mut args, return_code) = match kind {
         EventKind::TtyRead => parse_tty(payload, "tty_read")?,
         EventKind::TtyWrite => parse_tty(payload, "tty_write")?,
         EventKind::UsdtTrainingShellV3
@@ -146,8 +158,17 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::LsmInodeUnlink => parse_lsm_simple(payload, "inode_unlink")?,
         EventKind::LsmInodeRename => parse_lsm_simple(payload, "inode_rename")?,
         EventKind::LsmTaskFixSetuid => parse_lsm_setuid(payload)?,
+        EventKind::ProcessStart => parse_process_start(payload)?,
+        EventKind::ProcessFork => parse_process_fork(payload)?,
+        EventKind::ProcessExit => parse_process_exit(payload)?,
         _ => bail!("Unexpected event kind in process event"),
     };
+
+    if kind == EventKind::ProcessStart {
+        if let Some(process_ref) = header_json.process_ref {
+            args = Some(serde_json::json!({ "process_ref": process_ref }));
+        }
+    }
 
     Ok(BehaviorEvent {
         header: header_json,
@@ -191,6 +212,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
             pid: 0,
             ppid: None,
             comm: String::new(),
+            process_ref: None,
         },
         event: EventTypeJson {
             event_type: "PACKET".to_string(),
@@ -421,6 +443,60 @@ fn parse_clone(payload: &[u8], name: &str) -> Result<(String, String, String, Op
         Some(args),
         Some(clone.return_code),
     ))
+}
+
+fn parse_process_start(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if !payload.is_empty() {
+        bail!("process_start payload must be empty");
+    }
+    Ok(("LIFECYCLE".into(), "process_start".into(), "behavior".into(), None, None))
+}
+
+fn parse_process_fork(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < ProcessForkPayload::SIZE {
+        bail!("process_fork payload too short");
+    }
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ProcessForkPayload) };
+    Ok((
+        "LIFECYCLE".into(),
+        "process_fork".into(),
+        "behavior".into(),
+        Some(serde_json::json!({
+            "parent_ref": {
+                "tgid": p.parent_tgid,
+                "start_boottime_ns": p.parent_start_boottime_ns,
+            },
+            "child_ref": {
+                "tgid": p.child_tgid,
+                "start_boottime_ns": p.child_start_boottime_ns,
+            },
+            "clone_flags": decode_clone_flags(p.clone_flags),
+        })),
+        None,
+    ))
+}
+
+fn parse_process_exit(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < ProcessExitPayload::SIZE {
+        bail!("process_exit payload too short");
+    }
+    let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const ProcessExitPayload) };
+    let signal = p.raw_status & 0x7f;
+    let args = if signal == 0 {
+        serde_json::json!({
+            "exit_kind": "code",
+            "exit_code": (p.raw_status >> 8) & 0xff,
+            "raw_status": p.raw_status,
+        })
+    } else {
+        serde_json::json!({
+            "exit_kind": "signal",
+            "signal": signal,
+            "core_dumped": (p.raw_status & 0x80) != 0,
+            "raw_status": p.raw_status,
+        })
+    };
+    Ok(("LIFECYCLE".into(), "process_exit".into(), "behavior".into(), Some(args), None))
 }
 
 fn parse_path_event(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
@@ -709,6 +785,10 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option
     let args = serde_json::json!({
         "target_pid": tk.target_pid,
         "signal": tk.signal,
+        "target_ref": {
+            "tgid": tk.target_pid,
+            "start_boottime_ns": tk.target_start_boottime_ns,
+        },
     });
 
     Ok((
@@ -913,6 +993,7 @@ mod tests {
             sessionid: 42,
             pid: 1234,
             ppid: 1,
+            process_start_boottime_ns: 99,
             comm,
         }
     }
@@ -1057,6 +1138,10 @@ mod tests {
         assert_eq!(event.header.pid, 1234);
         assert_eq!(event.header.ppid, Some(1));
         assert_eq!(event.header.comm, "test");
+        assert_eq!(event.header.process_ref, Some(ProcessRefJson {
+            tgid: 1234,
+            start_boottime_ns: 99,
+        }));
     }
 
     /// When ppid is 0, it should be serialized as None (omitted from JSON).
@@ -1170,14 +1255,58 @@ mod tests {
     }
 
     #[test]
+    fn process_start_carries_the_header_identity() {
+        let header = make_event_header(EventKind::ProcessStart);
+        let event = deserialize(&header_bytes(&header)).unwrap();
+        assert_eq!(event.event.event_type, "LIFECYCLE");
+        assert_eq!(event.event.name, "process_start");
+        assert_eq!(event.args, Some(serde_json::json!({
+            "process_ref": { "tgid": 1234, "start_boottime_ns": 99 }
+        })));
+    }
+
+    #[test]
+    fn process_fork_carries_parent_and_child_identities() {
+        let payload = ProcessForkPayload {
+            parent_tgid: 1234,
+            child_tgid: 4321,
+            parent_start_boottime_ns: 99,
+            child_start_boottime_ns: 100,
+            clone_flags: 0x0002_0000,
+        };
+        let event = deserialize(&build_event(EventKind::ProcessFork, &payload)).unwrap();
+        assert_eq!(event.args, Some(serde_json::json!({
+            "parent_ref": { "tgid": 1234, "start_boottime_ns": 99 },
+            "child_ref": { "tgid": 4321, "start_boottime_ns": 100 },
+            "clone_flags": ["CLONE_NEWNS"],
+        })));
+    }
+
+    #[test]
+    fn process_exit_decodes_normal_and_signal_statuses() {
+        let normal = ProcessExitPayload { raw_status: 42 << 8, _pad: 0 };
+        let signaled = ProcessExitPayload { raw_status: 9 | 0x80, _pad: 0 };
+        let normal_event = deserialize(&build_event(EventKind::ProcessExit, &normal)).unwrap();
+        assert_eq!(normal_event.args, Some(serde_json::json!({
+            "exit_kind": "code", "exit_code": 42, "raw_status": 10752
+        })));
+        let signaled_event = deserialize(&build_event(EventKind::ProcessExit, &signaled)).unwrap();
+        assert_eq!(signaled_event.args, Some(serde_json::json!({
+            "exit_kind": "signal", "signal": 9, "core_dumped": true, "raw_status": 137
+        })));
+    }
+
+    #[test]
     fn lsm_task_kill_classification() {
         let payload = LsmTaskKillPayload {
-            target_pid: 100, signal: 9, return_code: -1,
+            target_pid: 100, signal: 9, target_start_boottime_ns: 77,
+            return_code: -1, _pad: 0,
         };
         let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
         assert_eq!(event.event.event_type, "LSM");
         assert_eq!(event.event.name, "task_kill");
         assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.args.unwrap()["target_ref"]["start_boottime_ns"], 77);
     }
 
     #[test]
@@ -1420,13 +1549,16 @@ mod tests {
         let payload = LsmTaskKillPayload {
             target_pid: 555,
             signal: 9,
+            target_start_boottime_ns: 88,
             return_code: -1,
+            _pad: 0,
         };
         let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
 
         let args = event.args.unwrap();
         assert_eq!(args["target_pid"], 555);
         assert_eq!(args["signal"], 9);
+        assert_eq!(args["target_ref"]["start_boottime_ns"], 88);
         assert_eq!(event.return_code, Some(-1));
     }
 
@@ -1601,6 +1733,7 @@ mod golden_tests {
             sessionid: 42,
             pid: 5678,
             ppid: 1234,
+            process_start_boottime_ns: 0,
             comm,
         }
     }
@@ -1849,7 +1982,9 @@ mod golden_tests {
         let payload = LsmTaskKillPayload {
             target_pid: 100,
             signal: 9,
+            target_start_boottime_ns: 77,
             return_code: -1,
+            _pad: 0,
         };
         let buf = build(EventKind::LsmTaskKill, &payload_bytes(&payload));
 

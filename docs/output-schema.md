@@ -16,6 +16,7 @@ BehaviorEvent
 |   +-- pid          : u32
 |   +-- ppid         : u32    (optional in schema, but always populated)
 |   +-- comm         : string (max 16 bytes)
+|   +-- process_ref  : { tgid, start_boottime_ns } (process events only)
 |
 +-- event (REQUIRED)
 |   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
@@ -88,6 +89,10 @@ DECIDED: LSM events use `event.layer = "behavior"`. LSM hooks both block
 operations and emit BehaviorEvents, recording tamper attempts as
 observable events.
 
+`task_kill.args.target_ref` identifies the target process instance. A
+successful `task_kill` event records signal delivery only; it is not evidence
+that the target exited.
+
 ### event.type SYSCALL
 
 DECIDED: Used for Tier 1 raw_syscalls events. These carry `syscall_nr`
@@ -102,36 +107,34 @@ in the schema for forward compatibility.
 
 ### event.type LIFECYCLE
 
-DECIDED: Userspace-synthesised process-lifecycle events derived from
-the existing kernel event stream; no BPF capture added. `event.layer`
-is always `"behavior"`. Three `event.name` values:
+DECIDED: `sched_process_fork` and `sched_process_exit` are the lifecycle
+authority. `event.layer` is always `"behavior"`.
 
-- `process_start` — emitted once, immediately before the first event
-  from a previously-unseen `pid`. Carries `args.start_time_ns` (from
-  `/proc/<pid>/stat` field 22 converted to wall-clock ns via
-  `/proc/stat` `btime` + the fixed 100 Hz tick rate). Best-effort
-  `args.main_executable` and `args.cwd` are included when `/proc/<pid>`
-  is still readable at observation time. When the process has already
-  exited, `args.partial = true` and `args.start_time_ns = 0`. The
-  `(pid, start_time_ns)` pair is the recommended stable identity to
-  defeat pid reuse within a session.
+`header.process_ref` is `{ "tgid", "start_boottime_ns" }`. It identifies
+one Linux thread group within one kernel boot and the PID namespace observed
+by Bloodhound. Every thread in a group has the same reference, and PID reuse
+has a different `start_boottime_ns`. It is not comparable across boots or PID
+namespaces without capture metadata establishing that those boundaries match.
+Bloodhound does not manufacture a PID-only stable reference.
 
-- `process_fork` — emitted immediately after a successful `clone` or
-  `clone3` event (`return_code >= 0`) whose decoded flags do not
-  include `CLONE_THREAD`. Carries `args.parent_pid`, `args.child_pid`,
-  and `args.clone_flags` (the decoded flag array from the triggering
-  event, forwarded verbatim). Thread clones are deliberately filtered
-  out because they do not create a new process identity.
+- `process_start` is emitted for a newly created thread group, including one
+  that exits before userspace can read `/proc`. `args.process_ref` repeats the
+  header reference. For a process that predates attachment, userspace emits the
+  same event before its first observed behavior event using the reference
+  already captured from kernel task state.
+- `process_fork` follows the child `process_start` and carries
+  `args.parent_ref`, `args.child_ref`, and decoded `args.clone_flags`.
+  `CLONE_THREAD` creation emits neither event. `clone3` flags come from
+  `struct clone_args.flags`, not the syscall argument pointer value.
+- `process_exit` is emitted exactly once when the final live thread leaves the
+  thread group. `args.exit_kind` is `"code"` or `"signal"`; the event also
+  carries `exit_code` or `signal`, `raw_status`, and `core_dumped` for signaled
+  exits.
 
-- `process_exit` — emitted immediately after a Tier 1 raw-syscall
-  event for `exit_group` (syscall 231). Carries `args.pid` and
-  `args.exit_code` (from `raw_args[0]`). After emission, the pid is
-  removed from the first-seen set so a subsequent reuse of that pid
-  number produces a fresh `process_start` with a new `start_time_ns`.
-
-Ordering: `process_start` precedes the triggering event in the output
-stream; `process_fork` / `process_exit` follow it. FIFO relative to
-the triggering event is preserved.
+Ordering for a new process is `process_start`, then `process_fork`, before any
+behavior event from the child. `process_exit` is the kernel-observed terminal
+lifecycle event. `task_kill` remains only a signal-delivery observation and
+never implies or synthesizes `process_exit`.
 
 ### event.type HEARTBEAT
 
