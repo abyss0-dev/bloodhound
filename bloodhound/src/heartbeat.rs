@@ -112,6 +112,7 @@ fn build_heartbeat(
             pid: 0,
             ppid: None,
             comm: String::new(),
+            process_ref: None,
         },
         event: EventTypeJson {
             event_type: "HEARTBEAT".into(),

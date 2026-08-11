@@ -540,7 +540,14 @@ pub fn sys_exit_clone3(ctx: TracePointContext) -> u32 {
 
 unsafe fn try_enter_clone(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
     if !should_trace() { return Ok(0); }
-    let flags: u64 = ctx.read_at(16).unwrap_or(0);
+    let first_arg: u64 = ctx.read_at(16).unwrap_or(0);
+    let flags = if kind == EventKind::Clone3 as u8 && first_arg != 0 {
+        // clone3(arg, size): arg points to `struct clone_args`, whose first
+        // member is the u64 flags field.
+        bpf_probe_read_user(first_arg as *const u64).unwrap_or(0)
+    } else {
+        first_arg
+    };
     let pid_tgid = bpf_get_current_pid_tgid();
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
@@ -555,6 +562,20 @@ unsafe fn try_enter_clone(ctx: &TracePointContext, kind: u8) -> Result<u32, i64>
     entry.data_len = core::mem::size_of::<CloneData>() as u16;
     let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
     Ok(0)
+}
+
+/// Return clone/clone3 flags while the syscall is between enter and exit.
+/// `sched_process_fork` fires in that interval, allowing the lifecycle hook to
+/// preserve the rich syscall flags without deriving process creation from the
+/// syscall return event.
+pub unsafe fn pending_clone_flags() -> u64 {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    let Some(entry) = RICH_ENTRY_MAP.get(&pid_tgid) else { return 0 };
+    if entry.header.kind != EventKind::Clone as u8 && entry.header.kind != EventKind::Clone3 as u8 {
+        return 0;
+    }
+    let data: CloneData = core::ptr::read_unaligned(entry.data.as_ptr() as *const CloneData);
+    data.flags
 }
 
 unsafe fn try_exit_clone(ctx: &TracePointContext) -> Result<u32, i64> {

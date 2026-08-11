@@ -75,6 +75,7 @@ mod tests {
                 pid,
                 ppid: None,
                 comm: "test".to_string(),
+                process_ref: None,
             },
             event: EventTypeJson {
                 event_type: "TRACEPOINT".to_string(),
@@ -175,4 +176,3 @@ mod tests {
         assert_eq!(first_exe, second_exe);
     }
 }
-

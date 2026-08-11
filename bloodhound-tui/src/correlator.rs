@@ -127,6 +127,7 @@ mod tests {
                 pid: 42,
                 ppid: Some(1),
                 comm: "bash".to_string(),
+                process_ref: None,
             },
             event: EventType {
                 event_type: event_type.to_string(),

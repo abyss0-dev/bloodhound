@@ -78,6 +78,14 @@ pub struct EventHeader {
     #[serde(default)]
     pub ppid: Option<u32>,
     pub comm: String,
+    #[serde(default)]
+    pub process_ref: Option<ProcessRef>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+pub struct ProcessRef {
+    pub tgid: u32,
+    pub start_boottime_ns: u64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -159,15 +167,18 @@ impl BehaviorEvent {
         self.event.name == "tty_read" || self.event.name == "tty_write"
     }
 
-    /// Userspace-synthesised meta events (`LIFECYCLE`, `HEARTBEAT`).
+    /// Semantic lifecycle, heartbeat, and bounded diagnostic events.
     ///
-    /// These are not user-attributable behavioural events and must be
-    /// kept out of command-group correlation and the detail pane — they
+    /// These are metadata rather than user actions and must be kept out
+    /// of command-group correlation and the detail pane — they
     /// would otherwise inflate per-command event counts and obscure
     /// real syscall activity. Tree construction and identity resolution
     /// consume them via a separate path.
     pub fn is_synthetic(&self) -> bool {
-        matches!(self.event.event_type.as_str(), "LIFECYCLE" | "HEARTBEAT")
+        matches!(
+            self.event.event_type.as_str(),
+            "LIFECYCLE" | "HEARTBEAT" | "DIAGNOSTIC"
+        )
     }
 
     /// True when a Tier 1 raw `SYSCALL` event describes a syscall that
@@ -428,6 +439,7 @@ mod tests {
                 pid: 42,
                 ppid: Some(1),
                 comm: "test".to_string(),
+                process_ref: None,
             },
             event: EventType {
                 event_type: event_type.to_string(),
@@ -547,6 +559,7 @@ mod tests {
         assert!(make_event("LIFECYCLE", "process_fork").is_synthetic());
         assert!(make_event("LIFECYCLE", "process_exit").is_synthetic());
         assert!(make_event("HEARTBEAT", "heartbeat").is_synthetic());
+        assert!(make_event("DIAGNOSTIC", "process.identity").is_synthetic());
         assert!(!make_event("TRACEPOINT", "execve").is_synthetic());
         assert!(!make_event("SYSCALL", "231").is_synthetic());
         assert!(!make_event("TTY", "tty_read").is_synthetic());

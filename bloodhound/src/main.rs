@@ -159,9 +159,9 @@ async fn main() -> Result<()> {
                             correlator.record_socket(&event);
                         }
 
-                        // `process_start` precedes the first event
-                        // from a pid so consumers see the identity
-                        // anchor before any behavioural event.
+                        // Bootstrap a process that predates attachment before
+                        // its first observed event. Kernel-created processes
+                        // already arrive with process_start first.
                         for precursor in lifecycle_synth.before(&event) {
                             write_counted(&mut output, &precursor);
                         }
@@ -169,9 +169,8 @@ async fn main() -> Result<()> {
                         // Serialize the original event
                         write_counted(&mut output, &event);
 
-                        // `process_fork` / `process_exit` follow the
-                        // triggering clone/exit_group, preserving
-                        // FIFO ordering with respect to the stream.
+                        // Kernel hooks already own fork and exit; this only
+                        // releases bounded userspace identity state on exit.
                         for followup in lifecycle_synth.after(&event) {
                             write_counted(&mut output, &followup);
                         }

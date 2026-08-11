@@ -71,7 +71,7 @@ fn initial_render_file_exploration() {
 
 /// Scenario 2: exec-tree expansion on a forking command.
 ///
-/// Relies on the `start_time_ns` pid-reuse disambiguation merged in #19 —
+/// Relies on stable process-reference PID-reuse disambiguation —
 /// if two processes reuse the same pid within one command, they must stay
 /// distinct rows in the tree.
 #[test]
@@ -87,6 +87,24 @@ fn exec_tree_expanded_process_lifecycle() {
     app.toggle_expand();
 
     insta::assert_snapshot!(render(&app));
+}
+
+#[test]
+fn reliable_lifecycle_fixture_preserves_stable_references() {
+    let app = load_app("07_reliable_process_lifecycle.ndjson");
+    let child_events: Vec<_> = app.events.iter()
+        .filter(|e| e.header.pid == 200)
+        .collect();
+    assert!(!child_events.is_empty());
+    assert!(child_events.iter().all(|e| {
+        e.header.process_ref
+            .map(|r| (r.tgid, r.start_boottime_ns))
+            == Some((200, 2_000_000))
+    }));
+    let fork = app.events.iter()
+        .find(|e| e.event.name == "process_fork")
+        .expect("fixture must contain process_fork");
+    assert_eq!(fork.args.as_ref().unwrap()["child_ref"]["start_boottime_ns"], 2_000_000);
 }
 
 /// Scenario 3: synthetic LIFECYCLE/HEARTBEAT events must not leak into

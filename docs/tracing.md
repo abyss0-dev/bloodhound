@@ -123,6 +123,30 @@ detecting namespace manipulation, thread creation vs. process creation,
 and other behavioral signals. Uses the same enter/exit correlation
 pattern as other Layer 3 syscalls.
 
+The `clone3` entry reader follows its first argument as a userspace pointer
+and reads `struct clone_args.flags`. Semantic process creation does not come
+from the syscall return event: `sched_process_fork` emits lifecycle events
+only when the child is a new thread-group leader.
+
+### Process lifecycle
+
+DECIDED: `raw_tracepoint:sched_process_fork` emits `process_start` and
+`process_fork` for new thread groups; `raw_tracepoint:sched_process_exit`
+emits `process_exit` when `signal_struct::live` reaches zero. The stable
+reference is `(tgid, group_leader.start_boottime_ns)`. This covers short-lived
+processes, PID reuse, signal termination, and multithreaded teardown without
+interpreting raw exit syscalls in userspace.
+
+The lifecycle raw tracepoints are attached before every behavior producer.
+This keeps clone and exec observations collected during startup from preceding
+the authoritative `process_fork` edge for the same process.
+
+The group-leader pointer and both identity fields must all be readable and
+non-zero. A failed leader lookup never falls back to a thread's own start time.
+At fork, the child event header reads audit/session metadata and `comm` from the
+child task itself. Missing header, fork-parent, or signal-target identity is
+omitted and reported through the bounded `DIAGNOSTIC/process.identity` signal.
+
 ### Interpreter handling
 
 DECIDED: Rely on argv. When `python script.py` is exec'd, filename
@@ -206,6 +230,10 @@ same syscall invocation (see deduplication above).
 
 **Tier 1 (generic):**
 - `tracepoint:raw_syscalls:sys_enter` + `sys_exit`
+
+**Process lifecycle:**
+- `raw_tracepoint:sched_process_fork`
+- `raw_tracepoint:sched_process_exit`
 
 **Tier 2 (rich extraction) -- each has sys_enter + sys_exit pair:**
 - execve, execveat

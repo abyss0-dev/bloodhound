@@ -88,6 +88,11 @@ pub enum EventKind {
     LsmInodeRename = 205,
     LsmTaskFixSetuid = 206,
 
+    // Kernel-observed process lifecycle
+    ProcessStart = 220,
+    ProcessFork = 221,
+    ProcessExit = 222,
+
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
     UsdtTrainingShellV3 = 240,
@@ -160,6 +165,9 @@ impl EventKind {
             204 => Some(Self::LsmInodeUnlink),
             205 => Some(Self::LsmInodeRename),
             206 => Some(Self::LsmTaskFixSetuid),
+            220 => Some(Self::ProcessStart),
+            221 => Some(Self::ProcessFork),
+            222 => Some(Self::ProcessExit),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -180,6 +188,9 @@ pub struct EventHeader {
     pub sessionid: u32,
     pub pid: u32,
     pub ppid: u32,
+    /// Boot-clock start time of the thread-group leader. Together with
+    /// `pid` (the TGID), this identifies one process instance across PID reuse.
+    pub process_start_boottime_ns: u64,
     pub comm: [u8; COMM_SIZE],
 }
 
@@ -371,6 +382,47 @@ impl SocketPayload {
 pub struct ClonePayload {
     pub flags: u64,
     pub return_code: i64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessForkPayload {
+    pub parent_tgid: u32,
+    pub child_tgid: u32,
+    pub parent_start_boottime_ns: u64,
+    pub child_start_boottime_ns: u64,
+    pub clone_flags: u64,
+}
+
+impl ProcessForkPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct ProcessExitPayload {
+    /// Linux wait status captured from the exiting thread group.
+    pub raw_status: i32,
+    pub _pad: u32,
+}
+
+impl ProcessExitPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+/// Select the wait status for a whole-process exit. `group_exit_status` is
+/// authoritative for exit_group/fatal-signal teardown; otherwise Linux
+/// reports the thread-group leader's status even if another thread exits last.
+#[inline(always)]
+pub const fn select_process_exit_status(
+    group_exit_status: i32,
+    group_leader_status: i32,
+) -> i32 {
+    if group_exit_status != 0 {
+        group_exit_status
+    } else {
+        group_leader_status
+    }
 }
 
 impl ClonePayload {
@@ -687,7 +739,9 @@ impl LsmFileOpenPayload {
 pub struct LsmTaskKillPayload {
     pub target_pid: u32,
     pub signal: u32,
+    pub target_start_boottime_ns: u64,
     pub return_code: i32,
+    pub _pad: u32,
 }
 
 impl LsmTaskKillPayload {
@@ -976,6 +1030,9 @@ mod tests {
             EventKind::LsmInodeUnlink,
             EventKind::LsmInodeRename,
             EventKind::LsmTaskFixSetuid,
+            EventKind::ProcessStart,
+            EventKind::ProcessFork,
+            EventKind::ProcessExit,
         ];
 
         for variant in &all_variants {
@@ -1068,6 +1125,9 @@ mod tests {
             EventKind::LsmInodeUnlink,
             EventKind::LsmInodeRename,
             EventKind::LsmTaskFixSetuid,
+            EventKind::ProcessStart,
+            EventKind::ProcessFork,
+            EventKind::ProcessExit,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1085,7 +1145,9 @@ mod tests {
     fn event_header_size_is_stable() {
         // repr(C) layout: kind(1) + _pad(3) + 4 bytes alignment padding
         // + timestamp_ns(8) + auid(4) + sessionid(4)
-        // + pid(4) + ppid(4) + comm(16) = 48
+        // + pid(4) + ppid(4) + process_start_boottime_ns(8)
+        // + comm(16) = 56
+        assert_eq!(EventHeader::SIZE, 56);
         assert_eq!(EventHeader::SIZE, mem::size_of::<EventHeader>());
     }
 
@@ -1106,6 +1168,16 @@ mod tests {
         assert_eq!(ConnectBindPayload::SIZE, mem::size_of::<ConnectBindPayload>());
         assert_eq!(SocketPayload::SIZE, mem::size_of::<SocketPayload>());
         assert_eq!(ClonePayload::SIZE, mem::size_of::<ClonePayload>());
+        assert_eq!(ProcessForkPayload::SIZE, 32);
+        assert_eq!(
+            ProcessForkPayload::SIZE,
+            mem::size_of::<ProcessForkPayload>()
+        );
+        assert_eq!(ProcessExitPayload::SIZE, 8);
+        assert_eq!(
+            ProcessExitPayload::SIZE,
+            mem::size_of::<ProcessExitPayload>()
+        );
         assert_eq!(PathPayload::SIZE, mem::size_of::<PathPayload>());
         assert_eq!(TwoPathPayload::SIZE, mem::size_of::<TwoPathPayload>());
         assert_eq!(ChmodPayload::SIZE, mem::size_of::<ChmodPayload>());
@@ -1146,6 +1218,12 @@ mod tests {
             SendfileSplicePayload::SIZE,
             mem::size_of::<SendfileSplicePayload>()
         );
+    }
+
+    #[test]
+    fn process_exit_status_uses_the_group_leader_without_group_exit() {
+        assert_eq!(select_process_exit_status(9, 42 << 8), 9);
+        assert_eq!(select_process_exit_status(0, 42 << 8), 42 << 8);
     }
 
     // ── Syscall metadata correctness ─────────────────────────────────────

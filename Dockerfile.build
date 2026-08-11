@@ -23,9 +23,9 @@ RUN DEBIAN_FRONTEND=noninteractive apt-get update && \
 # .cargo/config.toml expects x86_64-linux-musl-gcc
 RUN ln -s /usr/bin/musl-gcc /usr/local/bin/x86_64-linux-musl-gcc
 
-# Install Rust nightly via rustup
+# Pin the newest nightly compatible with the precompiled bpf-linker 0.10.2.
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain nightly --component rust-src --target x86_64-unknown-linux-musl
+    sh -s -- -y --default-toolchain nightly-2026-07-29 --component rust-src --target x86_64-unknown-linux-musl
 
 ENV PATH="/usr/lib/llvm-15/bin:/root/.cargo/bin:${PATH}"
 ENV LLVM_SYS_150_PREFIX=/usr/lib/llvm-15

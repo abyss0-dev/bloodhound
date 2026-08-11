@@ -24,7 +24,7 @@
         },
         "pid": {
           "type": "integer",
-          "description": "Process ID that triggered the event."
+          "description": "Thread-group ID (TGID) of the process that triggered the event."
         },
         "ppid": {
           "type": "integer",
@@ -33,6 +33,16 @@
         "comm": {
           "type": "string",
           "description": "The command name of the process."
+        },
+        "process_ref": {
+          "type": "object",
+          "description": "Stable process-instance reference within one kernel boot and the PID namespace observed by Bloodhound.",
+          "required": ["tgid", "start_boottime_ns"],
+          "properties": {
+            "tgid": { "type": "integer", "minimum": 1 },
+            "start_boottime_ns": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
         }
       }
     },
@@ -44,7 +54,7 @@
         "type": {
           "type": "string",
           "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM", "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC"],
-          "description": "The source/nature of the event. LIFECYCLE events are userspace-synthesised process-lifecycle signals (process_start, process_fork, process_exit). HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector health state."
+          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector or process-identity health state."
         },
         "name": {
           "type": "string",

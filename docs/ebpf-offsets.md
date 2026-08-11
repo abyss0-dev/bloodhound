@@ -1,9 +1,9 @@
 # eBPF `task_struct` Field Access
 
-Bloodhound reads three scalar kernel `task_struct` fields to identify and
-filter traced processes: `loginuid` and `sessionid` (the auid filter in
-`should_trace()` and the event header) and `tgid` (the LSM `task_kill`
-target-PID check).
+Bloodhound resolves the kernel fields needed both to filter events and to
+identify a process instance: `task_struct::{loginuid,sessionid,pid,tgid,
+group_leader,start_boottime,signal,exit_code,comm}` and
+`signal_struct::{live,group_exit_code}`.
 
 ## How It Works: runtime BTF offset resolution ("manual CO-RE")
 
@@ -15,20 +15,18 @@ kernel without recompilation. See issue #37 for the failure this replaces.
 The pieces:
 
 - **Userspace** (`bloodhound::btf_offsets`): a minimal BTF reader parses
-  `/sys/kernel/btf/vmlinux`, finds `struct task_struct`, and returns the
-  byte offsets of `loginuid`, `sessionid`, and `tgid`.
+  `/sys/kernel/btf/vmlinux`, finds `task_struct` and `signal_struct`, and
+  returns all required member offsets.
 - **Injection** (`bloodhound::loader`): the resolved offsets are passed
-  via `EbpfLoader::set_global` into the `OFF_LOGINUID` / `OFF_SESSIONID` /
-  `OFF_TGID` globals (declared in `bloodhound-ebpf/src/main.rs`).
+  via `EbpfLoader::set_global` into the corresponding `OFF_*` globals.
 - **eBPF** (`filter.rs`, `lsm_hooks.rs`): each field is read as
   `bpf_probe_read_kernel((task_base + offset))`. A variable offset is
   accepted by the verifier, unlike a typed deref that bakes a fixed
   compile-time offset.
 
-The daemon logs the resolved offsets at startup (`Resolved task_struct
-offsets from ...`). If BTF resolution fails it falls back **loudly** (a
-`warn!` line) to the compile-time defaults below, which are correct only
-on the build kernel.
+The daemon logs the resolved offsets at startup. If BTF is unavailable or
+any required field is missing, startup fails closed. Guessing an identity
+offset could merge unrelated processes after PID reuse.
 
 ## Why not typed `vmlinux.rs` struct access?
 
@@ -42,23 +40,11 @@ task-scoped event was dropped in-kernel — only `HEARTBEAT` and `PACKET`
 survived. Runtime resolution sidesteps this without depending on rustc
 gaining CO-RE.
 
-> **Scope:** This covers **scalar field offsets** only — all bloodhound
-> needs for these three fields. It is not full CO-RE (no type / enum /
+> **Scope:** This covers direct member offsets only. It is not full CO-RE
+> (no type / enum /
 > field-existence / bitfield relocation). The nested-pointer traversal
 > structs that remain in `vmlinux.rs` (TTY device class, fd → inode →
 > super_block) are still compile-time fixed.
-
-## Fallback Offsets (kernel `6.8.0-49-generic`, x86_64)
-
-Used only if runtime BTF resolution fails. Defined in
-`TaskStructOffsets::FALLBACK` (userspace) and as the `OFF_*` global
-defaults (eBPF).
-
-| Field       | Byte Offset | Hex    | Used For             |
-|-------------|-------------|--------|----------------------|
-| `tgid`      | 2468        | 0x9a4  | LSM target PID check |
-| `loginuid`  | 3208        | 0xc88  | `should_trace()`     |
-| `sessionid` | 3212        | 0xc8c  | Event header         |
 
 ## How to Verify Offsets Manually
 
@@ -66,13 +52,13 @@ For debugging, compare the daemon's logged offsets against `pahole` on the
 **same kernel the daemon runs on**:
 
 ```bash
-pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(tgid|loginuid|sessionid)\b'
+pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(pid|tgid|group_leader|start_boottime|signal|exit_code|comm|loginuid|sessionid)\b'
+pahole -C signal_struct /sys/kernel/btf/vmlinux | grep -E '\b(live|group_exit_code)\b'
 ```
 
 > **Note:** `pahole` is provided by the `dwarves` package (`apt install dwarves`).
 
-The byte offset printed by `pahole` should match the `loginuid` /
-`sessionid` / `tgid` values in the daemon's startup log line.
+The byte offsets printed by `pahole` should match the daemon startup log.
 
 ## Host ≠ VM Kernel (now handled automatically)
 
@@ -86,9 +72,8 @@ different `task_struct` layouts. Previously this required regenerating
 | `loginuid` | 0xc30 (3120) | 0xc88 (3208) | 0xca0 (3232) |
 
 Runtime resolution reads whatever the running kernel reports, so no
-per-kernel code change is needed. If `/sys/kernel/btf/vmlinux` is absent
-or unparseable, the daemon warns and falls back to the table above —
-correct only on `6.8.0-49-generic`.
+per-kernel code change is needed. If `/sys/kernel/btf/vmlinux` is absent,
+unparseable, or incomplete, the daemon refuses to attach.
 
 ## DAC vs LSM Permission Ordering
 

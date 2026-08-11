@@ -272,41 +272,44 @@ fn run_tui(mut app: App) -> Result<()> {
 
 // ── Exec tree builder ────────────────────────────────────────────────────────
 
-/// Composite process identity: `(pid, start_time_ns)`.
+/// Composite process identity: `(tgid, start_boottime_ns)`.
 ///
-/// `start_time_ns == 0` means no `LIFECYCLE/process_start` was seen
+/// `start_boottime_ns == 0` means no stable `header.process_ref` was seen
 /// for this pid (older daemon, or event lost), so identity collapses
 /// to pid-only — two pid-reused processes would merge, matching the
 /// pre-#18 behaviour as a graceful fallback.
 type ProcId = (u32, u64);
 
+fn parse_process_ref(value: &serde_json::Value) -> Option<ProcId> {
+    Some((
+        value.get("tgid")?.as_u64()? as u32,
+        value.get("start_boottime_ns")?.as_u64()?,
+    ))
+}
+
 /// Build execve process trees per command group.
 ///
-/// Parent attribution prefers explicit `LIFECYCLE/process_fork` edges
-/// (PR #18) when available: the most recent fork whose `child_pid`
-/// matches the execve's pid, bounded by the execve's timestamp, wins.
+/// Parent attribution prefers explicit `LIFECYCLE/process_fork` edges:
+/// the most recent fork whose `child_ref` matches the execve's process
+/// reference, bounded by the execve's timestamp, wins.
 /// That gives the matcher the clone → execve parent edge directly,
 /// instead of inferring it from the `ppid` header (which points at
 /// whatever is *currently* attached to the pid and can be wrong after
 /// reparenting).
 ///
-/// Node identity is `(pid, start_time_ns)` so that pid reuse within a
+/// Node identity is `(tgid, start_boottime_ns)` so that pid reuse within a
 /// session produces two distinct tree nodes instead of collapsing two
-/// unrelated processes together. `start_time_ns` comes from the
-/// `LIFECYCLE/process_start` event that preceded each pid's first
-/// observation; falls back to `ppid`-only when lifecycle events are
-/// absent.
+/// unrelated processes together. Current captures carry the identity in
+/// every process event header; older lifecycle fixtures fall back to their
+/// `process_start.args.start_time_ns` value.
 fn build_exec_trees(
     groups: &[CommandGroup],
     events: &[BehaviorEvent],
 ) -> Vec<Vec<ExecChild>> {
     use std::collections::{HashMap, HashSet};
 
-    // Global pass: for every event index, compute the `start_time_ns`
-    // of its `header.pid` at that moment. We update a live `pid → ns`
-    // map on `process_start`, clear on `process_exit`. The recorded
-    // value for each non-lifecycle event is the identity anchor valid
-    // at that timestamp — so a pid-reused process gets its own ns.
+    // Prefer the stable reference carried by every process event. The
+    // lifecycle map remains as backward compatibility for older captures.
     let mut live_start: HashMap<u32, u64> = HashMap::new();
     let mut start_time_per_event: Vec<u64> = vec![0; events.len()];
     for (i, e) in events.iter().enumerate() {
@@ -315,8 +318,10 @@ fn build_exec_trees(
                 if let Some(ns) = e
                     .args
                     .as_ref()
-                    .and_then(|a| a.get("start_time_ns"))
+                    .and_then(|a| a.get("process_ref"))
+                    .and_then(|r| r.get("start_boottime_ns"))
                     .and_then(|v| v.as_u64())
+                    .or_else(|| e.args.as_ref().and_then(|a| a.get("start_time_ns")).and_then(|v| v.as_u64()))
                 {
                     live_start.insert(e.header.pid, ns);
                 }
@@ -326,7 +331,10 @@ fn build_exec_trees(
             }
             _ => {}
         }
-        start_time_per_event[i] = live_start.get(&e.header.pid).copied().unwrap_or(0);
+        start_time_per_event[i] = e.header.process_ref
+            .map(|r| r.start_boottime_ns)
+            .or_else(|| live_start.get(&e.header.pid).copied())
+            .unwrap_or(0);
     }
 
     groups
@@ -356,7 +364,7 @@ fn build_exec_trees(
                 .filter_map(|&idx| events.get(idx))
                 .map(|e| e.header.timestamp)
                 .fold(window_start, f64::max);
-            let forks: Vec<(u32, u32, f64)> = events
+            let forks: Vec<(ProcId, ProcId, f64)> = events
                 .iter()
                 .filter(|e| e.event.event_type == "LIFECYCLE" && e.event.name == "process_fork")
                 .filter(|e| {
@@ -364,8 +372,10 @@ fn build_exec_trees(
                 })
                 .filter_map(|e| {
                     let args = e.args.as_ref()?;
-                    let parent = args.get("parent_pid").and_then(|v| v.as_u64())? as u32;
-                    let child = args.get("child_pid").and_then(|v| v.as_u64())? as u32;
+                    let parent = args.get("parent_ref").and_then(parse_process_ref)
+                        .or_else(|| args.get("parent_pid").and_then(|v| v.as_u64()).map(|p| (p as u32, 0)))?;
+                    let child = args.get("child_ref").and_then(parse_process_ref)
+                        .or_else(|| args.get("child_pid").and_then(|v| v.as_u64()).map(|p| (p as u32, 0)))?;
                     Some((parent, child, e.header.timestamp))
                 })
                 .collect();
@@ -373,15 +383,16 @@ fn build_exec_trees(
             // Resolve the parent pid for an execve at (pid, ts):
             // most-recent fork with child == pid and fork_ts <= ts;
             // fall back to the `ppid` header.
-            let resolve_parent_pid = |pid: u32, ts: f64, ppid_fallback: u32| -> u32 {
+            let resolve_parent = |id: ProcId, ts: f64, fallback: ProcId| -> ProcId {
                 forks
                     .iter()
-                    .filter(|(_, child, fts)| *child == pid && *fts <= ts)
+                    .filter(|(_, child, fts)|
+                        (child == &id || (child.1 == 0 && child.0 == id.0)) && *fts <= ts)
                     .max_by(|(_, _, a), (_, _, b)| {
                         a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(parent, _, _)| *parent)
-                    .unwrap_or(ppid_fallback)
+                    .unwrap_or(fallback)
             };
 
             // Set of execve identities in this group. Root iff the
@@ -395,22 +406,33 @@ fn build_exec_trees(
 
             for &(idx, ev, ns) in &execves {
                 let ppid = ev.header.ppid.unwrap_or(0);
-                let parent_pid = resolve_parent_pid(ev.header.pid, ev.header.timestamp, ppid);
+                let fallback_ns = events[..=idx]
+                    .iter()
+                    .enumerate()
+                    .rev()
+                    .find(|(_, e)| e.header.pid == ppid)
+                    .map(|(pi, _)| start_time_per_event[pi])
+                    .unwrap_or(0);
+                let mut parent_id = resolve_parent(
+                    (ev.header.pid, ns),
+                    ev.header.timestamp,
+                    (ppid, fallback_ns),
+                );
+                if parent_id.1 == 0 {
+                    parent_id.1 = events[..=idx]
+                        .iter()
+                        .enumerate()
+                        .rev()
+                        .find(|(_, e)| e.header.pid == parent_id.0)
+                        .map(|(pi, _)| start_time_per_event[pi])
+                        .unwrap_or(0);
+                }
                 // Parent's identity: its start_time_ns at this execve's
                 // moment. Walk back from this event to the nearest
                 // prior event emitted by parent_pid; its resolved
                 // start_time_ns is the parent's anchor. If the parent
                 // never appears before the child, fall back to 0 — the
                 // tree degrades to pid-only identity for that edge.
-                let parent_ns = events[..=idx]
-                    .iter()
-                    .enumerate()
-                    .rev()
-                    .find(|(_, e)| e.header.pid == parent_pid)
-                    .map(|(pi, _)| start_time_per_event[pi])
-                    .unwrap_or(0);
-                let parent_id: ProcId = (parent_pid, parent_ns);
-
                 if execve_ids.contains(&parent_id) {
                     children_of.entry(parent_id).or_default().push((idx, ev, ns));
                 } else {
@@ -633,7 +655,7 @@ fn parse_tz_offset(s: &str) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use event_model::{EventHeader, EventType};
+    use event_model::{EventHeader, EventType, ProcessRef};
     use serde_json::json;
 
     fn mk_event(
@@ -652,6 +674,7 @@ mod tests {
                 pid,
                 ppid: Some(ppid),
                 comm: "bash".to_string(),
+                process_ref: None,
             },
             event: EventType {
                 event_type: event_type.to_string(),
@@ -676,36 +699,48 @@ mod tests {
     }
 
     fn process_start(ts: f64, pid: u32, start_ns: u64) -> BehaviorEvent {
-        mk_event(
+        let mut event = mk_event(
             ts,
             pid,
             0,
             "LIFECYCLE",
             "process_start",
-            json!({ "start_time_ns": start_ns }),
-        )
+            json!({ "process_ref": { "tgid": pid, "start_boottime_ns": start_ns } }),
+        );
+        event.header.process_ref = Some(ProcessRef { tgid: pid, start_boottime_ns: start_ns });
+        event
     }
 
-    fn process_fork(ts: f64, parent: u32, child: u32) -> BehaviorEvent {
-        mk_event(
+    fn process_fork(ts: f64, parent: ProcId, child: ProcId) -> BehaviorEvent {
+        let mut event = mk_event(
             ts,
-            parent,
+            parent.0,
             0,
             "LIFECYCLE",
             "process_fork",
-            json!({ "parent_pid": parent, "child_pid": child }),
-        )
+            json!({
+                "parent_ref": { "tgid": parent.0, "start_boottime_ns": parent.1 },
+                "child_ref": { "tgid": child.0, "start_boottime_ns": child.1 }
+            }),
+        );
+        event.header.process_ref = Some(ProcessRef {
+            tgid: parent.0,
+            start_boottime_ns: parent.1,
+        });
+        event
     }
 
-    fn process_exit(ts: f64, pid: u32) -> BehaviorEvent {
-        mk_event(
+    fn process_exit(ts: f64, id: ProcId) -> BehaviorEvent {
+        let mut event = mk_event(
             ts,
-            pid,
+            id.0,
             0,
             "LIFECYCLE",
             "process_exit",
-            json!({ "pid": pid, "exit_code": 0 }),
-        )
+            json!({ "exit_kind": "code", "exit_code": 0, "raw_status": 0 }),
+        );
+        event.header.process_ref = Some(ProcessRef { tgid: id.0, start_boottime_ns: id.1 });
+        event
     }
 
     fn group_covering(events: &[BehaviorEvent]) -> CommandGroup {
@@ -747,7 +782,7 @@ mod tests {
         let events = vec![
             process_start(0.9, 100, 1_000_000),
             execve(1.0, 100, 1, "/bin/bash"),
-            process_fork(1.05, 100, 200),
+            process_fork(1.05, (100, 1_000_000), (200, 2_000_000)),
             process_start(1.06, 200, 2_000_000),
             // ppid header says "1" (init) — stale — but process_fork
             // at 1.05 says 100 is the real parent.
@@ -779,7 +814,7 @@ mod tests {
             // First child lifecycle
             process_start(1.05, 200, 2_000_000),
             execve(1.1, 200, 100, "/bin/ls"),
-            process_exit(1.2, 200),
+            process_exit(1.2, (200, 2_000_000)),
             // Same pid reused after the exit. start_time_ns differs.
             process_start(1.3, 200, 3_000_000),
             execve(1.4, 200, 100, "/bin/pwd"),

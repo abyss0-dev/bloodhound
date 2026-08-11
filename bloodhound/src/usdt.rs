@@ -328,6 +328,7 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
             pid: 0,
             ppid: None,
             comm: String::new(),
+            process_ref: None,
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
