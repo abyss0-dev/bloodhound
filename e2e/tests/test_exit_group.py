@@ -4,6 +4,8 @@ import signal
 
 import pytest
 
+from helpers import python_command
+
 
 def _pid_from(result) -> int:
     lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -57,7 +59,7 @@ def test_normal_exit_group_and_multithread_teardown_emit_once(
     bloodhound_events,
     wait_for_matching_events,
 ):
-    pid = _pid_from(ssh_cmd(f"python3 -c {script!r}"))
+    pid = _pid_from(ssh_cmd(python_command(script)))
     events = _wait_for_one_exit(wait_for_matching_events, bloodhound_events, pid)
     exits = _exits(events, pid)
     assert len(exits) == 1
@@ -79,7 +81,7 @@ def test_fatal_signal_emits_one_signal_exit(
         "import os,signal; print(os.getpid(),flush=True); "
         "os.kill(os.getpid(),signal.SIGTERM)"
     )
-    pid = _pid_from(ssh_cmd(f"python3 -c {script!r}"))
+    pid = _pid_from(ssh_cmd(python_command(script)))
     events = _wait_for_one_exit(wait_for_matching_events, bloodhound_events, pid)
     exits = _exits(events, pid)
     assert len(exits) == 1
@@ -126,7 +128,7 @@ for _ in range(2):
     os.waitpid(child, 0)
 print(*pids, flush=True)
 '''
-    result = ssh_cmd(f"sudo python3 -c {script!r}")
+    result = ssh_cmd(python_command(script, sudo=True))
     pids = [int(value) for value in result.stdout.split() if value.strip()]
     assert len(pids) == 2, result.stderr
     assert pids[0] == pids[1], f"fixture did not reuse a pid: {pids}"

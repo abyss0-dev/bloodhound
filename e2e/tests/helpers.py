@@ -1,5 +1,6 @@
 import json
 import os
+import shlex
 from typing import Optional
 
 import jsonschema
@@ -10,6 +11,12 @@ SCHEMA_PATH = os.path.join(
 )
 
 _schema = None
+
+
+def python_command(script: str, *, sudo: bool = False) -> str:
+    """Build a shell-safe command for running Python source remotely."""
+    prefix = "sudo " if sudo else ""
+    return f"{prefix}python3 -c {shlex.quote(script)}"
 
 
 def get_schema():

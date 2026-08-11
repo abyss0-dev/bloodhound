@@ -1,5 +1,7 @@
 """clone/clone3 process-versus-thread lifecycle classification."""
 
+from helpers import python_command
+
 
 def _lifecycle(events, name, pid):
     return [
@@ -19,7 +21,7 @@ def test_pthread_clone3_does_not_create_a_process_instance(
         "t=threading.Thread(target=lambda: print(threading.get_native_id(),flush=True)); "
         "t.start(); t.join()"
     )
-    result = ssh_cmd(f"python3 -c {script!r}")
+    result = ssh_cmd(python_command(script))
     ids = [int(line) for line in result.stdout.splitlines() if line.strip()]
     assert len(ids) == 2, result.stderr
     parent_pid, thread_tid = ids
@@ -49,7 +51,7 @@ def test_libc_fork_clone_creates_one_process_instance(
         "os._exit(0) if child == 0 else "
         "(print(os.getpid(),child,flush=True),os.waitpid(child,0))"
     )
-    result = ssh_cmd(f"python3 -c {script!r}")
+    result = ssh_cmd(python_command(script))
     ids = [int(value) for value in result.stdout.split() if value.strip()]
     assert len(ids) == 2, result.stderr
     parent_pid, child_pid = ids
@@ -97,7 +99,7 @@ if rc < 0:
 print(os.getpid(), rc, flush=True)
 os.waitpid(rc, 0)
 '''
-    result = ssh_cmd(f"python3 -c {script!r}")
+    result = ssh_cmd(python_command(script))
     ids = [int(value) for value in result.stdout.split() if value.strip()]
     assert len(ids) == 2, f"rc={result.returncode} stderr={result.stderr!r}"
     parent_pid, child_pid = ids
