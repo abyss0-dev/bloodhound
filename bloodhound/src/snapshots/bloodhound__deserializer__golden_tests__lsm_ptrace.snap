@@ -1,11 +1,10 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1618
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "target_pid": 999
+    "target_pid": 4860
   },
   "event": {
     "layer": "behavior",
@@ -14,11 +13,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709000000000
+    "comm": "python3",
+    "pid": 4989,
+    "process_ref": {
+      "start_boottime_ns": 958675461500,
+      "tgid": 4989
+    },
+    "sessionid": 328,
+    "timestamp": 958727066012
   },
   "return_code": -1
 }

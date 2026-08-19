@@ -1,11 +1,10 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1529
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "filename": "/tmp/new_dir"
+    "filename": "/tmp/bh-golden-mkdir"
   },
   "event": {
     "layer": "behavior",
@@ -14,11 +13,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709000000000
+    "comm": "python3",
+    "pid": 3634,
+    "process_ref": {
+      "start_boottime_ns": 831815304601,
+      "tgid": 3634
+    },
+    "sessionid": 235,
+    "timestamp": 831830928645
   },
   "return_code": 0
 }
