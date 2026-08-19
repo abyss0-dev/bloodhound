@@ -25,7 +25,7 @@ impl<W: Write> Serializer<W> {
     /// Create a serializer writing to an arbitrary writer. Test-only:
     /// production wires `Serializer::new()` to `io::stdout()`.
     #[cfg(test)]
-    fn with_writer(writer: W) -> Self {
+    pub(crate) fn with_writer(writer: W) -> Self {
         Self {
             writer: LineWriter::new(writer),
         }
@@ -53,7 +53,7 @@ mod tests {
     fn make_event(name: &str) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 1000,
                 sessionid: 1,
                 pid: 42,

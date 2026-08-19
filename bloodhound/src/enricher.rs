@@ -69,7 +69,7 @@ mod tests {
     fn make_test_event(pid: u32) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 1000,
                 sessionid: 1,
                 pid,

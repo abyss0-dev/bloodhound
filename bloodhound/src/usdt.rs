@@ -322,7 +322,7 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
     }
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: now_seconds(),
+            timestamp: crate::clock::monotonic_now_ns(),
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -339,13 +339,6 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
         args: Some(Value::Object(args)),
         return_code: None,
     }
-}
-
-fn now_seconds() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(0.0)
 }
 
 /// A static probe discovered exclusively in `.note.stapsdt`.
@@ -1223,7 +1216,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!(
             "bloodhound-usdt-selection-{}-{}.toml",
             std::process::id(),
-            now_seconds().to_bits(),
+            crate::clock::monotonic_now_ns(),
         ));
         fs::write(&path, "collector = \"not-built-in\"\nenabled = true\n").unwrap();
         let error = load_selection(&path).unwrap_err();

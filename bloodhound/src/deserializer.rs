@@ -18,7 +18,7 @@ pub struct BehaviorEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EventHeaderJson {
-    pub timestamp: f64,
+    pub timestamp: u64,
     pub auid: u32,
     pub sessionid: u32,
     pub pid: u32,
@@ -80,7 +80,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
     let payload = &data[EventHeader::SIZE..];
 
     let header_json = EventHeaderJson {
-        timestamp: header.timestamp_ns as f64 / 1_000_000_000.0,
+        timestamp: header.timestamp_ns,
         auid: header.auid,
         sessionid: header.sessionid,
         pid: header.pid,
@@ -206,7 +206,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
 
     Ok(BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: pkt_header.timestamp_ns as f64 / 1_000_000_000.0,
+            timestamp: pkt_header.timestamp_ns,
             auid: 0,       // Filled by packet correlator
             sessionid: 0,
             pid: 0,
@@ -1146,7 +1146,7 @@ mod tests {
         let data = build_event(EventKind::RawSyscall, &payload);
         let event = deserialize(&data).unwrap();
 
-        assert!((event.header.timestamp - 1.5).abs() < 0.001);
+        assert_eq!(event.header.timestamp, 1_500_000_000);
         assert_eq!(event.header.auid, 1000);
         assert_eq!(event.header.sessionid, 42);
         assert_eq!(event.header.pid, 1234);
@@ -2159,6 +2159,6 @@ mod golden_tests {
         let event = deserialize(&padded[1..]).unwrap();
         assert_eq!(event.event.event_type, "PACKET");
         assert_eq!(event.event.name, "egress");
-        assert!((event.header.timestamp - 5.0).abs() < 1e-9);
+        assert_eq!(event.header.timestamp, 5_000_000_000);
     }
 }

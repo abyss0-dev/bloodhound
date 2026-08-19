@@ -10,7 +10,7 @@ Bloodhound conform to this structure.
 BehaviorEvent
 |
 +-- header (REQUIRED)
-|   +-- timestamp    : f64    (seconds since epoch)
+|   +-- timestamp    : u64    (VM CLOCK_MONOTONIC nanoseconds)
 |   +-- auid         : u32    (audit login UID)
 |   +-- sessionid    : u32    (audit session ID)
 |   +-- pid          : u32
@@ -76,6 +76,17 @@ DECIDED approach: populate `proc` fields in userspace by reading
 `/proc/<pid>/exe` and `/proc/<pid>/cwd` upon event receipt. For short-lived
 processes, this is best-effort (the process may have exited). The `proc`
 section is optional in the schema specifically to accommodate this.
+
+### header.timestamp
+
+`header.timestamp` is an integer number of nanoseconds from the observed VM's
+`CLOCK_MONOTONIC` clock. BPF and userspace-synthesized events use the same
+domain. It is comparable within one VM run, but is not wall-clock time, is not
+comparable across boots, and does not define total kernel causal order.
+
+NDJSON line position is the canonical Bloodhound emission order. Each producer
+retains FIFO order; cross-producer order is successful admission to the bounded
+sequencer rather than timestamp sorting.
 
 ### event.type PACKET
 
@@ -158,7 +169,11 @@ The header fields `auid`, `sessionid`, `pid` are sentinel zeroes and
 
 - `drop_count_delta` — drops observed since the previous heartbeat
 - `drop_count_total` — cumulative drops since daemon startup
+- `reason_code` — `ring_buffer_overflow` once the cumulative drop count is
+  nonzero; distinct from `deserialize_rejected` diagnostics
 - `events_emitted_delta` — events serialised to stdout in the interval
+- `run_prefix_incomplete` — present and `true` once cumulative ring-buffer
+  drops are nonzero for this daemon run
 - `gap_detected` — present and `true` only when
   `drop_count_delta > 0`; omitted otherwise so consumers can
   fast-path on the flag's presence
@@ -166,3 +181,15 @@ The header fields `auid`, `sessionid`, `pid` are sentinel zeroes and
 Downstream consumers should treat any interval between two
 `HEARTBEAT` events with `gap_detected = true` as *undecidable* for
 correlation — state accumulated across the gap may be incomplete.
+
+### event.type DIAGNOSTIC
+
+`event.name = "stream.health"` with
+`args.reason_code = "deserialize_rejected"` reports a binary ring-buffer
+record that Bloodhound could not deserialize. It includes bounded delta and
+cumulative rejection counts, never the rejected payload. The diagnostic is
+emitted before the next raw-derived event.
+
+Ring-buffer drops and deserialization rejection are separate causes. Either
+makes the cumulative run prefix incomplete. Later intervals with no new loss
+do not claim recovery; consumers apply their own explicit recovery semantics.

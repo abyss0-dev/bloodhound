@@ -135,13 +135,6 @@ pub(crate) fn build_app_from_path(
         );
     }
 
-    events.sort_by(|a, b| {
-        a.header
-            .timestamp
-            .partial_cmp(&b.header.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
     // Extract tty_write data for command reconstruction.
     //
     // Why tty_write and not tty_read?
@@ -152,7 +145,7 @@ pub(crate) fn build_app_from_path(
     //     the echoed user commands (from comm="bash") and program output.
     //     The command_reconstructor handles the mixed data by parsing newlines
     //     and stripping ANSI escapes.
-    let tty_writes: Vec<(f64, String, String)> = events
+    let tty_writes: Vec<(u64, String, String)> = events
         .iter()
         .filter(|e| e.is_tty_write())
         .filter_map(|e| {
@@ -193,8 +186,9 @@ pub(crate) fn build_app_from_path(
         Some(t) => t,
         None => {
             let file_mtime: DateTime<Utc> = fs::metadata(path)?.modified()?.into();
-            let last_mono = events.last().map(|e| e.header.timestamp).unwrap_or(0.0);
-            file_mtime - chrono::Duration::milliseconds((last_mono * 1000.0) as i64)
+            let last_mono = events.last().map(|e| e.header.timestamp).unwrap_or(0);
+            let last_mono = i64::try_from(last_mono).unwrap_or(i64::MAX);
+            file_mtime - chrono::Duration::nanoseconds(last_mono)
         }
     };
 
@@ -363,8 +357,8 @@ fn build_exec_trees(
                 .iter()
                 .filter_map(|&idx| events.get(idx))
                 .map(|e| e.header.timestamp)
-                .fold(window_start, f64::max);
-            let forks: Vec<(ProcId, ProcId, f64)> = events
+                .fold(window_start, u64::max);
+            let forks: Vec<(ProcId, ProcId, u64)> = events
                 .iter()
                 .filter(|e| e.event.event_type == "LIFECYCLE" && e.event.name == "process_fork")
                 .filter(|e| {
@@ -383,7 +377,7 @@ fn build_exec_trees(
             // Resolve the parent pid for an execve at (pid, ts):
             // most-recent fork with child == pid and fork_ts <= ts;
             // fall back to the `ppid` header.
-            let resolve_parent = |id: ProcId, ts: f64, fallback: ProcId| -> ProcId {
+            let resolve_parent = |id: ProcId, ts: u64, fallback: ProcId| -> ProcId {
                 forks
                     .iter()
                     .filter(|(_, child, fts)|
@@ -440,16 +434,14 @@ fn build_exec_trees(
                 }
             }
 
-            let by_timestamp = |a: &(usize, &BehaviorEvent, u64),
-                                b: &(usize, &BehaviorEvent, u64)| {
-                a.1.header
-                    .timestamp
-                    .partial_cmp(&b.1.header.timestamp)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            };
-            roots.sort_by(by_timestamp);
+            // Preserve canonical NDJSON admission order among roots and
+            // siblings. Timestamps may tie or reflect distinct kernel and
+            // userspace observation points, so they are not an ordering key.
+            let by_input_position =
+                |a: &(usize, &BehaviorEvent, u64), b: &(usize, &BehaviorEvent, u64)| a.0.cmp(&b.0);
+            roots.sort_by(by_input_position);
             for v in children_of.values_mut() {
-                v.sort_by(by_timestamp);
+                v.sort_by(by_input_position);
             }
 
             let mut result = Vec::new();
@@ -547,7 +539,7 @@ fn build_tty_output(
     // Collect non-shell tty_write events with timestamps and decoded data.
     // Shell processes emit prompt + command echo (shown in the left pane),
     // while non-shell processes emit actual command output (ls, cat, etc.).
-    let tty_writes: Vec<(f64, Vec<u8>)> = events
+    let tty_writes: Vec<(u64, Vec<u8>)> = events
         .iter()
         .filter(|e| e.is_tty_write() && !OUTPUT_EXCLUDE.contains(&e.header.comm.as_str()))
         .filter_map(|e| {
@@ -568,7 +560,7 @@ fn build_tty_output(
             let window_end = if gi + 1 < groups.len() {
                 groups[gi + 1].timestamp
             } else {
-                f64::MAX
+                u64::MAX
             };
 
             // Collect raw bytes in this window
@@ -668,7 +660,7 @@ mod tests {
     ) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeader {
-                timestamp: ts,
+                timestamp: (ts * 1_000_000_000.0) as u64,
                 auid: 1000,
                 sessionid: 1,
                 pid,
@@ -746,7 +738,7 @@ mod tests {
     fn group_covering(events: &[BehaviorEvent]) -> CommandGroup {
         CommandGroup {
             command: "ls".to_string(),
-            timestamp: events.first().map(|e| e.header.timestamp).unwrap_or(0.0),
+            timestamp: events.first().map(|e| e.header.timestamp).unwrap_or(0),
             event_indices: events
                 .iter()
                 .enumerate()

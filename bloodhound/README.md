@@ -8,12 +8,15 @@ Userspace daemon that loads eBPF programs, consumes events from the ring buffer,
 graph LR
     Loader["loader.rs<br/>Load & attach<br/>eBPF programs"]
     Consumer["consumer.rs<br/>Ring buffer<br/>polling"]
+    Sequencer["sequencer.rs<br/>Bounded admission<br/>+ one writer"]
+    Synth["Heartbeat +<br/>diagnostics"]
     Deser["deserializer.rs<br/>Raw bytes →<br/>typed events"]
     Enricher["enricher.rs<br/>/proc enrichment"]
     PktCorr["packet_correlator.rs<br/>5-tuple join"]
     Serializer["serializer.rs<br/>→ NDJSON"]
 
-    Loader --> Consumer --> Deser --> Enricher --> Serializer
+    Loader --> Consumer --> Sequencer --> Deser --> Enricher --> Serializer
+    Synth --> Sequencer
     Deser --> PktCorr --> Serializer
 ```
 
@@ -25,6 +28,8 @@ graph LR
 | `cli.rs` | Command-line argument parsing (`--uid`, `--exclude-ports`) |
 | `loader.rs` | Loads eBPF bytecode via Aya, attaches tracepoints/kprobes/TC/LSM |
 | `consumer.rs` | Polls the BPF ring buffer for raw events |
+| `sequencer.rs` | Defines bounded cross-producer admission order and the single fallible NDJSON path |
+| `clock.rs` | Reads VM `CLOCK_MONOTONIC` nanoseconds for userspace-synthesized events |
 | `deserializer.rs` | Deserializes raw byte buffers into typed event structs |
 | `enricher.rs` | Enriches events with `/proc` data (cwd, exe path, fd info) |
 | `packet_correlator.rs` | Correlates PACKET events with socket syscalls via 5-tuple |

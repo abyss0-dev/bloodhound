@@ -67,7 +67,7 @@ class TestExecve:
         assert "sessionid" in header
         assert "pid" in header
         assert "comm" in header
-        assert isinstance(header["timestamp"], (int, float))
+        assert isinstance(header["timestamp"], int)
         assert header["timestamp"] > 0
 
     def test_script_execution(self, ssh_cmd, bloodhound_events, wait_for_events):

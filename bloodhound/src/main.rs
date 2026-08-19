@@ -1,5 +1,6 @@
 mod btf_offsets;
 mod cli;
+mod clock;
 mod consumer;
 mod deserializer;
 mod drop_counter;
@@ -8,22 +9,20 @@ mod heartbeat;
 mod lifecycle;
 mod loader;
 mod packet_correlator;
+mod sequencer;
 mod serializer;
 mod shutdown;
 mod usdt;
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use aya::maps::{ring_buf::RingBuf, PerCpuArray};
 use clap::Parser;
 use log::info;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 use cli::Cli;
-use deserializer::BehaviorEvent;
-use lifecycle::LifecycleSynthesizer;
-use packet_correlator::PacketCorrelator;
+use sequencer::{SequencedInput, Sequencer};
 use serializer::Serializer;
 
 #[tokio::main]
@@ -34,6 +33,12 @@ async fn main() -> Result<()> {
     info!("Bloodhound starting: tracing uid={}", args.uid);
     eprintln!("Bloodhound starting: tracing uid={}", args.uid);
 
+    let events_emitted = heartbeat::new_events_emitted_counter();
+    let mut sequencer = Sequencer::new(args.uid, Serializer::new(), events_emitted.clone());
+    // Create the one bounded admission path before any source can emit a
+    // BehaviorEvent, including startup validation diagnostics.
+    let (sequence_tx, mut sequence_rx) = mpsc::channel::<SequencedInput>(4096);
+
     let mut usdt_selections = Vec::new();
     for path in &args.usdt_config {
         match usdt::load_selection(path) {
@@ -42,15 +47,23 @@ async fn main() -> Result<()> {
                 // Startup validation is deliberately noisy and structured: a
                 // bad trusted selection is never silently ignored.
                 let event = usdt::selection_failure_diagnostic(path, &error);
-                let _ = Serializer::new().write_event(&event);
+                sequence_tx
+                    .send(SequencedInput::Synthesized(Box::new(event)))
+                    .await
+                    .context("admitting startup diagnostic to event sequencer")?;
+                let admitted = sequence_rx
+                    .recv()
+                    .await
+                    .context("event sequencer closed before startup diagnostic")?;
+                sequencer.accept(admitted)?;
+                sequencer.flush()?;
                 return Err(error);
             }
         }
     }
 
     // Load and attach BPF programs
-    let (mut bpf, usdt_diagnostics, _usdt_links) =
-        loader::load_and_attach(&args, &usdt_selections)?;
+    let (mut bpf, usdt_diagnostics, usdt_links) = loader::load_and_attach(&args, &usdt_selections)?;
 
     // Set up shutdown handler
     let shutdown_tx = shutdown::shutdown_signal();
@@ -78,29 +91,28 @@ async fn main() -> Result<()> {
     // Set up ring buffer consumer
     let map = bpf.take_map("EVENTS").unwrap();
     let ring_buf = RingBuf::try_from(map)?;
-    let (event_tx, mut event_rx) = mpsc::channel::<Vec<u8>>(4096);
+    // All producers admit to this one bounded channel. Successful send order
+    // is the canonical cross-producer order represented by NDJSON line order.
     let (consumer_ready_tx, consumer_ready_rx) = tokio::sync::oneshot::channel();
+    let (consumer_shutdown_tx, consumer_shutdown_rx) = tokio::sync::oneshot::channel();
 
     // Spawn ring buffer consumer task
-    let consumer_handle = tokio::spawn(async move {
-        if let Err(e) = consumer::consume_ring_buffer(ring_buf, event_tx, consumer_ready_tx).await {
-            eprintln!("Ring buffer consumer error: {}", e);
-        }
-    });
+    let raw_tx = sequence_tx.clone();
+    let mut consumer_handle = tokio::spawn(consumer::consume_ring_buffer(
+        ring_buf,
+        raw_tx,
+        consumer_ready_tx,
+        consumer_shutdown_rx,
+    ));
     consumer_ready_rx
         .await
         .context("ring buffer consumer exited before becoming ready")?;
     info!("BPF programs loaded and attached");
     eprintln!("BPF programs loaded and attached");
 
-    // Synthesized-event channel for userspace-generated events
-    // (lifecycle announcements and heartbeats). Kept separate from the
-    // ring-buffer `event_rx` so the main select! can interleave both
-    // sources without either starving the other.
-    let (syn_tx, mut syn_rx) = mpsc::channel::<BehaviorEvent>(64);
     for diagnostic in usdt_diagnostics {
-        syn_tx
-            .send(diagnostic)
+        sequence_tx
+            .send(SequencedInput::Synthesized(Box::new(diagnostic)))
             .await
             .context("queueing USDT diagnostic")?;
     }
@@ -108,12 +120,11 @@ async fn main() -> Result<()> {
     // Heartbeat task: periodic synthesized events carrying drop deltas
     // and emission counts so downstream consumers can mark intervals
     // as undecidable when drops occurred.
-    let events_emitted = heartbeat::new_events_emitted_counter();
-    let heartbeat_tx = syn_tx.clone();
+    let heartbeat_tx = sequence_tx.clone();
     let heartbeat_drops = drop_count.clone();
     let heartbeat_emitted = events_emitted.clone();
     let heartbeat_interval = Duration::from_secs_f64(args.heartbeat_interval);
-    tokio::spawn(async move {
+    let heartbeat_handle = tokio::spawn(async move {
         heartbeat::run_heartbeat(
             heartbeat_interval,
             heartbeat_drops,
@@ -123,109 +134,65 @@ async fn main() -> Result<()> {
         .await;
     });
 
-    // Set up packet correlator, lifecycle synthesizer, and serializer
-    let mut correlator = PacketCorrelator::new(args.uid);
-    let mut lifecycle_synth = LifecycleSynthesizer::new();
-    let mut output = Serializer::new();
-
     let drain_timeout = Duration::from_secs(5);
+    // The main task no longer produces events. Dropping this sender ensures
+    // the channel closes after the raw and heartbeat producers finish.
+    drop(sequence_tx);
 
-    // Helper: serialise an event and bump the emitted counter that
-    // heartbeat samples for its `events_emitted_delta` field.
-    let write_counted = |out: &mut Serializer<_>, ev: &BehaviorEvent| {
-        if let Err(e) = out.write_event(ev) {
-            eprintln!("Failed to write event: {}", e);
-            return;
-        }
-        events_emitted.fetch_add(1, Ordering::Relaxed);
-    };
-
-    // Main event processing loop
+    // Main sequencing loop. There is one receiver and one fallible writer;
+    // stdout failures therefore terminate the daemon instead of being logged
+    // and ignored.
     loop {
         tokio::select! {
-            Some(raw_event) = event_rx.recv() => {
-                match deserializer::deserialize(&raw_event) {
-                    Ok(mut event) => {
-                        // Enrich with /proc info
-                        enricher::enrich(&mut event);
-
-                        // Packet correlation
-                        if event.event.event_type == "PACKET" {
-                            correlator.correlate(&mut event);
-                        }
-
-                        // Record socket events for packet correlation
-                        if event.event.name == "connect" || event.event.name == "bind" {
-                            correlator.record_socket(&event);
-                        }
-
-                        // Bootstrap a process that predates attachment before
-                        // its first observed event. Kernel-created processes
-                        // already arrive with process_start first.
-                        for precursor in lifecycle_synth.before(&event) {
-                            write_counted(&mut output, &precursor);
-                        }
-
-                        // Serialize the original event
-                        write_counted(&mut output, &event);
-
-                        // Kernel hooks already own fork and exit; this only
-                        // releases bounded userspace identity state on exit.
-                        for followup in lifecycle_synth.after(&event) {
-                            write_counted(&mut output, &followup);
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("Failed to deserialize event: {}", e);
-                    }
+            input = sequence_rx.recv() => {
+                match input {
+                    Some(input) => sequencer.accept(input)?,
+                    None => bail!("bounded event sequencer closed unexpectedly"),
                 }
             }
 
-            Some(syn_event) = syn_rx.recv() => {
-                // Heartbeat and any other userspace-synthesised events
-                // share the same serialiser; ordering with raw events
-                // is FIFO-per-source, determined by select! wake order.
-                write_counted(&mut output, &syn_event);
+            result = &mut consumer_handle => {
+                result.context("ring buffer consumer task panicked")??;
+                bail!("ring buffer consumer exited unexpectedly");
             }
 
             _ = shutdown_rx.recv() => {
                 eprintln!("Shutting down...");
-
-                // Drain remaining events with timeout
-                let deadline = tokio::time::Instant::now() + drain_timeout;
-                loop {
-                    tokio::select! {
-                        Some(raw_event) = event_rx.recv() => {
-                            if let Ok(mut event) = deserializer::deserialize(&raw_event) {
-                                enricher::enrich(&mut event);
-                                if event.event.event_type == "PACKET" {
-                                    correlator.correlate(&mut event);
-                                }
-                                for precursor in lifecycle_synth.before(&event) {
-                                    let _ = output.write_event(&precursor);
-                                }
-                                let _ = output.write_event(&event);
-                                for followup in lifecycle_synth.after(&event) {
-                                    let _ = output.write_event(&followup);
-                                }
-                            }
-                        }
-                        _ = tokio::time::sleep_until(deadline) => break,
-                        else => break,
-                    }
-                }
-
-                // Flush output
-                if let Err(e) = output.flush() {
-                    eprintln!("Failed to flush output: {}", e);
-                }
-
-                eprintln!("Shutdown complete");
                 break;
             }
         }
     }
 
-    consumer_handle.abort();
+    // Stop kernel production first, then ask the ring-buffer consumer to
+    // perform one final drain into the same sequencer. The heartbeat sender
+    // is removed so channel closure proves that every admitted item drained.
+    drop(bpf);
+    drop(usdt_links);
+    heartbeat_handle.abort();
+    let _ = consumer_shutdown_tx.send(());
+
+    let deadline = tokio::time::Instant::now() + drain_timeout;
+    let mut consumer_done = false;
+    loop {
+        tokio::select! {
+            input = sequence_rx.recv() => {
+                match input {
+                    Some(input) => sequencer.accept(input)?,
+                    None if consumer_done => break,
+                    None => bail!("bounded event sequencer closed before consumer shutdown"),
+                }
+            }
+            result = &mut consumer_handle, if !consumer_done => {
+                result.context("ring buffer consumer task panicked during shutdown")??;
+                consumer_done = true;
+            }
+            _ = tokio::time::sleep_until(deadline) => {
+                bail!("incomplete shutdown: bounded event sequencer did not drain within 5 seconds");
+            }
+        }
+    }
+
+    sequencer.flush()?;
+    eprintln!("Shutdown complete");
     Ok(())
 }

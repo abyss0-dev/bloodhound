@@ -7,9 +7,9 @@ pub struct CommandEntry {
     /// The reconstructed command string (after control char processing).
     pub command: String,
     /// Timestamp of the first tty byte that contributed.
-    pub start_timestamp: f64,
+    pub start_timestamp: u64,
     /// Timestamp of the Enter keystroke (or last byte if no Enter).
-    pub end_timestamp: f64,
+    pub end_timestamp: u64,
 }
 
 /// Shell process names to filter for command reconstruction.
@@ -21,10 +21,10 @@ const SHELL_COMMS: &[&str] = &["bash", "sh", "zsh", "fish", "dash", "ksh", "tcsh
 /// We filter to events from shell processes (comm = bash/sh/zsh/etc.),
 /// process control characters and ANSI escapes, split on newlines,
 /// and strip the shell prompt prefix to extract the actual command.
-pub fn reconstruct_commands(tty_write_events: &[(f64, String, String)]) -> Vec<CommandEntry> {
+pub fn reconstruct_commands(tty_write_events: &[(u64, String, String)]) -> Vec<CommandEntry> {
     let mut commands = Vec::new();
     let mut buf = String::new();
-    let mut start_ts = 0.0_f64;
+    let mut start_ts = 0_u64;
     let mut has_start = false;
     let mut in_escape = false;
     // Track OSC (Operating System Command) escape sequences: ESC ] ... BEL/ST
@@ -189,18 +189,18 @@ mod tests {
     }
 
     /// Helper: create events with comm="bash" (shell process)
-    fn events_from(items: &[(f64, &str)]) -> Vec<(f64, String, String)> {
+    fn events_from(items: &[(f64, &str)]) -> Vec<(u64, String, String)> {
         items
             .iter()
-            .map(|(ts, s)| (*ts, b64(s), "bash".to_string()))
+            .map(|(ts, s)| ((ts * 1_000_000_000.0) as u64, b64(s), "bash".to_string()))
             .collect()
     }
 
     /// Helper: create events with an arbitrary comm
-    fn events_with_comm(items: &[(f64, &str, &str)]) -> Vec<(f64, String, String)> {
+    fn events_with_comm(items: &[(f64, &str, &str)]) -> Vec<(u64, String, String)> {
         items
             .iter()
-            .map(|(ts, s, comm)| (*ts, b64(s), comm.to_string()))
+            .map(|(ts, s, comm)| ((ts * 1_000_000_000.0) as u64, b64(s), comm.to_string()))
             .collect()
     }
 
@@ -303,8 +303,8 @@ mod tests {
     fn test_timestamps_correct() {
         let events = events_from(&[(1.0, "l"), (1.5, "s"), (2.0, "\r")]);
         let cmds = reconstruct_commands(&events);
-        assert_eq!(cmds[0].start_timestamp, 1.0);
-        assert_eq!(cmds[0].end_timestamp, 2.0);
+        assert_eq!(cmds[0].start_timestamp, 1_000_000_000);
+        assert_eq!(cmds[0].end_timestamp, 2_000_000_000);
     }
 
     #[test]

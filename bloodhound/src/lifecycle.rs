@@ -172,7 +172,7 @@ mod tests {
     fn event(pid: u32, start_boottime_ns: u64, event_type: &str, name: &str) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 1000,
                 sessionid: 1,
                 pid,

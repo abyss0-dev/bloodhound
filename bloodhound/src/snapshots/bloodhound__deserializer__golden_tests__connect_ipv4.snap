@@ -20,7 +20,7 @@ expression: to_json(&event)
     "pid": 5678,
     "ppid": 1234,
     "sessionid": 42,
-    "timestamp": 1709.0
+    "timestamp": 1709000000000
   },
   "return_code": 0
 }

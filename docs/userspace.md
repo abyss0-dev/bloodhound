@@ -5,10 +5,16 @@
 |                  Bloodhound Userspace                      |
 |                                                           |
 |  +-----------+    +-----------+    +------------------+   |
-|  | Ring      |--->| Event     |--->| /proc enricher   |   |
-|  | Buffer    |    | Deser-    |    | (exe, cwd)       |   |
-|  | Consumer  |    | ializer   |    +--------+---------+   |
-|  +-----------+    +-----------+             |             |
+|  | Ring      |--->| Bounded sequencer                    | |
+|  | Buffer    |    | raw + heartbeat + diagnostics        | |
+|  | Consumer  |    +--------------------+-----------------+ |
+|  +-----------+                         |                   |
+|  Heartbeat + diagnostics --------------+                   |
+|                                             v             |
+|                                    +--------+---------+   |
+|                                    | Deserialize raw  |   |
+|                                    | + /proc enrich   |   |
+|                                    +--------+---------+   |
 |                                             v             |
 |                                    +--------+---------+   |
 |                                    | 5-tuple packet   |   |
@@ -26,6 +32,8 @@
 
 - Async runtime: tokio for ring buffer polling
 - Event processing: single-threaded async pipeline
+- Ordering: per-producer FIFO plus successful bounded-sequencer admission;
+  NDJSON line order is emission order, not inferred kernel causal order
 - Output: NDJSON (newline-delimited JSON) to stdout, one BehaviorEvent per line
 - Operational logs (startup, errors, drop count warnings): stderr
 - Event evaluation is NOT performed by Bloodhound -- it emits raw events
@@ -41,8 +49,10 @@ See [tracing.md](tracing.md) for details.
 
 ### Drop counter polling
 
-Userspace periodically reads the BPF global drop counter and emits
-warnings to stderr when events are being lost due to ring buffer overflow.
+Userspace periodically reads the BPF global drop counter and emits both
+operator warnings on stderr and in-band HEARTBEAT loss state. A binary record
+rejected by the deserializer becomes a bounded `DIAGNOSTIC/stream.health`
+through the same sequencer.
 
 DECIDED: No pre-filtering or aggregation. All events are emitted
 unconditionally to stdout. Downstream consumers perform any filtering.
