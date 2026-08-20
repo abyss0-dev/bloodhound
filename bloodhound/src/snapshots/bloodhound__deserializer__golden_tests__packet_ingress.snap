@@ -1,12 +1,11 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1643
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "data": "RQAAPA==",
-    "ifindex": 2
+    "data": "AAAAAAAAAAAAAAAACABFAAAsvKlAAEARgBV/AAABfwAAAQ==",
+    "ifindex": 0
   },
   "event": {
     "layer": "behavior",
@@ -18,6 +17,6 @@ expression: to_json(&event)
     "comm": "",
     "pid": 0,
     "sessionid": 0,
-    "timestamp": 1709.0
+    "timestamp": 1137297804245
   }
 }

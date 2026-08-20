@@ -1,16 +1,11 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1512
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
     "flags": [
-      "CLONE_VM",
-      "CLONE_FS",
-      "CLONE_FILES",
-      "CLONE_SIGHAND",
-      "CLONE_THREAD"
+      "0x1200011"
     ]
   },
   "event": {
@@ -20,11 +15,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709.0
+    "comm": "python3",
+    "pid": 3464,
+    "process_ref": {
+      "start_boottime_ns": 819646649297,
+      "tgid": 3464
+    },
+    "sessionid": 223,
+    "timestamp": 819687648322
   },
-  "return_code": 9999
+  "return_code": 3465
 }

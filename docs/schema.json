@@ -11,8 +11,9 @@
       "required": ["timestamp", "auid", "sessionid", "pid", "comm"],
       "properties": {
         "timestamp": {
-          "type": "number",
-          "description": "Event timestamp in seconds since epoch (float for precision)."
+          "type": "integer",
+          "minimum": 0,
+          "description": "CLOCK_MONOTONIC nanoseconds in the observed VM. This is provenance time, not a total kernel causal order."
         },
         "auid": {
           "type": "integer",
@@ -54,7 +55,7 @@
         "type": {
           "type": "string",
           "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM", "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC"],
-          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector or process-identity health state."
+          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector, process-identity, or stream health state."
         },
         "name": {
           "type": "string",

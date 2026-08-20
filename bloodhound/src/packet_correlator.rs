@@ -21,7 +21,7 @@ pub struct SocketEntry {
     pub auid: u32,
     pub sessionid: u32,
     pub comm: String,
-    pub timestamp: f64,
+    pub timestamp: u64,
 }
 
 /// Packet correlator: maps 5-tuples to process context.
@@ -99,7 +99,7 @@ impl PacketCorrelator {
             let oldest_key = self
                 .table
                 .iter()
-                .min_by(|a, b| a.1.timestamp.partial_cmp(&b.1.timestamp).unwrap())
+                .min_by_key(|(_, entry)| entry.timestamp)
                 .map(|(k, _)| k.clone());
             if let Some(k) = oldest_key {
                 self.table.remove(&k);
@@ -144,7 +144,7 @@ mod tests {
     fn make_packet_event() -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 0,
                 sessionid: 0,
                 pid: 0,
@@ -166,7 +166,7 @@ mod tests {
     fn make_connect_event(addr: &str, port: u16) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 1000,
                 sessionid: 1,
                 pid: 42,
@@ -257,22 +257,22 @@ mod tests {
 
         // Fill to capacity
         let mut ev1 = make_connect_event("10.0.0.1", 80);
-        ev1.header.timestamp = 1.0;
+        ev1.header.timestamp = 1;
         correlator.record_socket(&ev1);
 
         let mut ev2 = make_connect_event("10.0.0.2", 80);
-        ev2.header.timestamp = 2.0;
+        ev2.header.timestamp = 2;
         correlator.record_socket(&ev2);
 
         let mut ev3 = make_connect_event("10.0.0.3", 80);
-        ev3.header.timestamp = 3.0;
+        ev3.header.timestamp = 3;
         correlator.record_socket(&ev3);
 
         assert_eq!(correlator.table.len(), 3);
 
         // Adding one more should evict the oldest (timestamp=1.0)
         let mut ev4 = make_connect_event("10.0.0.4", 80);
-        ev4.header.timestamp = 4.0;
+        ev4.header.timestamp = 4;
         correlator.record_socket(&ev4);
 
         assert_eq!(correlator.table.len(), 3);

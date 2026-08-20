@@ -18,7 +18,7 @@ pub struct BehaviorEvent {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EventHeaderJson {
-    pub timestamp: f64,
+    pub timestamp: u64,
     pub auid: u32,
     pub sessionid: u32,
     pub pid: u32,
@@ -80,7 +80,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
     let payload = &data[EventHeader::SIZE..];
 
     let header_json = EventHeaderJson {
-        timestamp: header.timestamp_ns as f64 / 1_000_000_000.0,
+        timestamp: header.timestamp_ns,
         auid: header.auid,
         sessionid: header.sessionid,
         pid: header.pid,
@@ -206,7 +206,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
 
     Ok(BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: pkt_header.timestamp_ns as f64 / 1_000_000_000.0,
+            timestamp: pkt_header.timestamp_ns,
             auid: 0,       // Filled by packet correlator
             sessionid: 0,
             pid: 0,
@@ -1146,7 +1146,7 @@ mod tests {
         let data = build_event(EventKind::RawSyscall, &payload);
         let event = deserialize(&data).unwrap();
 
-        assert!((event.header.timestamp - 1.5).abs() < 0.001);
+        assert_eq!(event.header.timestamp, 1_500_000_000);
         assert_eq!(event.header.auid, 1000);
         assert_eq!(event.header.sessionid, 42);
         assert_eq!(event.header.pid, 1234);
@@ -1763,339 +1763,47 @@ mod tests {
 #[cfg(test)]
 mod golden_tests {
     use super::*;
+    use base64::Engine;
     use insta::assert_json_snapshot;
-    use std::mem;
-
-    fn make_header(kind: EventKind) -> EventHeader {
-        let mut comm = [0u8; COMM_SIZE];
-        comm[..4].copy_from_slice(b"bash");
-        EventHeader {
-            kind: kind as u8,
-            _pad: [0; 3],
-            timestamp_ns: 1_709_000_000_000, // fixed value for deterministic snapshots
-            auid: 1000,
-            sessionid: 42,
-            pid: 5678,
-            ppid: 1234,
-            process_start_boottime_ns: 0,
-            comm,
-        }
-    }
-
-    fn header_bytes(h: &EventHeader) -> Vec<u8> {
-        unsafe {
-            std::slice::from_raw_parts(
-                h as *const EventHeader as *const u8,
-                EventHeader::SIZE,
-            )
-        }
-        .to_vec()
-    }
-
-    fn payload_bytes<T>(p: &T) -> Vec<u8> {
-        unsafe {
-            std::slice::from_raw_parts(
-                p as *const T as *const u8,
-                mem::size_of::<T>(),
-            )
-        }
-        .to_vec()
-    }
-
-    fn build(kind: EventKind, payload_raw: &[u8]) -> Vec<u8> {
-        let h = make_header(kind);
-        let mut buf = header_bytes(&h);
-        buf.extend_from_slice(payload_raw);
-        buf
-    }
 
     fn to_json(event: &BehaviorEvent) -> serde_json::Value {
         serde_json::to_value(event).unwrap()
     }
 
-    // ── Layer 1: TTY ─────────────────────────────────────────────────────
-
-    #[test]
-    fn golden_tty_write() {
-        let payload = TtyPayload { data_len: 12, _pad: [0; 2] };
-        let tty_data = b"echo hello\r\n";
-        let mut buf = build(EventKind::TtyWrite, &payload_bytes(&payload));
-        buf.extend_from_slice(tty_data);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("tty_write", to_json(&event));
+    fn captured(encoded: &str) -> Vec<u8> {
+        base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .expect("QEMU capture must be valid base64")
     }
 
-    #[test]
-    fn golden_tty_read() {
-        let payload = TtyPayload { data_len: 5, _pad: [0; 2] };
-        let tty_data = b"hello";
-        let mut buf = build(EventKind::TtyRead, &payload_bytes(&payload));
-        buf.extend_from_slice(tty_data);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("tty_read", to_json(&event));
-    }
-
-    // ── Layer 2: Execve ──────────────────────────────────────────────────
-
-    #[test]
-    fn golden_execve() {
-        let filename = b"/usr/bin/ls\0";
-        let argv = b"ls\0-la\0/home\0";
-        let payload = ExecvePayload {
-            filename_len: filename.len() as u16,
-            argv_len: argv.len() as u16,
-            return_code: 0,
+    macro_rules! golden_from_qemu {
+        ($test_name:ident, $snapshot_name:literal, $fixture:literal) => {
+            #[test]
+            fn $test_name() {
+                let raw = captured(include_str!($fixture));
+                let event = deserialize(&raw).expect("QEMU capture must deserialize");
+                assert_json_snapshot!($snapshot_name, to_json(&event));
+            }
         };
-        let mut buf = build(EventKind::Execve, &payload_bytes(&payload));
-        buf.extend_from_slice(filename);
-        buf.extend_from_slice(argv);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("execve", to_json(&event));
     }
 
-    // ── Layer 3: Raw syscall ─────────────────────────────────────────────
-
-    #[test]
-    fn golden_raw_syscall() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 39, // getpid
-            args: [0, 0, 0, 0, 0, 0],
-            return_code: 5678,
-        };
-        let buf = build(EventKind::RawSyscall, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("raw_syscall", to_json(&event));
-    }
-
-    // ── Layer 3: Openat ──────────────────────────────────────────────────
-
-    #[test]
-    fn golden_openat() {
-        let path = b"/etc/passwd\0";
-        let payload = OpenatPayload {
-            flags: 0o2 | 0o100, // O_RDWR | O_CREAT
-            mode: 0o644,
-            filename_len: path.len() as u16,
-            _pad: [0; 2],
-            return_code: 3,
-            _pad2: [0; 4],
-            dev: 0xfd00,
-            ino: 100200,
-        };
-        let mut buf = build(EventKind::Openat, &payload_bytes(&payload));
-        buf.extend_from_slice(path);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("openat", to_json(&event));
-    }
-
-    // ── Layer 3: Read / Write ────────────────────────────────────────────
-
-    #[test]
-    fn golden_read() {
-        let payload = ReadWritePayload {
-            fd: 3,
-            fd_type: FD_TYPE_REGULAR,
-            _pad: [0; 3],
-            requested_size: 4096,
-            return_code: 1024,
-        };
-        let buf = build(EventKind::Read, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("read", to_json(&event));
-    }
-
-    // ── Layer 3: Connect ─────────────────────────────────────────────────
-
-    #[test]
-    fn golden_connect_ipv4() {
-        let payload = ConnectBindPayload {
-            family: 2, // AF_INET
-            port: 443,
-            addr_v4: u32::from_be_bytes([93, 184, 216, 34]), // 93.184.216.34
-            addr_v6: [0; 16],
-            return_code: 0,
-        };
-        let buf = build(EventKind::Connect, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("connect_ipv4", to_json(&event));
-    }
-
-    #[test]
-    fn golden_connect_ipv6() {
-        let mut addr_v6 = [0u8; 16];
-        // 2001:0db8::1
-        addr_v6[0] = 0x20;
-        addr_v6[1] = 0x01;
-        addr_v6[2] = 0x0d;
-        addr_v6[3] = 0xb8;
-        addr_v6[15] = 0x01;
-        let payload = ConnectBindPayload {
-            family: 10, // AF_INET6
-            port: 80,
-            addr_v4: 0,
-            addr_v6,
-            return_code: 0,
-        };
-        let buf = build(EventKind::Connect, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("connect_ipv6", to_json(&event));
-    }
-
-    // ── Layer 3: Clone ───────────────────────────────────────────────────
-
-    #[test]
-    fn golden_clone() {
-        let payload = ClonePayload {
-            flags: 0x00000100 | 0x00000200 | 0x00000400 | 0x00000800 | 0x00010000,
-            // CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD
-            return_code: 9999,
-        };
-        let buf = build(EventKind::Clone, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("clone", to_json(&event));
-    }
-
-    // ── Layer 3: Path events ─────────────────────────────────────────────
-
-    #[test]
-    fn golden_mkdir() {
-        let path = b"/tmp/new_dir\0";
-        let payload = PathPayload {
-            path_len: path.len() as u16,
-            _pad: [0; 2],
-            return_code: 0,
-        };
-        let mut buf = build(EventKind::Mkdir, &payload_bytes(&payload));
-        buf.extend_from_slice(path);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("mkdir", to_json(&event));
-    }
-
-    // ── Layer 3: Two-path events ─────────────────────────────────────────
-
-    #[test]
-    fn golden_rename() {
-        let old = b"/tmp/old_name\0";
-        let new = b"/tmp/new_name\0";
-        let payload = TwoPathPayload {
-            path1_len: old.len() as u16,
-            path2_len: new.len() as u16,
-            return_code: 0,
-        };
-        let mut buf = build(EventKind::Rename, &payload_bytes(&payload));
-        buf.extend_from_slice(old);
-        buf.extend_from_slice(new);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("rename", to_json(&event));
-    }
-
-    // ── Layer 3: Sendto ──────────────────────────────────────────────────
-
-    #[test]
-    fn golden_sendto() {
-        let payload = SendtoRecvfromPayload {
-            fd: 5,
-            family: 2,
-            port: 53,
-            addr_v4: u32::from_be_bytes([8, 8, 8, 8]),
-            addr_v6: [0; 16],
-            size: 64,
-            return_code: 64,
-        };
-        let buf = build(EventKind::Sendto, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("sendto", to_json(&event));
-    }
-
-    // ── LSM events ───────────────────────────────────────────────────────
-
-    #[test]
-    fn golden_lsm_task_kill() {
-        let payload = LsmTaskKillPayload {
-            target_pid: 100,
-            signal: 9,
-            target_start_boottime_ns: 77,
-            return_code: -1,
-            _pad: 0,
-        };
-        let buf = build(EventKind::LsmTaskKill, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("lsm_task_kill", to_json(&event));
-    }
-
-    #[test]
-    fn golden_lsm_bpf() {
-        let payload = LsmBpfPayload { cmd: 5, return_code: -1 };
-        let buf = build(EventKind::LsmBpf, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("lsm_bpf", to_json(&event));
-    }
-
-    #[test]
-    fn golden_lsm_setuid() {
-        let payload = LsmSetuidPayload {
-            old_uid: 1000,
-            new_uid: 0,
-            old_gid: 1000,
-            new_gid: 0,
-            return_code: 0,
-        };
-        let buf = build(EventKind::LsmTaskFixSetuid, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("lsm_setuid", to_json(&event));
-    }
-
-    #[test]
-    fn golden_lsm_ptrace() {
-        let payload = LsmPtracePayload {
-            target_pid: 999,
-            return_code: -1,
-        };
-        let buf = build(EventKind::LsmPtraceAccessCheck, &payload_bytes(&payload));
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("lsm_ptrace", to_json(&event));
-    }
-
-    // ── Packet events ────────────────────────────────────────────────────
-
-    #[test]
-    fn golden_packet_ingress() {
-        let pkt_header = PacketEventHeader {
-            kind: EventKind::PacketIngress as u8,
-            _pad: [0; 3],
-            timestamp_ns: 1_709_000_000_000,
-            ifindex: 2,
-            data_len: 4,
-        };
-        let raw_pkt = vec![0x45, 0x00, 0x00, 0x3C]; // IP header start
-        let mut buf = unsafe {
-            std::slice::from_raw_parts(
-                &pkt_header as *const PacketEventHeader as *const u8,
-                PacketEventHeader::SIZE,
-            )
-        }
-        .to_vec();
-        buf.extend_from_slice(&raw_pkt);
-
-        let event = deserialize(&buf).unwrap();
-        assert_json_snapshot!("packet_ingress", to_json(&event));
-    }
+    golden_from_qemu!(golden_tty_write, "tty_write", "../testdata/qemu/tty_write.b64");
+    golden_from_qemu!(golden_tty_read, "tty_read", "../testdata/qemu/tty_read.b64");
+    golden_from_qemu!(golden_execve, "execve", "../testdata/qemu/execve.b64");
+    golden_from_qemu!(golden_raw_syscall, "raw_syscall", "../testdata/qemu/raw_syscall.b64");
+    golden_from_qemu!(golden_openat, "openat", "../testdata/qemu/openat.b64");
+    golden_from_qemu!(golden_read, "read", "../testdata/qemu/read.b64");
+    golden_from_qemu!(golden_connect_ipv4, "connect_ipv4", "../testdata/qemu/connect_ipv4.b64");
+    golden_from_qemu!(golden_connect_ipv6, "connect_ipv6", "../testdata/qemu/connect_ipv6.b64");
+    golden_from_qemu!(golden_clone, "clone", "../testdata/qemu/clone.b64");
+    golden_from_qemu!(golden_mkdir, "mkdir", "../testdata/qemu/mkdir.b64");
+    golden_from_qemu!(golden_rename, "rename", "../testdata/qemu/rename.b64");
+    golden_from_qemu!(golden_sendto, "sendto", "../testdata/qemu/sendto.b64");
+    golden_from_qemu!(golden_lsm_task_kill, "lsm_task_kill", "../testdata/qemu/lsm_task_kill.b64");
+    golden_from_qemu!(golden_lsm_bpf, "lsm_bpf", "../testdata/qemu/lsm_bpf.b64");
+    golden_from_qemu!(golden_lsm_setuid, "lsm_setuid", "../testdata/qemu/lsm_setuid.b64");
+    golden_from_qemu!(golden_lsm_ptrace, "lsm_ptrace", "../testdata/qemu/lsm_ptrace.b64");
+    golden_from_qemu!(golden_packet_ingress, "packet_ingress", "../testdata/qemu/packet_ingress.b64");
 
     // ── Alignment-independence regression test ───────────────────────────
     //
@@ -2118,21 +1826,14 @@ mod golden_tests {
 
     #[test]
     fn deserialize_tolerates_unaligned_buffer_process_event() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 100,
-            args: [1, 2, 3, 4, 5, 6],
-            return_code: -1,
-        };
-        let aligned = build(EventKind::RawSyscall, &payload_bytes(&payload));
+        let aligned = captured(include_str!("../testdata/qemu/raw_syscall.b64"));
         let padded = unaligned(&aligned);
         // sanity: the slice we pass really is 1-byte aligned
         assert_eq!((padded[1..].as_ptr() as usize) % 8, 1);
 
         let event = deserialize(&padded[1..]).unwrap();
         assert_eq!(event.event.event_type, "SYSCALL");
-        assert_eq!(event.event.name, "100");
-        assert_eq!(event.return_code, Some(-1));
-        assert_eq!(event.header.pid, 5678);
+        assert_eq!(event.event.name, "39");
     }
 
     #[test]
@@ -2159,6 +1860,6 @@ mod golden_tests {
         let event = deserialize(&padded[1..]).unwrap();
         assert_eq!(event.event.event_type, "PACKET");
         assert_eq!(event.event.name, "egress");
-        assert!((event.header.timestamp - 5.0).abs() < 1e-9);
+        assert_eq!(event.header.timestamp, 5_000_000_000);
     }
 }

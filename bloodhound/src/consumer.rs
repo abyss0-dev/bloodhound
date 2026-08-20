@@ -4,12 +4,15 @@ use std::os::fd::AsRawFd;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::sequencer::SequencedInput;
+
 /// Consume events from the BPF ring buffer asynchronously.
 /// Sends raw event bytes to the processing channel.
 pub async fn consume_ring_buffer(
     mut ring_buf: RingBuf<aya::maps::MapData>,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<SequencedInput>,
     ready: oneshot::Sender<()>,
+    mut shutdown: oneshot::Receiver<()>,
 ) -> Result<()> {
     let fd = ring_buf.as_raw_fd();
     let async_fd = AsyncFd::new(fd)?;
@@ -25,7 +28,7 @@ pub async fn consume_ring_buffer(
         // collectors that emit only one event.
         while let Some(item) = ring_buf.next() {
             let data = item.to_vec();
-            if tx.send(data).await.is_err() {
+            if tx.send(SequencedInput::Raw(data)).await.is_err() {
                 // Receiver dropped, shutting down
                 return Ok(());
             }
@@ -33,7 +36,22 @@ pub async fn consume_ring_buffer(
 
         // No records remain. Wait for the kernel notification, then clear the
         // readiness token and return to the unconditional drain above.
-        let mut guard = async_fd.readable().await?;
-        guard.clear_ready();
+        tokio::select! {
+            ready = async_fd.readable() => {
+                let mut guard = ready?;
+                guard.clear_ready();
+            }
+            _ = &mut shutdown => {
+                // BPF programs have already detached. Return to the drain at
+                // the top once more, then finish when no records remain.
+                while let Some(item) = ring_buf.next() {
+                    let data = item.to_vec();
+                    if tx.send(SequencedInput::Raw(data)).await.is_err() {
+                        return Ok(());
+                    }
+                }
+                return Ok(());
+            }
+        }
     }
 }

@@ -35,6 +35,8 @@ class TestSchemaValidation:
 
             header = ev["header"]
             assert "timestamp" in header
+            assert isinstance(header["timestamp"], int)
+            assert header["timestamp"] >= 0
             assert "auid" in header
             assert "sessionid" in header
             assert "pid" in header
@@ -44,6 +46,35 @@ class TestSchemaValidation:
             assert "type" in event
             assert "name" in event
             assert "layer" in event
+
+    def test_bpf_and_heartbeat_timestamps_share_monotonic_domain(
+        self, ssh_cmd, bloodhound_events, wait_for_matching_events
+    ):
+        """BPF and userspace records expose comparable integer nanoseconds."""
+        ssh_cmd("true")
+        events = wait_for_matching_events(
+            bloodhound_events,
+            lambda observed: (
+                any(e.get("event", {}).get("type") == "TRACEPOINT" for e in observed)
+                and any(e.get("event", {}).get("type") == "HEARTBEAT" for e in observed)
+            ),
+            "a BPF tracepoint and HEARTBEAT in one observation stream",
+        )
+        bpf_event = next(
+            event for event in events
+            if event.get("event", {}).get("type") == "TRACEPOINT"
+        )
+        heartbeat = next(
+            event for event in events
+            if event.get("event", {}).get("type") == "HEARTBEAT"
+        )
+        bpf_timestamp = bpf_event["header"]["timestamp"]
+        heartbeat_timestamp = heartbeat["header"]["timestamp"]
+        assert isinstance(bpf_timestamp, int)
+        assert isinstance(heartbeat_timestamp, int)
+        # Both values are VM-uptime-scale nanoseconds. A mixed Unix timestamp
+        # would differ by decades, while scheduling jitter is bounded here.
+        assert abs(heartbeat_timestamp - bpf_timestamp) < 60_000_000_000
 
     def test_event_type_values(self, ssh_cmd, bloodhound_events, wait_for_events):
         """event.type must be one of the allowed enum values."""

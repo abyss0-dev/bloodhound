@@ -20,7 +20,7 @@
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use serde_json::json;
 use tokio::sync::mpsc;
@@ -28,6 +28,7 @@ use tokio::time;
 
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 use crate::drop_counter::DropCounter;
+use crate::sequencer::SequencedInput;
 
 /// Shared counter incremented by the main loop each time an event is
 /// serialised to stdout. The heartbeat task diff's this against its
@@ -49,7 +50,7 @@ pub async fn run_heartbeat(
     interval: Duration,
     drop_counter: DropCounter,
     events_emitted: EventsEmittedCounter,
-    tx: mpsc::Sender<BehaviorEvent>,
+    tx: mpsc::Sender<SequencedInput>,
 ) {
     if interval.is_zero() {
         return;
@@ -75,7 +76,11 @@ pub async fn run_heartbeat(
         prev_emitted = now_emitted;
 
         let event = build_heartbeat(drops_delta, now_drops, emitted_delta);
-        if tx.send(event).await.is_err() {
+        if tx
+            .send(SequencedInput::Synthesized(Box::new(event)))
+            .await
+            .is_err()
+        {
             // Receiver gone — main loop has shut down.
             return;
         }
@@ -86,27 +91,22 @@ pub async fn run_heartbeat(
 ///
 /// Kept separate from the emission loop so unit tests can exercise
 /// the shape of the event without spinning up tokio.
-fn build_heartbeat(
-    drops_delta: u64,
-    drops_total: u64,
-    emitted_delta: u64,
-) -> BehaviorEvent {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs_f64();
-
+fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -> BehaviorEvent {
     let mut args = serde_json::Map::new();
     args.insert("drop_count_delta".into(), json!(drops_delta));
     args.insert("drop_count_total".into(), json!(drops_total));
     args.insert("events_emitted_delta".into(), json!(emitted_delta));
+    if drops_total > 0 {
+        args.insert("reason_code".into(), json!("ring_buffer_overflow"));
+        args.insert("run_prefix_incomplete".into(), json!(true));
+    }
     if drops_delta > 0 {
         args.insert("gap_detected".into(), json!(true));
     }
 
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: now,
+            timestamp: crate::clock::monotonic_now_ns(),
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -165,6 +165,27 @@ mod tests {
         let args = ev.args.unwrap();
         assert_eq!(args["drop_count_delta"], 3);
         assert_eq!(args["gap_detected"], true);
+        assert_eq!(args["reason_code"], "ring_buffer_overflow");
+        assert_eq!(args["run_prefix_incomplete"], true);
+    }
+
+    #[test]
+    fn clean_interval_does_not_repair_an_earlier_drop() {
+        let ev = build_heartbeat(0, 10, 100);
+        let args = ev.args.unwrap();
+        assert!(args.get("gap_detected").is_none());
+        assert_eq!(args["reason_code"], "ring_buffer_overflow");
+        assert_eq!(args["run_prefix_incomplete"], true);
+    }
+
+    #[test]
+    fn new_process_run_starts_with_a_complete_prefix_and_reset_counter() {
+        let ev = build_heartbeat(0, 0, 0);
+        let args = ev.args.unwrap();
+        assert_eq!(args["drop_count_delta"], 0);
+        assert_eq!(args["drop_count_total"], 0);
+        assert!(args.get("reason_code").is_none());
+        assert!(args.get("run_prefix_incomplete").is_none());
     }
 
     // ── emitter plumbing ─────────────────────────────────────────────────
@@ -175,7 +196,7 @@ mod tests {
     async fn zero_interval_disables_emitter() {
         let drops = crate::drop_counter::new_counter();
         let emitted = new_events_emitted_counter();
-        let (tx, mut rx) = mpsc::channel::<BehaviorEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<SequencedInput>(8);
 
         // Task should return immediately without sending anything.
         run_heartbeat(Duration::ZERO, drops, emitted, tx).await;
@@ -189,7 +210,7 @@ mod tests {
     async fn emits_heartbeat_with_nonzero_deltas() {
         let drops = crate::drop_counter::new_counter();
         let emitted = new_events_emitted_counter();
-        let (tx, mut rx) = mpsc::channel::<BehaviorEvent>(8);
+        let (tx, mut rx) = mpsc::channel::<SequencedInput>(8);
 
         drops.fetch_add(3, Ordering::Relaxed);
         emitted.fetch_add(10, Ordering::Relaxed);
@@ -201,10 +222,13 @@ mod tests {
             tx,
         ));
 
-        let ev = tokio::time::timeout(Duration::from_millis(500), rx.recv())
+        let input = tokio::time::timeout(Duration::from_millis(500), rx.recv())
             .await
             .expect("heartbeat did not arrive within expected window")
             .expect("channel closed unexpectedly");
+        let SequencedInput::Synthesized(ev) = input else {
+            panic!("heartbeat emitted a raw sequencer input");
+        };
 
         assert_eq!(ev.event.event_type, "HEARTBEAT");
         let args = ev.args.unwrap();

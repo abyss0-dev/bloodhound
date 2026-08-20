@@ -141,7 +141,7 @@ Phase 4: Integration
 | 2026-02-25 | Added schema.json integration (BehaviorEvent output) |
 | 2026-02-25 | Added sessionid to filtering; clarified scope boundary |
 | 2026-02-25 | Documented Layer 1 justification (from original design doc) |
-| 2026-02-25 | Decided timestamp strategy: bpf_ktime_get_real_ns() |
+| 2026-02-25 | Initial wall-clock timestamp strategy (superseded 2026-08-20) |
 | 2026-02-25 | Decided proc field strategy: userspace /proc enrichment |
 | 2026-02-25 | Added PACKET capture via TC hooks                    |
 | 2026-02-25 | Decided LSM events: layer=behavior, dual defense+observe |
@@ -172,3 +172,4 @@ Phase 4: Integration
 | 2026-02-26 | Decided E2E TTY test: expect for interactive SSH (PTY required) |
 | 2026-04-18 | Codified protocol semantic extraction (DNS/TLS/HTTP) as downstream responsibility |
 | 2026-04-18 | Documented io_uring as known observation blind spot                |
+| 2026-08-20 | Unified BehaviorEvent timestamps on CLOCK_MONOTONIC integer nanoseconds and defined bounded sequencer ordering/loss signaling |

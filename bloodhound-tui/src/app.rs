@@ -66,7 +66,7 @@ pub struct ExecChild {
     pub label: String,
     /// Process ID.
     pub pid: u32,
-    /// `/proc/<pid>/stat` field 22, converted to wall-clock ns, as
+    /// Kernel-observed group-leader start time in boot-relative ns, as
     /// published by the most recent `LIFECYCLE/process_start` event
     /// for this pid. `0` when the daemon did not synthesize a
     /// lifecycle stream (older daemon version) — callers treat that
@@ -197,9 +197,10 @@ impl App {
     }
 
     /// Convert a monotonic eBPF timestamp to a display string in the configured timezone.
-    pub fn format_timestamp(&self, mono_secs: f64) -> String {
+    pub fn format_timestamp(&self, mono_ns: u64) -> String {
+        let mono_ns = i64::try_from(mono_ns).unwrap_or(i64::MAX);
         let wall_utc = self.boot_time_utc
-            + chrono::Duration::milliseconds((mono_secs * 1000.0) as i64);
+            + chrono::Duration::nanoseconds(mono_ns);
         let wall_local = wall_utc.with_timezone(&self.tz_offset);
         wall_local.format("%H:%M:%S").to_string()
     }

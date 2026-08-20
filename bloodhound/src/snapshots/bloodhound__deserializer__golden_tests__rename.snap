@@ -1,12 +1,11 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1548
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "newpath": "/tmp/new_name",
-    "oldpath": "/tmp/old_name"
+    "newpath": "",
+    "oldpath": "!"
   },
   "event": {
     "layer": "behavior",
@@ -15,11 +14,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709.0
+    "comm": "python3",
+    "pid": 3815,
+    "process_ref": {
+      "start_boottime_ns": 844836354310,
+      "tgid": 3815
+    },
+    "sessionid": 248,
+    "timestamp": 844868756684
   },
   "return_code": 0
 }

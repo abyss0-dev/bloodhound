@@ -71,7 +71,7 @@ pub struct BehaviorEvent {
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
 pub struct EventHeader {
-    pub timestamp: f64,
+    pub timestamp: u64,
     pub auid: u32,
     pub sessionid: u32,
     pub pid: u32,
@@ -433,7 +433,7 @@ mod tests {
     fn make_event(event_type: &str, name: &str) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeader {
-                timestamp: 1.0,
+                timestamp: 1,
                 auid: 1000,
                 sessionid: 1,
                 pid: 42,
@@ -530,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_parse_ndjson_line() {
-        let json = r#"{"header":{"timestamp":1.5,"auid":1000,"sessionid":42,"pid":1234,"ppid":1,"comm":"bash"},"event":{"type":"TRACEPOINT","name":"execve","layer":"tooling"},"args":{"filename":"/usr/bin/ls","argv":["ls","-la"]},"return_code":0}"#;
+        let json = r#"{"header":{"timestamp":1500000000,"auid":1000,"sessionid":42,"pid":1234,"ppid":1,"comm":"bash"},"event":{"type":"TRACEPOINT","name":"execve","layer":"tooling"},"args":{"filename":"/usr/bin/ls","argv":["ls","-la"]},"return_code":0}"#;
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.header.pid, 1234);
         assert_eq!(event.event.name, "execve");
@@ -539,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_parse_tty_event() {
-        let json = r#"{"header":{"timestamp":1.0,"auid":1000,"sessionid":42,"pid":100,"comm":"bash"},"event":{"type":"TTY","name":"tty_read","layer":"intent"},"args":{"data":"bHM="}}"#;
+        let json = r#"{"header":{"timestamp":1000000000,"auid":1000,"sessionid":42,"pid":100,"comm":"bash"},"event":{"type":"TTY","name":"tty_read","layer":"intent"},"args":{"data":"bHM="}}"#;
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert!(event.is_tty_read());
         let data = event.args.as_ref().unwrap().get("data").unwrap().as_str().unwrap();
@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_parse_packet_event() {
-        let json = r#"{"header":{"timestamp":2.0,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"PACKET","name":"ingress","layer":"behavior"},"args":{"data":"AAAA","ifindex":2}}"#;
+        let json = r#"{"header":{"timestamp":2000000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"PACKET","name":"ingress","layer":"behavior"},"args":{"data":"AAAA","ifindex":2}}"#;
         let event: BehaviorEvent = serde_json::from_str(json).unwrap();
         assert_eq!(event.category(), EventCategory::Network);
     }

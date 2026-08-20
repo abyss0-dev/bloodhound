@@ -8,7 +8,7 @@ pub struct CommandGroup {
     /// The reconstructed command string.
     pub command: String,
     /// Timestamp when the command was entered.
-    pub timestamp: f64,
+    pub timestamp: u64,
     /// Indices into the global event list that belong to this command.
     pub event_indices: Vec<usize>,
 }
@@ -41,7 +41,7 @@ pub fn correlate(
             .collect();
         return vec![CommandGroup {
             command: "[no commands detected]".to_string(),
-            timestamp: events.first().map(|e| e.header.timestamp).unwrap_or(0.0),
+            timestamp: events.first().map(|e| e.header.timestamp).unwrap_or(0),
             event_indices,
         }];
     }
@@ -49,7 +49,7 @@ pub fn correlate(
     let mut groups: Vec<CommandGroup> = Vec::with_capacity(commands.len() + 1);
 
     // Collect correlated event indices sorted by timestamp (they should already be)
-    let non_tty: Vec<(usize, f64)> = events
+    let non_tty: Vec<(usize, u64)> = events
         .iter()
         .enumerate()
         .filter(|(_, e)| is_correlated(e))
@@ -58,7 +58,7 @@ pub fn correlate(
 
     // Build time boundaries from commands
     // boundary[i] = commands[i].end_timestamp
-    let boundaries: Vec<f64> = commands.iter().map(|c| c.end_timestamp).collect();
+    let boundaries: Vec<u64> = commands.iter().map(|c| c.end_timestamp).collect();
 
     // Pre-session: events before first command
     let first_boundary = boundaries[0];
@@ -71,7 +71,7 @@ pub fn correlate(
     if !pre_indices.is_empty() {
         groups.push(CommandGroup {
             command: "[pre-session]".to_string(),
-            timestamp: non_tty.first().map(|(_, ts)| *ts).unwrap_or(0.0),
+            timestamp: non_tty.first().map(|(_, ts)| *ts).unwrap_or(0),
             event_indices: pre_indices,
         });
     }
@@ -82,7 +82,7 @@ pub fn correlate(
         let window_end = if ci + 1 < boundaries.len() {
             boundaries[ci + 1]
         } else {
-            f64::MAX
+            u64::MAX
         };
 
         let event_indices: Vec<usize> = non_tty
@@ -106,10 +106,11 @@ mod tests {
     use super::*;
     use crate::event_model::*;
 
-    fn make_cmd(command: &str, end_ts: f64) -> CommandEntry {
+    fn make_cmd(command: &str, end_secs: f64) -> CommandEntry {
+        let end_ts = (end_secs * 1_000_000_000.0) as u64;
         CommandEntry {
             command: command.to_string(),
-            start_timestamp: end_ts - 0.5,
+            start_timestamp: end_ts.saturating_sub(500_000_000),
             end_timestamp: end_ts,
         }
     }
@@ -121,7 +122,7 @@ mod tests {
     fn make_typed_event_at(event_type: &str, name: &str, ts: f64) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeader {
-                timestamp: ts,
+                timestamp: (ts * 1_000_000_000.0) as u64,
                 auid: 1000,
                 sessionid: 1,
                 pid: 42,

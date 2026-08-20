@@ -1,11 +1,10 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1591
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "cmd": 5
+    "cmd": 0
   },
   "event": {
     "layer": "behavior",
@@ -14,11 +13,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709.0
+    "comm": "bpftool",
+    "pid": 4240,
+    "process_ref": {
+      "start_boottime_ns": 886502150098,
+      "tgid": 4240
+    },
+    "sessionid": 277,
+    "timestamp": 886510270319
   },
   "return_code": -1
 }

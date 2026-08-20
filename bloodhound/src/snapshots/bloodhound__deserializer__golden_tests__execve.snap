@@ -1,16 +1,13 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1407
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
     "argv": [
-      "ls",
-      "-la",
-      "/home"
+      "/usr/bin/true"
     ],
-    "filename": "/usr/bin/ls"
+    "filename": "/usr/bin/true"
   },
   "event": {
     "layer": "tooling",
@@ -20,10 +17,13 @@ expression: to_json(&event)
   "header": {
     "auid": 1000,
     "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709.0
+    "pid": 2378,
+    "process_ref": {
+      "start_boottime_ns": 730454795517,
+      "tgid": 2378
+    },
+    "sessionid": 145,
+    "timestamp": 730456635700
   },
   "return_code": 0
 }

@@ -5,15 +5,17 @@ graph TD
     BPF["BPF Programs (kernel)"]
     RB["Ring Buffer (shared)"]
     POLL["Userspace Poll Loop"]
-    DESER["Event Deserializer"]
-    ENRICH["/proc Enrichment"]
+    SYNTH["Userspace Producers<br/>(heartbeat + diagnostics)"]
+    SEQ["Bounded Sequencer"]
+    PROCESS["Raw decode + enrichment<br/>Synthesized pass-through"]
     OUT["stdout (NDJSON)"]
 
     BPF -->|"fixed-size + var-len events"| RB
     RB -->|"async poll"| POLL
-    POLL --> DESER
-    DESER --> ENRICH
-    ENRICH --> OUT
+    POLL --> SEQ
+    SYNTH --> SEQ
+    SEQ --> PROCESS
+    PROCESS --> OUT
 ```
 
 
@@ -24,8 +26,8 @@ graph TD
 | Map type          | RINGBUF  | Single shared buffer across all CPUs     |
 | Size              | DECIDED  | Configurable via --ring-buffer-size;     |
 |                   |          | default 4MB; must be power of 2          |
-| Event ordering    | FIFO     | Global ordering guaranteed (key for      |
-|                   |          | downstream sequence analysis)            |
+| Event ordering    | FIFO     | FIFO for records committed to this ring; |
+|                   |          | not a total kernel causal order           |
 | Overflow policy   | DECIDED  | Drop (bpf_ringbuf_reserve returns NULL); |
 |                   |          | BPF global counter tracks drop count;    |
 |                   |          | userspace polls counter periodically     |
@@ -63,16 +65,47 @@ tracking table. See [tracing.md](tracing.md) Packet Capture section.
 
 ## Timestamp Strategy
 
-The schema requires `timestamp` as float seconds since epoch (wall clock).
-BPF provides monotonic clocks by default.
+The schema requires `timestamp` as integer nanoseconds from the VM's
+`CLOCK_MONOTONIC` domain. BPF programs use `bpf_ktime_get_ns()`.
+Userspace-synthesized records
+use `clock_gettime(CLOCK_MONOTONIC)`. The integer nanoseconds are emitted
+without conversion, so BPF, HEARTBEAT, USDT metadata, and diagnostics are
+comparable within one VM run. A timestamp records observation provenance; it
+does not establish total kernel causality or cross-boot comparability.
 
-| BPF helper                | Clock type  | Min kernel |
-|---------------------------|-------------|------------|
-| bpf_ktime_get_ns()        | Monotonic   | 4.1        |
-| bpf_ktime_get_boot_ns()   | Boot        | 5.8        |
-| bpf_ktime_get_real_ns()   | Wall clock  | 5.11       |
 
-DECIDED: Use `bpf_ktime_get_real_ns()` in BPF programs. This directly
-provides wall clock nanoseconds, avoiding calibration complexity. Kernel
->= 5.11 is satisfied by the target kernel 6.8. Userspace converts
-`u64 nanoseconds` to `f64 seconds` for JSON output.
+## Emission Ordering and Backpressure
+
+Raw ring-buffer records and userspace-synthesized records enter one bounded
+MPSC sequencer. Each producer retains FIFO order. Across producers, successful
+channel admission defines order. The one receiver performs deserialization,
+enrichment, lifecycle completion, and NDJSON serialization; line position is
+therefore the canonical Bloodhound emission order.
+
+Bounded pressure propagates through userspace to the ring-buffer consumer.
+Kernel eBPF hooks are never blocked by this sequencer. If userspace cannot
+drain the BPF ring buffer in time, `bpf_ringbuf_reserve` fails and the BPF drop
+counter reports that distinct loss through HEARTBEAT.
+
+
+## Stream Completeness
+
+A rejected binary record becomes an in-band `DIAGNOSTIC/stream.health` before
+the next raw record is processed. Its bounded arguments are:
+
+- `reason_code = "deserialize_rejected"`
+- `rejection_count_delta = 1`
+- `rejection_count_total`
+- `run_prefix_incomplete = true`
+
+The rejected bytes are never included. Ring-buffer overflow remains distinct:
+HEARTBEAT reports `reason_code = "ring_buffer_overflow"`,
+`drop_count_delta`, `drop_count_total`, and `gap_detected`.
+When the cumulative drop total is nonzero it also reports
+`run_prefix_incomplete = true`.
+
+`gap_detected` marks the interval since the previous heartbeat baseline as
+indeterminate. Any cumulative loss marks the stream prefix incomplete for the
+rest of that Bloodhound process run. Later clean intervals do not repair that
+prefix. A downstream consumer may recover a particular conclusion only under
+its own explicit reset, snapshot, or bounded-window semantics.

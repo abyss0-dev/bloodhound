@@ -1,13 +1,12 @@
 ---
 source: bloodhound/src/deserializer.rs
-assertion_line: 1475
-expression: to_json(&event)
+expression: to_json(& event)
 ---
 {
   "args": {
-    "addr": "93.184.216.34",
+    "addr": "1.0.0.127",
     "family": 2,
-    "port": 443
+    "port": 18443
   },
   "event": {
     "layer": "behavior",
@@ -16,11 +15,14 @@ expression: to_json(&event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bash",
-    "pid": 5678,
-    "ppid": 1234,
-    "sessionid": 42,
-    "timestamp": 1709.0
+    "comm": "python3",
+    "pid": 3102,
+    "process_ref": {
+      "start_boottime_ns": 790820379811,
+      "tgid": 3102
+    },
+    "sessionid": 197,
+    "timestamp": 790856785318
   },
-  "return_code": 0
+  "return_code": -115
 }

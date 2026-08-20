@@ -24,8 +24,9 @@ DECIDED: Graceful shutdown on SIGTERM.
 5. Exit with code 0
 
 A timeout (e.g., 5 seconds) guards against infinite drain loops.
-If the timeout expires, remaining events are dropped and the process
-exits.
+If the timeout expires, or if the sequencer/stdout writer fails, Bloodhound
+reports incomplete shutdown and exits non-zero. It never reports a clean
+shutdown after silently abandoning admitted records.
 
 
 ## Crash Recovery
