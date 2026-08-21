@@ -14,7 +14,7 @@ As of 2026-08-01, Takumi Runner does not support KVM.
 
 Use a GitHub-hosted `ubuntu-24.04` runner only for the KVM-dependent E2E workflow.
 
-Start `cicd-sensor` before the E2E workload and send its host-side trace to the Takumi Manager. Authenticate to Shisho Cloud in a separate OIDC-only job so the E2E workload does not receive `id-token: write` permission.
+Start `cicd-sensor` before the E2E workload and send its host-side trace to the Takumi Manager. Authenticate to Shisho Cloud immediately before starting the sensor and pass the masked step output directly to it.
 
 Run portable CI and USDT unit/replay jobs on `takumi-runner`, separate from privileged KVM E2E.
 
@@ -47,6 +47,7 @@ Fail early when KVM is unavailable, and install the complete guest kernel-tool a
 - The runner policy is Takumi Runner by default, with a GitHub-hosted exception only for jobs that require unsupported capabilities such as KVM.
 - `cicd-sensor` observes the GitHub-hosted runner and QEMU host process. Bloodhound remains responsible for observations from inside the QEMU guest.
 - The Shisho Cloud bot used by E2E needs only the `Takumi Runnerトレース送信者` mission-specific role. Its ID is supplied through the `SHISHO_CICD_SENSOR_BOT_ID` GitHub Actions repository variable.
+- GitHub refuses to forward the action's masked token as a job output, so OIDC authentication and sensor startup must share the E2E job. This gives the whole job `id-token: write`; keep the Shisho Cloud trust condition repository-scoped and keep authentication before checkout and other workload steps.
 - Environment failures that occur before test collection are not collector acceptance results.
 - `96bf64a` moved both USDT jobs to GitHub-hosted runners while investigating KVM failures.
 - `370d0a9` split USDT unit/replay from KVM E2E.
