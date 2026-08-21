@@ -11,7 +11,23 @@ jobs:
     name: E2E Tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
     steps:
+      - id: auth
+        name: Authenticate to Shisho Cloud
+        uses: flatt-security/shisho-cloud-action@9b68d33503ebf75d7c285d489b288f96ef3df758 # v1
+        with:
+          bot-id: ${{ vars.SHISHO_CICD_SENSOR_BOT_ID }}
+          export-token: true
+          expires-in-minutes: 60
+
+      - uses: cicd-sensor/cicd-sensor-action@a803a7bc1890f85d3f2feb7c29b74b5c730da6c2 # v0.0.37
+        with:
+          manager-url: https://manager.cicdsensor.cloud.shisho.dev
+          manager-token: ${{ steps.auth.outputs.token }}
+
       - uses: actions/checkout@v4
 
       - name: Build binary via Docker
