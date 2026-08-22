@@ -110,6 +110,9 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Set up Takumi Guard for PyPI
+        uses: flatt-security/setup-takumi-guard-pypi@bac24f8a97255d96a277f60de6906154ce0be096 # v1
+
       - name: Install test dependencies
         working-directory: e2e
         run: pip install pytest pexpect jsonschema
