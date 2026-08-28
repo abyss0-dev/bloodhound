@@ -40,7 +40,7 @@ jobs:
         name: Authenticate to Shisho Cloud
         uses: flatt-security/shisho-cloud-action@9b68d33503ebf75d7c285d489b288f96ef3df758 # v1.1.0
         with:
-          bot-id: ${{ vars.SHISHO_CICD_SENSOR_BOT_ID }}
+          bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3
           export-token: true
           expires-in-minutes: 60
 
@@ -53,9 +53,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 ```
 
-`SHISHO_CICD_SENSOR_BOT_ID` は `abyss0-dev` の Organization variable を参照します。
-repository-level の同名 variable で上書きしてはいけません。
-値がない場合は sensor を黙ってスキップせず、setup 不備として job を失敗させてください。
+Bot ID は公開識別子です。
+GitHub Free では private repository から Organization-level variable へアクセスできないため、`abyss0-dev` 用の固定値 `BT01M0MFTWGD1BQ2CKEPG92G53Y3` を workflow に記述します。
+Bot ID の secret 化や repository variable の setup は不要です。
 
 Shisho Cloud の認証 Action と cicd-sensor Action は別のサービスです。
 workflow が認証 Action の step output を sensor Action に渡して両者を接続します。

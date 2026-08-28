@@ -20,7 +20,7 @@ jobs:
         name: Authenticate to Shisho Cloud
         uses: flatt-security/shisho-cloud-action@9b68d33503ebf75d7c285d489b288f96ef3df758 # v1.1.0
         with:
-          bot-id: ${{ vars.SHISHO_CICD_SENSOR_BOT_ID }}
+          bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3
           export-token: true
           expires-in-minutes: 60
 
