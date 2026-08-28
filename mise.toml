@@ -1,0 +1,14 @@
+[tools]
+pinact = "4.1.1"
+
+[tasks."actions:pin"]
+description = "Pin external Actions and reusable workflows"
+run = "pinact run"
+
+[tasks."actions:check"]
+description = "Verify Action pins and version comments"
+run = "pinact run -check -verify-comment"
+
+[tasks."actions:update"]
+description = "Update external Actions and reusable workflows"
+run = "pinact run -update"
