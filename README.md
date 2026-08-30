@@ -43,6 +43,7 @@ graph TD
 - **Layer 1 — TTY capture**: kprobe hooks on `pty_write` / `n_tty_read` for raw terminal I/O
 - **Layer 2 — Process tracking**: `execve` / `execveat` tracepoints with full argv capture
 - **Layer 3 — Syscall tracing**: raw syscall stream + rich extraction for 30+ syscalls (file, network, process, directory operations)
+- **Signal observation**: non-enforcing `signal_generate` raw tracepoint with immutable sender and target identities
 - **Packet capture**: TC (Traffic Control) hooks on all network interfaces, ingress and egress
 - **Tamper resistance**: 7 LSM hooks protect the daemon from the target user (task_kill, bpf, ptrace, file_open, inode_unlink, inode_rename, task_fix_setuid)
 - **Structured output**: All events emitted as NDJSON with unified `BehaviorEvent` schema
@@ -52,7 +53,7 @@ graph TD
 | Component       | Version                        |
 |-----------------|--------------------------------|
 | Rust            | nightly (see `rust-toolchain.toml`) |
-| Target kernel   | 6.8+ (BTF + BPF LSM enabled)  |
+| Target kernel   | 6.8+ with BTF                  |
 | Target OS       | Ubuntu (LTS)                   |
 | Docker          | Required for production builds |
 | QEMU/KVM        | Required for E2E tests         |
@@ -63,6 +64,9 @@ graph TD
 > `loginuid`/`auid` tracking) and KVM acceleration, neither of which is
 > available on macOS. Docker-based builds (`make build-docker`) work on
 > macOS but the E2E test pipeline does not.
+
+BPF LSM is optional and belongs to the separate tamper-resistance boundary.
+The `signal_generate` collector neither enables nor depends on LSM.
 
 ## Quick Start
 
