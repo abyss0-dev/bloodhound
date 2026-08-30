@@ -1,5 +1,9 @@
-use aya_ebpf::helpers::bpf_probe_read_user_str_bytes;
-use bloodhound_common::MAX_PATH_SIZE;
+use aya_ebpf::{
+    helpers::bpf_probe_read_user_str_bytes,
+    programs::RawTracePointContext,
+    EbpfContext,
+};
+use bloodhound_common::{EventHeader, MAX_PATH_SIZE};
 
 use crate::maps::{DROP_COUNT, EVENTS, SCRATCH_BUF};
 
@@ -32,6 +36,35 @@ pub unsafe fn emit_event(data: &[u8]) -> bool {
             false
         }
     }
+}
+
+#[inline(always)]
+pub unsafe fn raw_tracepoint_arg(ctx: &RawTracePointContext, index: usize) -> u64 {
+    let args = ctx.as_ptr() as *const u64;
+    core::ptr::read(args.add(index))
+}
+
+#[inline(always)]
+pub unsafe fn emit_fixed<T>(header: &EventHeader, payload: Option<&T>) {
+    let payload_size = payload.map_or(0, |_| core::mem::size_of::<T>());
+    let total = EventHeader::SIZE + payload_size;
+    let mut buf = [0u8; 128];
+    if total > buf.len() {
+        return;
+    }
+    core::ptr::copy_nonoverlapping(
+        header as *const EventHeader as *const u8,
+        buf.as_mut_ptr(),
+        EventHeader::SIZE,
+    );
+    if let Some(payload) = payload {
+        core::ptr::copy_nonoverlapping(
+            payload as *const T as *const u8,
+            buf.as_mut_ptr().add(EventHeader::SIZE),
+            payload_size,
+        );
+    }
+    emit_event(&buf[..total]);
 }
 
 /// Increment the per-CPU drop counter.

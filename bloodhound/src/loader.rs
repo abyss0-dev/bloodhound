@@ -60,6 +60,9 @@ pub fn load_and_attach(
     attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
     attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
 
+    info!("Attaching non-enforcing signal observation...");
+    attach_raw_tracepoint(&mut bpf, "signal_generate", "signal_generate")?;
+
     info!("Attaching Layer 2: execve tracepoints...");
     attach_tracepoint(&mut bpf, "sys_enter_execve", "syscalls", "sys_enter_execve")?;
     attach_tracepoint(&mut bpf, "sys_exit_execve", "syscalls", "sys_exit_execve")?;

@@ -10,7 +10,9 @@ use std::collections::{HashMap, HashSet};
 
 use serde_json::json;
 
-use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson, ProcessRefJson};
+use crate::deserializer::{
+    BehaviorEvent, EventHeaderJson, EventTypeJson, LifecycleSeedAuthority, ProcessRefJson,
+};
 
 pub struct LifecycleSynthesizer {
     active: HashMap<u32, ProcessRefJson>,
@@ -22,6 +24,7 @@ enum IdentityDiagnosticSource {
     EventHeader,
     ForkParent,
     TaskKillTarget,
+    SignalGenerateTarget,
 }
 
 impl IdentityDiagnosticSource {
@@ -30,6 +33,7 @@ impl IdentityDiagnosticSource {
             Self::EventHeader => "event_header",
             Self::ForkParent => "process_fork.parent_ref",
             Self::TaskKillTarget => "task_kill.target_ref",
+            Self::SignalGenerateTarget => "signal_generate.target_ref",
         }
     }
 }
@@ -44,12 +48,20 @@ impl LifecycleSynthesizer {
 
     /// Emit a process_start before the first observed event for a process that
     /// existed before the kernel fork hook was attached.
-    pub fn before(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
+    pub fn before_observation(
+        &mut self,
+        event: &BehaviorEvent,
+        seed_authority: LifecycleSeedAuthority,
+    ) -> Vec<BehaviorEvent> {
         let mut emitted = Vec::new();
         if let Some(source) = unavailable_identity_source(event) {
             if self.identity_diagnostics.insert(source) {
                 emitted.push(make_identity_diagnostic(event, source));
             }
+        }
+
+        if seed_authority == LifecycleSeedAuthority::NonAuthoritative {
+            return emitted;
         }
 
         let Some(process_ref) = event.header.process_ref else {
@@ -67,6 +79,11 @@ impl LifecycleSynthesizer {
         self.active.insert(process_ref.tgid, process_ref);
         emitted.push(make_process_start(event, process_ref));
         emitted
+    }
+
+    #[cfg(test)]
+    fn before(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
+        self.before_observation(event, LifecycleSeedAuthority::Authoritative)
     }
 
     /// Kernel hooks already emitted fork/exit. Userspace only releases its
@@ -96,6 +113,11 @@ fn unavailable_identity_source(event: &BehaviorEvent) -> Option<IdentityDiagnost
     {
         return Some(IdentityDiagnosticSource::TaskKillTarget);
     }
+    if event.event.name == "signal_generate"
+        && args.and_then(|value| value.get("target_ref")).is_none()
+    {
+        return Some(IdentityDiagnosticSource::SignalGenerateTarget);
+    }
     if event.header.pid != 0
         && event.header.process_ref.is_none()
         && !matches!(
@@ -112,7 +134,11 @@ fn make_identity_diagnostic(
     triggering: &BehaviorEvent,
     source: IdentityDiagnosticSource,
 ) -> BehaviorEvent {
-    let observed_tgid = if source == IdentityDiagnosticSource::TaskKillTarget {
+    let observed_tgid = if matches!(
+        source,
+        IdentityDiagnosticSource::TaskKillTarget
+            | IdentityDiagnosticSource::SignalGenerateTarget
+    ) {
         triggering
             .args
             .as_ref()
@@ -240,6 +266,30 @@ mod tests {
     }
 
     #[test]
+    fn signal_generation_after_exit_does_not_resurrect_the_source() {
+        let mut life = LifecycleSynthesizer::new();
+        let start = event(42, 100, "LIFECYCLE", "process_start");
+        assert!(life.before(&start).is_empty());
+
+        let exit = event(42, 100, "LIFECYCLE", "process_exit");
+        assert!(life.before(&exit).is_empty());
+        assert!(life.after(&exit).is_empty());
+
+        let mut generated = event(42, 100, "TRACEPOINT", "signal_generate");
+        generated.args = Some(json!({
+            "target_ref": { "tgid": 7, "start_boottime_ns": 70 }
+        }));
+        assert!(life
+            .before_observation(&generated, LifecycleSeedAuthority::NonAuthoritative)
+            .is_empty());
+
+        assert_eq!(
+            life.before(&event(42, 100, "TRACEPOINT", "openat")).len(),
+            1
+        );
+    }
+
+    #[test]
     fn exit_releases_only_the_matching_process_instance() {
         let mut life = LifecycleSynthesizer::new();
         let first = event(42, 100, "TRACEPOINT", "openat");
@@ -300,5 +350,26 @@ mod tests {
             life.before(&task_kill).is_empty(),
             "diagnostic must be bounded"
         );
+    }
+
+    #[test]
+    fn unavailable_signal_generate_target_emits_one_bounded_diagnostic() {
+        let mut life = LifecycleSynthesizer::new();
+        let start = event(42, 100, "LIFECYCLE", "process_start");
+        life.before(&start);
+        let mut signal = event(42, 100, "TRACEPOINT", "signal_generate");
+        signal.args = Some(json!({
+            "target_pid": 43,
+            "signal": 15,
+            "result": "delivered"
+        }));
+
+        let emitted = life.before(&signal);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(
+            emitted[0].args.as_ref().unwrap()["source"],
+            "signal_generate.target_ref"
+        );
+        assert!(life.before(&signal).is_empty(), "diagnostic must be bounded");
     }
 }

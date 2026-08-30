@@ -147,6 +147,16 @@ At fork, the child event header reads audit/session metadata and `comm` from the
 child task itself. Missing header, fork-parent, or signal-target identity is
 omitted and reported through the bounded `DIAGNOSTIC/process.identity` signal.
 
+### Signal generation
+
+DECIDED: `raw_tracepoint:signal_generate` observes signal generation without
+using BPF LSM. The event header carries the current sender's stable process
+identity, while the target `task_struct` supplies the target identity. Signal,
+group direction, and the kernel `TRACE_SIGNAL_*` result are recorded.
+
+This hook is observational only. It neither replaces nor enables Bloodhound's
+separate LSM tamper-resistance hooks, and it never synthesizes process exit.
+
 ### Interpreter handling
 
 DECIDED: Rely on argv. When `python script.py` is exec'd, filename
@@ -234,6 +244,9 @@ same syscall invocation (see deduplication above).
 **Process lifecycle:**
 - `raw_tracepoint:sched_process_fork`
 - `raw_tracepoint:sched_process_exit`
+
+**Signal observation:**
+- `raw_tracepoint:signal_generate`
 
 **Tier 2 (rich extraction) -- each has sys_enter + sys_exit pair:**
 - execve, execveat

@@ -92,6 +92,7 @@ pub enum EventKind {
     ProcessStart = 220,
     ProcessFork = 221,
     ProcessExit = 222,
+    SignalGenerate = 223,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -168,6 +169,7 @@ impl EventKind {
             220 => Some(Self::ProcessStart),
             221 => Some(Self::ProcessFork),
             222 => Some(Self::ProcessExit),
+            223 => Some(Self::SignalGenerate),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -409,6 +411,28 @@ pub struct ProcessExitPayload {
 impl ProcessExitPayload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
+
+/// Payload for the non-enforcing `signal_generate` kernel tracepoint.
+/// The event header identifies the sender; these fields identify the target.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct SignalGeneratePayload {
+    pub target_tgid: u32,
+    pub signal: u32,
+    pub target_start_boottime_ns: u64,
+    pub group: u32,
+    pub result: i32,
+}
+
+impl SignalGeneratePayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
+pub const SIGNAL_RESULT_DELIVERED: i32 = 0;
+pub const SIGNAL_RESULT_IGNORED: i32 = 1;
+pub const SIGNAL_RESULT_ALREADY_PENDING: i32 = 2;
+pub const SIGNAL_RESULT_OVERFLOW_FAIL: i32 = 3;
+pub const SIGNAL_RESULT_LOSE_INFO: i32 = 4;
 
 /// Select the wait status for a whole-process exit. `group_exit_status` is
 /// authoritative for exit_group/fatal-signal teardown; otherwise Linux
@@ -1033,6 +1057,7 @@ mod tests {
             EventKind::ProcessStart,
             EventKind::ProcessFork,
             EventKind::ProcessExit,
+            EventKind::SignalGenerate,
         ];
 
         for variant in &all_variants {
@@ -1128,6 +1153,7 @@ mod tests {
             EventKind::ProcessStart,
             EventKind::ProcessFork,
             EventKind::ProcessExit,
+            EventKind::SignalGenerate,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1177,6 +1203,11 @@ mod tests {
         assert_eq!(
             ProcessExitPayload::SIZE,
             mem::size_of::<ProcessExitPayload>()
+        );
+        assert_eq!(SignalGeneratePayload::SIZE, 24);
+        assert_eq!(
+            SignalGeneratePayload::SIZE,
+            mem::size_of::<SignalGeneratePayload>()
         );
         assert_eq!(PathPayload::SIZE, mem::size_of::<PathPayload>());
         assert_eq!(TwoPathPayload::SIZE, mem::size_of::<TwoPathPayload>());

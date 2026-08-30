@@ -192,3 +192,47 @@ def test_task_kill_identifies_target_without_synthesizing_exit(
         assert _exits(events, pid) == []
     finally:
         ssh_cmd(f"kill -TERM {pid}")
+
+
+def test_signal_generate_identifies_sender_and_target_without_lsm_authority(
+    ssh_cmd, bloodhound_events, wait_for_matching_events
+):
+    pid = _pid_from(ssh_cmd("nohup sleep 30 >/dev/null 2>&1 & echo $!"))
+    try:
+        sent = ssh_cmd(f"kill -TERM {pid}")
+        assert sent.returncode == 0
+        events = wait_for_matching_events(
+            bloodhound_events,
+            lambda current: any(
+                event.get("event", {}).get("type") == "TRACEPOINT"
+                and event.get("event", {}).get("name") == "signal_generate"
+                and event.get("args", {}).get("target_pid") == pid
+                and event.get("args", {}).get("signal") == 15
+                and event.get("args", {}).get("result") == "delivered"
+                for event in current
+            ) and len(_exits(current, pid)) == 1,
+            f"signal_generate and process_exit for pid={pid}",
+        )
+        generated_index, generated = next(
+            (index, event)
+            for index, event in enumerate(events)
+            if event.get("event", {}).get("type") == "TRACEPOINT"
+            and event.get("event", {}).get("name") == "signal_generate"
+            and event.get("args", {}).get("target_pid") == pid
+            and event.get("args", {}).get("signal") == 15
+            and event.get("args", {}).get("result") == "delivered"
+        )
+        exit_index = next(
+            index
+            for index, event in enumerate(events)
+            if event.get("event", {}).get("name") == "process_exit"
+            and event.get("header", {}).get("pid") == pid
+        )
+        assert generated["header"]["process_ref"]["tgid"] > 0
+        assert generated["header"]["process_ref"]["start_boottime_ns"] > 0
+        assert generated["args"]["target_ref"]["tgid"] == pid
+        assert generated["args"]["target_ref"]["start_boottime_ns"] > 0
+        assert "return_code" not in generated
+        assert generated_index < exit_index
+    finally:
+        ssh_cmd(f"kill -KILL {pid} 2>/dev/null || true")

@@ -20,6 +20,7 @@ This crate defines the binary wire format for all events passed through the BPF 
 | `ReadWritePayload` | read/write: fd, count, fd_type |
 | `ConnectPayload` | connect: addr_family, port, address |
 | `Lsm*Payload` | LSM event payloads (task_kill, bpf, ptrace, etc.) |
+| `SignalGeneratePayload` | Non-enforcing signal observation with target process identity |
 
 ## Feature Flags
 

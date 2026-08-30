@@ -62,6 +62,7 @@ BehaviorEvent
 | behavior | PACKET       | ingress, egress                              |
 | behavior | LSM          | file_open, task_kill, bpf, ...               |
 | behavior | LIFECYCLE    | process_start, process_fork, process_exit    |
+| behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
 
 
@@ -105,6 +106,24 @@ successful `task_kill` event records signal delivery only; it is not evidence
 that the target exited. If the stable target identity cannot be read,
 `target_ref` is omitted rather than populated with a zero start time.
 
+### event.name signal_generate
+
+DECIDED: `raw_tracepoint:signal_generate` is the non-enforcing signal
+observation authority. It does not require BPF LSM and cannot allow, deny, or
+modify a signal.
+
+The event header identifies the process that generated the signal.
+`args.target_ref` identifies the target process instance. `args.signal` is the
+signal number, `args.group` records whether the signal is process-directed,
+and `args.result` is one of `delivered`, `ignored`, `already_pending`,
+`overflow_fail`, `lose_info`, or `unknown`. `args.result_code` preserves the
+kernel enum value. There is no `return_code`: the tracepoint result describes
+signal queueing, not the userspace syscall return value.
+
+If either source or target stable identity is unavailable, the corresponding
+reference is omitted and the bounded `DIAGNOSTIC/process.identity` event is
+emitted. Consumers must fail closed rather than substitute a PID-only identity.
+
 ### event.type SYSCALL
 
 DECIDED: Used for Tier 1 raw_syscalls events. These carry `syscall_nr`
@@ -132,8 +151,8 @@ Bloodhound does not manufacture a PID-only stable reference.
 If kernel task state cannot supply a complete stable reference, the affected
 `process_ref`, `parent_ref`, or `target_ref` is omitted. Bloodhound emits at
 most one `DIAGNOSTIC/process.identity` event for each of the three bounded
-sources (`event_header`, `process_fork.parent_ref`, and
-`task_kill.target_ref`) during a run. Its reason code is
+sources (`event_header`, `process_fork.parent_ref`, `task_kill.target_ref`, and
+`signal_generate.target_ref`) during a run. Its reason code is
 `stable_process_ref_unavailable`; `observed_tgid` is diagnostic context only
 and is not a stable identity.
 
@@ -154,8 +173,8 @@ and is not a stable identity.
 
 Ordering for a new process is `process_start`, then `process_fork`, before any
 behavior event from the child. `process_exit` is the kernel-observed terminal
-lifecycle event. `task_kill` remains only a signal-delivery observation and
-never implies or synthesizes `process_exit`.
+lifecycle event. `task_kill` and `signal_generate` remain signal observations
+and never imply or synthesize `process_exit`.
 
 ### event.type HEARTBEAT
 

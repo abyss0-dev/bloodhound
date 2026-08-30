@@ -50,7 +50,7 @@ impl<W: Write> Sequencer<W> {
     }
 
     fn accept_raw(&mut self, raw: &[u8]) -> Result<()> {
-        let mut event = match deserializer::deserialize(raw) {
+        let decoded = match deserializer::deserialize_with_authority(raw) {
             Ok(event) => event,
             Err(error) => {
                 self.deserialize_rejections = self.deserialize_rejections.saturating_add(1);
@@ -59,6 +59,7 @@ impl<W: Write> Sequencer<W> {
                 return self.write(&diagnostic);
             }
         };
+        let mut event = decoded.event;
 
         enricher::enrich(&mut event);
         if event.event.event_type == "PACKET" {
@@ -68,7 +69,10 @@ impl<W: Write> Sequencer<W> {
             self.correlator.record_socket(&event);
         }
 
-        for precursor in self.lifecycle.before(&event) {
+        for precursor in self
+            .lifecycle
+            .before_observation(&event, decoded.lifecycle_seed_authority)
+        {
             self.write(&precursor)?;
         }
         self.write(&event)?;

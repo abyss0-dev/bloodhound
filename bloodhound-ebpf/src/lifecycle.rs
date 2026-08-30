@@ -8,50 +8,20 @@ use aya_ebpf::{
     helpers::bpf_probe_read_kernel,
     macros::raw_tracepoint,
     programs::RawTracePointContext,
-    EbpfContext,
 };
 use bloodhound_common::{
-    select_process_exit_status, EventHeader, EventKind, ProcessExitPayload, ProcessForkPayload,
+    select_process_exit_status, EventKind, ProcessExitPayload, ProcessForkPayload,
 };
 
 use crate::filter::{
     get_task_info, get_task_info_from_task, process_ref_from_task, should_trace,
     KernelProcessRef,
 };
-use crate::helpers::emit_event;
+use crate::helpers::{emit_fixed, raw_tracepoint_arg};
 use crate::layer3_rich::pending_clone_flags;
 use crate::{
     OFF_EXIT_CODE, OFF_PID, OFF_SIGNAL, OFF_SIGNAL_GROUP_EXIT_CODE, OFF_SIGNAL_LIVE,
 };
-
-#[inline(always)]
-unsafe fn raw_arg(ctx: &RawTracePointContext, index: usize) -> u64 {
-    let args = ctx.as_ptr() as *const u64;
-    core::ptr::read(args.add(index))
-}
-
-#[inline(always)]
-unsafe fn emit_fixed<T>(header: &EventHeader, payload: Option<&T>) {
-    let payload_size = payload.map_or(0, |_| core::mem::size_of::<T>());
-    let total = EventHeader::SIZE + payload_size;
-    let mut buf = [0u8; 128];
-    if total > buf.len() {
-        return;
-    }
-    core::ptr::copy_nonoverlapping(
-        header as *const EventHeader as *const u8,
-        buf.as_mut_ptr(),
-        EventHeader::SIZE,
-    );
-    if let Some(payload) = payload {
-        core::ptr::copy_nonoverlapping(
-            payload as *const T as *const u8,
-            buf.as_mut_ptr().add(EventHeader::SIZE),
-            payload_size,
-        );
-    }
-    emit_event(&buf[..total]);
-}
 
 #[raw_tracepoint(tracepoint = "sched_process_fork")]
 pub fn sched_process_fork(ctx: RawTracePointContext) -> u32 {
@@ -64,8 +34,8 @@ unsafe fn try_process_fork(ctx: &RawTracePointContext) -> Result<(), i64> {
     if !should_trace() {
         return Ok(());
     }
-    let parent = raw_arg(ctx, 0) as *const u8;
-    let child = raw_arg(ctx, 1) as *const u8;
+    let parent = raw_tracepoint_arg(ctx, 0) as *const u8;
+    let child = raw_tracepoint_arg(ctx, 1) as *const u8;
     if parent.is_null() || child.is_null() {
         return Ok(());
     }
@@ -120,7 +90,7 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
     if !should_trace() {
         return Ok(());
     }
-    let task = raw_arg(ctx, 0) as *const u8;
+    let task = raw_tracepoint_arg(ctx, 0) as *const u8;
     if task.is_null() {
         return Ok(());
     }

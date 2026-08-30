@@ -16,6 +16,19 @@ pub struct BehaviorEvent {
     pub return_code: Option<i64>,
 }
 
+/// Whether an observation can authoritatively seed a missing process
+/// lifecycle prefix in the userspace sequencer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleSeedAuthority {
+    Authoritative,
+    NonAuthoritative,
+}
+
+pub struct DecodedBehaviorEvent {
+    pub event: BehaviorEvent,
+    pub lifecycle_seed_authority: LifecycleSeedAuthority,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EventHeaderJson {
     pub timestamp: u64,
@@ -55,6 +68,11 @@ pub struct ProcInfo {
 
 /// Parse raw ring buffer bytes into a BehaviorEvent.
 pub fn deserialize(data: &[u8]) -> Result<BehaviorEvent> {
+    Ok(deserialize_with_authority(data)?.event)
+}
+
+/// Parse a raw record while retaining internal kernel timing semantics.
+pub fn deserialize_with_authority(data: &[u8]) -> Result<DecodedBehaviorEvent> {
     if data.len() < 1 {
         bail!("Event data too short");
     }
@@ -62,13 +80,27 @@ pub fn deserialize(data: &[u8]) -> Result<BehaviorEvent> {
     let kind_byte = data[0];
     let kind = EventKind::from_u8(kind_byte);
 
-    match kind {
+    let event = match kind {
         Some(EventKind::PacketIngress) | Some(EventKind::PacketEgress) => {
             deserialize_packet(data)
         }
         Some(k) => deserialize_process_event(data, k),
         None => bail!("Unknown event kind: {}", kind_byte),
-    }
+    }?;
+    let lifecycle_seed_authority = match kind {
+        // Packet correlation does not identify a current task. Signal
+        // generation may run during final teardown after process_exit, so its
+        // source identity must never resurrect a completed lifecycle.
+        Some(EventKind::PacketIngress)
+        | Some(EventKind::PacketEgress)
+        | Some(EventKind::SignalGenerate) => LifecycleSeedAuthority::NonAuthoritative,
+        Some(_) => LifecycleSeedAuthority::Authoritative,
+        None => unreachable!(),
+    };
+    Ok(DecodedBehaviorEvent {
+        event,
+        lifecycle_seed_authority,
+    })
 }
 
 fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEvent> {
@@ -161,6 +193,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::ProcessStart => parse_process_start(payload)?,
         EventKind::ProcessFork => parse_process_fork(payload)?,
         EventKind::ProcessExit => parse_process_exit(payload)?,
+        EventKind::SignalGenerate => parse_signal_generate(payload)?,
         _ => bail!("Unexpected event kind in process event"),
     };
 
@@ -814,6 +847,48 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option
     ))
 }
 
+fn parse_signal_generate(
+    payload: &[u8],
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() < SignalGeneratePayload::SIZE {
+        bail!("signal_generate payload too short");
+    }
+    let generated = unsafe {
+        core::ptr::read_unaligned(payload.as_ptr() as *const SignalGeneratePayload)
+    };
+    let result = match generated.result {
+        SIGNAL_RESULT_DELIVERED => "delivered",
+        SIGNAL_RESULT_IGNORED => "ignored",
+        SIGNAL_RESULT_ALREADY_PENDING => "already_pending",
+        SIGNAL_RESULT_OVERFLOW_FAIL => "overflow_fail",
+        SIGNAL_RESULT_LOSE_INFO => "lose_info",
+        _ => "unknown",
+    };
+    let mut args = serde_json::Map::new();
+    args.insert("target_pid".into(), serde_json::json!(generated.target_tgid));
+    args.insert("signal".into(), serde_json::json!(generated.signal));
+    args.insert("group".into(), serde_json::json!(generated.group != 0));
+    args.insert("result".into(), serde_json::json!(result));
+    args.insert("result_code".into(), serde_json::json!(generated.result));
+    if generated.target_tgid != 0 && generated.target_start_boottime_ns != 0 {
+        args.insert(
+            "target_ref".into(),
+            serde_json::json!({
+                "tgid": generated.target_tgid,
+                "start_boottime_ns": generated.target_start_boottime_ns,
+            }),
+        );
+    }
+
+    Ok((
+        "TRACEPOINT".into(),
+        "signal_generate".into(),
+        "behavior".into(),
+        Some(serde_json::Value::Object(args)),
+        None,
+    ))
+}
+
 fn parse_lsm_bpf(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < LsmBpfPayload::SIZE {
         bail!("LSM bpf payload too short");
@@ -1351,6 +1426,85 @@ mod tests {
         let args = event.args.unwrap();
         assert!(args.get("target_ref").is_none());
         assert_eq!(args["target_pid"], 100);
+    }
+
+    #[test]
+    fn signal_generate_carries_sender_and_target_identities() {
+        let payload = SignalGeneratePayload {
+            target_tgid: 4321,
+            signal: 15,
+            target_start_boottime_ns: 123_456,
+            group: 1,
+            result: SIGNAL_RESULT_DELIVERED,
+        };
+        let event = deserialize(&build_event(EventKind::SignalGenerate, &payload)).unwrap();
+        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.name, "signal_generate");
+        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.header.process_ref.unwrap().tgid, 1234);
+        assert_eq!(event.args, Some(serde_json::json!({
+            "target_pid": 4321,
+            "signal": 15,
+            "group": true,
+            "result": "delivered",
+            "result_code": 0,
+            "target_ref": {
+                "tgid": 4321,
+                "start_boottime_ns": 123_456,
+            },
+        })));
+        assert_eq!(event.return_code, None);
+    }
+
+    #[test]
+    fn signal_generate_omits_an_unavailable_target_identity() {
+        let payload = SignalGeneratePayload {
+            target_tgid: 4321,
+            signal: 15,
+            target_start_boottime_ns: 0,
+            group: 0,
+            result: SIGNAL_RESULT_IGNORED,
+        };
+        let event = deserialize(&build_event(EventKind::SignalGenerate, &payload)).unwrap();
+        let args = event.args.unwrap();
+        assert!(args.get("target_ref").is_none());
+        assert_eq!(args["target_pid"], 4321);
+        assert_eq!(args["result"], "ignored");
+        assert_eq!(args["result_code"], 1);
+    }
+
+    #[test]
+    fn decoder_preserves_lifecycle_seed_authority_separately_from_json_shape() {
+        let generated = SignalGeneratePayload {
+            target_tgid: 4321,
+            signal: 15,
+            target_start_boottime_ns: 123_456,
+            group: 1,
+            result: SIGNAL_RESULT_DELIVERED,
+        };
+        let decoded =
+            deserialize_with_authority(&build_event(EventKind::SignalGenerate, &generated))
+                .unwrap();
+        assert_eq!(
+            decoded.lifecycle_seed_authority,
+            LifecycleSeedAuthority::NonAuthoritative
+        );
+
+        let open = OpenatPayload {
+            flags: 0,
+            mode: 0,
+            filename_len: 0,
+            _pad: [0; 2],
+            return_code: 0,
+            _pad2: [0; 4],
+            dev: 0,
+            ino: 0,
+        };
+        let decoded = deserialize_with_authority(&build_event(EventKind::Openat, &open)).unwrap();
+        assert_eq!(
+            decoded.lifecycle_seed_authority,
+            LifecycleSeedAuthority::Authoritative
+        );
     }
 
     #[test]

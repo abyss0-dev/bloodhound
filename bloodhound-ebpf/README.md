@@ -43,6 +43,7 @@ graph TD
 | `layer3_rich.rs` | tracepoint | 30+ syscall-specific extractors (openat, read, write, connect, bind, mkdir, etc.) |
 | `packet_tc.rs` | sched_cls | TC ingress/egress — Ethernet header + first 34 bytes |
 | `lsm_hooks.rs` | LSM | 7 hooks: task_kill, bpf, ptrace, file_open, inode_unlink, inode_rename, task_fix_setuid |
+| `signal.rs` | raw tracepoint | Non-enforcing `signal_generate` observation with sender and target identity |
 | `filter.rs` | — | `should_trace()` — auid-based event filtering |
 | `maps.rs` | — | BPF map definitions (ring buffer, per-CPU arrays, hash maps) |
 | `helpers.rs` | — | `emit_event()`, `bpf_memcpy()`, drop counter |
