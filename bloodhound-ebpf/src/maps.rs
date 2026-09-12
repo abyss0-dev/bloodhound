@@ -35,6 +35,39 @@ pub static SYSCALL_ENTRY_MAP: HashMap<u64, SyscallEntry> =
 pub static RICH_ENTRY_MAP: HashMap<u64, RichSyscallEntry> =
     HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
 
+/// Own the pathname for the entire openat invocation, including CPU migration.
+/// Do not retain a pointer into per-CPU scratch storage across tracepoints.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct OpenatEntry {
+    pub header: EventHeader,
+    pub flags: u32,
+    pub mode: u32,
+    pub filename_len: u16,
+    pub capture_flags: u8,
+    pub dirfd: i32,
+    pub filename: [u8; MAX_PATH_SIZE],
+}
+
+#[map]
+pub static OPENAT_ENTRY_MAP: HashMap<u64, OpenatEntry> =
+    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
+
+#[map]
+pub static OPENAT_TMP_BUF: PerCpuArray<OpenatEntry> = PerCpuArray::with_max_entries(1, 0);
+
+/// Detected loss before ring-buffer emission, distinct from DROP_COUNT.
+/// Slots: entry capture, entry map update, exit capture, interrupted invocation.
+#[map]
+pub static OPENAT_FAILURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+
+#[inline(always)]
+pub unsafe fn openat_failure(reason: u32) {
+    if let Some(counter) = OPENAT_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
+
 // ── Per-CPU Scratch Buffers ──────────────────────────────────────────────────
 
 /// Scratch buffer for reading variable-length data in BPF programs.

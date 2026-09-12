@@ -87,6 +87,14 @@ pub fn sched_process_exit(ctx: RawTracePointContext) -> u32 {
 }
 
 unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
+    // A task killed during openat may never reach sys_exit_openat. Release
+    // its pathname before filtering or thread-group exit checks, so PID
+    // reuse cannot inherit the pending invocation and the map stays bounded.
+    let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    if crate::maps::OPENAT_ENTRY_MAP.get(&tid).is_some() {
+        crate::maps::openat_failure(3);
+        let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
+    }
     if !should_trace() {
         return Ok(());
     }

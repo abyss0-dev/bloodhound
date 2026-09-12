@@ -203,7 +203,14 @@ pub fn ptrace_access_check(ctx: LsmContext) -> i32 {
     }
 }
 
-unsafe fn try_ptrace(_ctx: &LsmContext) -> Result<i32, i64> {
+unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i64> {
+    // Preserve an earlier LSM decision and inspect the actual child task.
+    // /proc/P/root and namespace links also use this hook: rejecting every
+    // target-AUID invocation would block ordinary filesystem investigation.
+    let previous: i32 = ctx.arg(2);
+    if previous != 0 {
+        return Ok(previous);
+    }
     if is_daemon() {
         return Ok(0);
     }
@@ -215,6 +222,14 @@ unsafe fn try_ptrace(_ctx: &LsmContext) -> Result<i32, i64> {
     }
 
     let daemon_pid = core::ptr::read_volatile(&raw const DAEMON_PID);
+    let child: *const u8 = ctx.arg(0);
+    let tgid_offset = core::ptr::read_volatile(&raw const crate::OFF_TGID) as usize;
+    let target_pid = aya_ebpf::helpers::bpf_probe_read_kernel(
+        child.add(tgid_offset) as *const u32,
+    ).map_err(|_| -1i64)?;
+    if target_pid != daemon_pid {
+        return Ok(0);
+    }
     let payload = LsmPtracePayload {
         target_pid: daemon_pid,
         return_code: -1,

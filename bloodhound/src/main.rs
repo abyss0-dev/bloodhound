@@ -1,4 +1,5 @@
 mod btf_offsets;
+mod capture_health;
 mod cli;
 mod clock;
 mod consumer;
@@ -88,6 +89,14 @@ async fn main() -> Result<()> {
         Duration::from_secs(1),
     ));
 
+    let capture_map = bpf.take_map("OPENAT_FAILURES")
+        .context("OPENAT_FAILURES map not found in BPF object")?;
+    let capture_map: PerCpuArray<_, u64> = PerCpuArray::try_from(capture_map)?;
+    let (capture_shutdown_tx, capture_shutdown_rx) = tokio::sync::oneshot::channel();
+    let capture_handle = tokio::spawn(capture_health::monitor(
+        capture_map, sequence_tx.clone(), capture_shutdown_rx,
+    ));
+
     // Set up ring buffer consumer
     let map = bpf.take_map("EVENTS").unwrap();
     let ring_buf = RingBuf::try_from(map)?;
@@ -169,6 +178,7 @@ async fn main() -> Result<()> {
     drop(bpf);
     drop(usdt_links);
     heartbeat_handle.abort();
+    let _ = capture_shutdown_tx.send(());
     let _ = consumer_shutdown_tx.send(());
 
     let deadline = tokio::time::Instant::now() + drain_timeout;
@@ -192,6 +202,7 @@ async fn main() -> Result<()> {
         }
     }
 
+    capture_handle.await.context("openat collection monitor panicked")?;
     sequencer.flush()?;
     eprintln!("Shutdown complete");
     Ok(())

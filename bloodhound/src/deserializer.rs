@@ -336,18 +336,44 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     let filename = extract_string(&var_data[..filename_len]);
     let flags = decode_open_flags(openat.flags);
 
-    // dev/ino are populated only when the open succeeded and the kernel
-    // fd-table traversal was successful. Zero ⇒ omit, so consumers can
-    // distinguish "unresolved" from "real inode 0 on dev 0".
     let mut args = serde_json::json!({
         "filename": filename,
         "flags": flags,
         "mode": openat.mode,
+        "file_identity_status": "unknown",
+        "filename_status": "unknown",
     });
-    if openat.dev != 0 || openat.ino != 0 {
-        let obj = args.as_object_mut().expect("openat args is an object");
-        obj.insert("dev".into(), serde_json::Value::from(openat.dev));
-        obj.insert("ino".into(), serde_json::Value::from(openat.ino));
+    let obj = args.as_object_mut().expect("openat args is an object");
+    if openat.capture_version == 1 {
+        let valid = openat.capture_flags & 3;
+        let path = openat.capture_flags & 12;
+        if openat.capture_flags & !15 != 0 || path == 12
+            || (openat.return_code < 0 && valid != 0)
+            || openat.filename_len as usize > var_data.len()
+        {
+            bail!("Invalid openat capture metadata");
+        }
+        obj.insert("capture_version".into(), serde_json::json!(1));
+        obj.insert("dirfd".into(), serde_json::json!(openat.dirfd));
+        obj.insert("filename_status".into(), serde_json::json!(match path {
+            4 => "complete", 8 => "read_error", _ => "truncated",
+        }));
+        obj.insert("file_identity_status".into(), serde_json::json!(
+            if openat.return_code < 0 { "not_attempted" }
+            else { match valid { 3 => "complete", 0 => "unavailable", _ => "partial" } }
+        ));
+        if valid & 1 != 0 {
+            obj.insert("dev".into(), serde_json::json!(openat.dev));
+            obj.insert("dev_major".into(), serde_json::json!(openat.dev >> 20));
+            obj.insert("dev_minor".into(), serde_json::json!(openat.dev & ((1 << 20) - 1)));
+        }
+        if valid & 2 != 0 {
+            obj.insert("ino".into(), serde_json::json!(openat.ino));
+        }
+    } else if openat.dev != 0 || openat.ino != 0 {
+        // Preserve legacy numeric fields without certifying their validity.
+        obj.insert("dev".into(), serde_json::json!(openat.dev));
+        obj.insert("ino".into(), serde_json::json!(openat.ino));
     }
 
     Ok((
@@ -1314,8 +1340,8 @@ mod tests {
     #[test]
     fn openat_classification() {
         let payload = OpenatPayload {
-            flags: 0, mode: 0, filename_len: 0, _pad: [0; 2], return_code: 0,
-            _pad2: [0; 4], dev: 0, ino: 0,
+            flags: 0, mode: 0, filename_len: 0, capture_version: 0, capture_flags: 0, return_code: 0,
+            dirfd: 0, dev: 0, ino: 0,
         };
         let event = deserialize(&build_event(EventKind::Openat, &payload)).unwrap();
         assert_eq!(event.event.event_type, "TRACEPOINT");
@@ -1494,9 +1520,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: 0,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 0,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };
@@ -1556,6 +1582,50 @@ mod tests {
         assert_eq!(argv_arr, vec!["ls", "-la", "/tmp"]);
     }
 
+    #[test]
+    fn openat_capture_status_does_not_infer_validity_from_values() {
+        for (version, bits, ret, status, dev_present, ino_present) in [
+            (1, 3, 3, "complete", true, true),
+            (1, 1, 3, "partial", true, false),
+            (1, 2, 3, "partial", false, true),
+            (1, 0, 3, "unavailable", false, false),
+            (1, 0, -2, "not_attempted", false, false),
+            (0, 0, 3, "unknown", false, false),
+            (2, 3, 3, "unknown", false, false),
+        ] {
+            let payload = OpenatPayload {
+                flags: 0, mode: 0, filename_len: 1,
+                capture_version: version, capture_flags: bits | 4,
+                return_code: ret, dirfd: -100, dev: 0, ino: 0,
+            };
+            let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args["file_identity_status"], status);
+            assert_eq!(args.get("dev").is_some(), dev_present);
+            assert_eq!(args.get("ino").is_some(), ino_present);
+        }
+    }
+
+    #[test]
+    fn openat_capture_rejects_missing_path_and_impossible_success_metadata() {
+        let mut payload = OpenatPayload {
+            flags: 0, mode: 0, filename_len: 2,
+            capture_version: 1, capture_flags: 7,
+            return_code: 3, dirfd: -100, dev: (8 << 20) | 257, ino: 9,
+        };
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        assert!(deserialize(&data).is_err());
+        payload.filename_len = 1;
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["dev_major"], 8);
+        assert_eq!(args["dev_minor"], 257);
+        assert_eq!(args["dirfd"], -100);
+        payload.return_code = -2;
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        assert!(deserialize(&data).is_err());
+    }
+
     /// Openat events must correctly extract the filename path.
     #[test]
     fn openat_extracts_filename() {
@@ -1564,9 +1634,9 @@ mod tests {
             flags: 0o2, // O_RDWR
             mode: 0o644,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 3,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };
@@ -1586,9 +1656,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 3,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0xfd00,
             ino: 12345,
         };
@@ -1607,9 +1677,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: -1,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };
