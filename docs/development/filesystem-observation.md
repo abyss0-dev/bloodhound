@@ -1,8 +1,8 @@
 # Filesystem observation implementation and measurement
 
-Work in progress for Bloodhound #52. This document does not certify the issue's
-acceptance criteria; remaining negative paths and the full integration
-regression still require verification.
+Implementation and measured acceptance evidence for Bloodhound #52. The
+evidence map below distinguishes runtime observations, decoder tests, and
+explicit limits; it does not extend the guarantee beyond the managed fixture.
 
 ## Openat capture version 1
 
@@ -128,9 +128,7 @@ exited 0, and cleanup reported no failures. Userspace emitted
 `run_prefix_incomplete: true`. No operation location or actor is attributed to
 this polled counter. The fault-injection helper is solely an isolated-guest test.
 
-After adding both cases, the filesystem E2E file passed all three tests in the
-guest. The unit suite passed 204 tests. These checks do not substitute for the
-remaining full integration regression.
+Both cases pass in the focused filesystem suite and the full guest regression.
 
 ## Shared argv dependency
 
@@ -167,9 +165,10 @@ hook still emits a denial and preserves the daemon. Ordinary target-process
 access succeeds in the two-view fixture. Together these test the actual hook's
 scope rather than relying on DAC alone.
 
-The focused filesystem suite passed all five tests. The first full E2E run
-passed 61 tests and exposed a hard-coded SSH port in the existing TTY limit
-test; after honoring ssh_config, that test passed on port 2252 as well.
+The focused filesystem suite passed all five tests. The final full guest E2E
+run passed **64 tests** in 249.31 seconds on port 2252, with no skips or failures.
+The workspace unit suite passed **206 tests**. The existing TTY limit test now
+honors ssh_config so the suite can run against an independent guest port.
 
 ## Measured image provenance
 
@@ -185,3 +184,24 @@ Hashes identify the baseline artifacts (not the writable guest after workload):
 The collector corresponds to the #33 implementation in 2e5fb2b; the fixture also
 includes the subsequently added sequential-change cases. These hashes are
 provenance, not a claim that the image is rebuilt byte-for-byte from Dockerfile.
+
+## Acceptance evidence map
+
+| #52 requirement | Evidence and scope |
+|---|---|
+| Two views and target image | Two-view fixture; methods.json os-release/kernel/tool versions; baseline hashes above |
+| Finite methods, old-source copy, recopy | Methods table and retained argv/event records; test_two_namespace_methods verifies exec, completion, and separate content measurements |
+| Concurrent opens and CPU migration | test_concurrent_openat_across_cpu_migration; 32 blocked opens, 16 forced migrations, returned-FD fstat comparison |
+| Device normalization and acquisition states | Direct cat and relative-open fstat comparisons; openat_capture_status_does_not_infer_validity_from_values exercises complete, partial, unavailable, failed, and legacy cases |
+| Collection loss vs existing stream loss | Real entry-map exhaustion and openat.collection; heartbeat/drop-counter and sequencer rejection unit tests; no invented missing-operation timestamp |
+| Exit, PID reuse, file/namespace changes | Sequential replacement/remount/target-exit fixture; lifecycle::pid_reuse_is_keyed_by_kernel_process_identity and exit_releases_only_the_matching_process_instance; process creation/exit E2E |
+| #33 dependency | Shared exec-capture.md; 20 real execve/execveat boundary/fault cases; legacy/unknown version and invalid-framing unit tests |
+| Additional observation assessment | Finite workloads work through exec/exit proxies and available openat identities; no rich stat, mount-relation or data-lineage collector added |
+| Public contract and regression | output-schema.md, exec-capture.md, tracing.md; workspace unit suite and full guest E2E |
+
+Partial-identity decoding is tested with constructed payloads; it is not claimed
+as a naturally occurring partial kernel read in the stable fixture. The target
+layout is validated by BTF measurement and successful fstat comparison, not by
+an automatic cross-kernel portability mechanism. No measurement here proves
+arbitrary FD reuse races, unobserved changes, data transfer lineage, or learner
+understanding. These are the explicit boundaries of the issue specification.

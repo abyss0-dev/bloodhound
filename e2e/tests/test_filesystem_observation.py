@@ -79,13 +79,17 @@ def test_openat_map_pressure_is_not_silent(
     assert report["inserted"] > 0 and report["map_errno"] != 0
     assert report["child_status"] == report["cleanup_failed"] == 0
     wait_for_events()
-    diagnostics = [e for e in bloodhound_events()
+    events = bloodhound_events()
+    diagnostics = [e for e in events
                    if e["event"]["name"] == "openat.collection"
                    and e.get("args", {}).get("reason_code") == "entry_save_failed"]
     assert diagnostics, "successful open with unrecorded entry must invalidate the run prefix"
     assert all(e["args"]["failure_count_delta"] > 0
                and e["args"]["run_prefix_incomplete"] is True for e in diagnostics)
     assert all(e["header"].get("process_ref") is None for e in diagnostics)
+    heartbeats = [e for e in events if e["event"]["type"] == "HEARTBEAT"]
+    assert heartbeats and all(e["args"]["drop_count_delta"] == 0 for e in heartbeats), (
+        "entry-map loss must not be mislabeled as ring-buffer overflow", heartbeats)
 
 
 def test_concurrent_openat_across_cpu_migration(
