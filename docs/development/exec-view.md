@@ -125,3 +125,12 @@ has SHA-256 `84074690be1d27370b59d136103b56f5beecc273f9b3e7b721062c12fc04f4cd`.
 The 12 paired fork/files/stdio/exec records in `exec-view/fork-files.ndjson` have
 SHA-256 `2283a35870623caae637a515d94f85dc220a3bd96e80d1eb2366cfa27bd2668a`.
 Sanjaya integration and redirected-pipeline end-to-end acceptance remain pending.
+
+
+The first broad guest run passed 66 tests and failed three: task-kill capture,
+ptrace protection and concurrent training-shell USDT events. That VM omitted
+`lsm=landlock,lockdown,yama,apparmor,bpf`, which the repository boot script
+requires. After rebooting with that argument, all three failures and the three
+new fork-files cases passed together (6 passed in 22.27 seconds). The USDT
+failure did not reproduce; its cause is not established by that rerun. A full
+suite under the standard boot configuration is still being verified.
