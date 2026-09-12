@@ -1,8 +1,8 @@
 # Filesystem observation implementation and measurement
 
 Work in progress for Bloodhound #52. This document does not certify the issue's
-acceptance criteria; the #33 argv dependency, remaining negative paths, and the
-full integration regression still require verification.
+acceptance criteria; remaining negative paths and the full integration
+regression still require verification.
 
 ## Openat capture version 1
 
@@ -130,4 +130,14 @@ this polled counter. The fault-injection helper is solely an isolated-guest test
 
 After adding both cases, the filesystem E2E file passed all three tests in the
 guest. The unit suite passed 204 tests. These checks do not substitute for the
-remaining full regression and argv dependency validation.
+remaining full integration regression.
+
+## Shared argv dependency
+
+The [#33 exec capture contract](../exec-capture.md) now supplies explicit argv
+and filename status for both exec syscalls. The new 20-case guest test covers
+complete, truncated, unreadable, and invalid-encoding inputs. Unit tests cover
+unknown legacy completeness. The filesystem method test additionally requires
+complete argv and filename; it no longer relies on short argument lengths.
+The earlier retained measurement files above remain historical pre-#33 records,
+not demonstrations of this newer capability.

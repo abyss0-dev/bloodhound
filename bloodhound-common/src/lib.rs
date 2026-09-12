@@ -184,6 +184,9 @@ impl EventKind {
 #[derive(Clone, Copy, Debug)]
 pub struct EventHeader {
     pub kind: u8,
+    /// Execve/Execveat only: [capture version, argv status, filename status].
+    /// Version 1 statuses: 1 complete, 2 truncated, 3 read error. Other kinds
+    /// retain zero padding; old exec producers have unknown completeness.
     pub _pad: [u8; 3],
     pub timestamp_ns: u64,
     pub auid: u32,

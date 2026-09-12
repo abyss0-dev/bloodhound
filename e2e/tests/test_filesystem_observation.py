@@ -93,6 +93,8 @@ def test_two_namespace_methods(ssh_config, ssh_cmd, bloodhound_events, wait_for_
         assert len(execs) == 1, (method, actor)
         execution = execs[0]
         assert execution["args"]["argv"] == method["argv"]
+        assert execution["args"]["argv_status"] == "complete"
+        assert execution["args"]["filename_status"] == "complete"
         assert execution["return_code"] == 0
         assert execution["header"]["auid"] == 1000
         ref = execution["header"]["process_ref"]

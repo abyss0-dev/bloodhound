@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use bloodhound_common::*;
@@ -135,8 +135,8 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             // syscall/TTY deserializer.
             crate::usdt::decode_payload(kind, payload)?
         }
-        EventKind::Execve => parse_execve(payload, "execve")?,
-        EventKind::Execveat => parse_execve(payload, "execveat")?,
+        EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
+        EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
         EventKind::Openat => parse_openat(payload)?,
         EventKind::Read => parse_read_write(payload, "read")?,
@@ -277,7 +277,7 @@ fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Opti
 }
 
 
-fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < ExecvePayload::SIZE {
         bail!("Execve payload too short");
     }
@@ -292,9 +292,30 @@ fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, O
     let argv_data = &var_data[argv_start..argv_start + argv_len];
     let argv = extract_argv(argv_data);
 
+    let mut argv_status = "unknown";
+    let mut filename_status = "unknown";
+    if capture[0] == 1 {
+        if execve.filename_len as usize + execve.argv_len as usize != var_data.len() {
+            bail!("Exec capture lengths do not match record");
+        }
+        let status = |code| match code { 1 => Some("complete"), 2 => Some("truncated"),
+                                       3 => Some("read_error"), _ => None };
+        argv_status = status(capture[1]).context("invalid argv capture status")?;
+        filename_status = status(capture[2]).context("invalid filename capture status")?;
+        if argv_len > 0 && argv_data.last() != Some(&0) {
+            bail!("Exec argv lacks final separator");
+        }
+        if std::str::from_utf8(argv_data).is_err() && argv_status == "complete" {
+            argv_status = "invalid_encoding";
+        }
+        if std::str::from_utf8(&var_data[..filename_len]).is_err() && filename_status == "complete" {
+            filename_status = "invalid_encoding";
+        }
+    }
     let args = serde_json::json!({
-        "filename": filename,
-        "argv": argv,
+        "filename": filename, "argv": argv,
+        "exec_capture_version": capture[0],
+        "argv_status": argv_status, "filename_status": filename_status,
     });
 
     Ok((
@@ -992,10 +1013,10 @@ fn extract_argv(data: &[u8]) -> Vec<String> {
     if data.is_empty() {
         return argv;
     }
-    for chunk in data.split(|&b| b == 0) {
-        if !chunk.is_empty() {
-            argv.push(String::from_utf8_lossy(chunk).to_string());
-        }
+    // Strip exactly the framing terminator, preserving empty arguments.
+    let content = data.strip_suffix(&[0]).unwrap_or(data);
+    for chunk in content.split(|&b| b == 0) {
+        argv.push(String::from_utf8_lossy(chunk).to_string());
     }
     argv
 }
@@ -1184,6 +1205,36 @@ mod tests {
     #[test]
     fn test_extract_argv_empty() {
         assert_eq!(extract_argv(b""), Vec::<String>::new());
+        assert_eq!(extract_argv(b"\0"), vec![""]);
+        assert_eq!(extract_argv(b"a\0\0b\0\0"), vec!["a", "", "b", ""]);
+    }
+
+    #[test]
+    fn exec_completeness_requires_a_known_version_and_valid_framing() {
+        let payload = ExecvePayload { filename_len: 1, argv_len: 2, return_code: 0 };
+        let mut data = build_event_with_vardata(EventKind::Execve, &payload, b"xa\0");
+        for (version, code, expected) in [(0, 0, "unknown"), (2, 1, "unknown"),
+            (1, 1, "complete"), (1, 2, "truncated"), (1, 3, "read_error")] {
+            data[1..4].copy_from_slice(&[version, code, 1]);
+            assert_eq!(deserialize(&data).unwrap().args.unwrap()["argv_status"], expected);
+        }
+        data[1..4].copy_from_slice(&[1, 0, 1]);
+        assert!(deserialize(&data).is_err());
+        data[2] = 1;
+        *data.last_mut().unwrap() = b'x';
+        assert!(deserialize(&data).is_err());
+        data.pop();
+        assert!(deserialize(&data).is_err());
+    }
+
+    #[test]
+    fn exec_lossy_text_cannot_be_consumed_as_complete_argv() {
+        let payload = ExecvePayload { filename_len: 1, argv_len: 2, return_code: 0 };
+        let mut data = build_event_with_vardata(EventKind::Execve, &payload, b"x\xff\0");
+        data[1..4].copy_from_slice(&[1, 1, 1]);
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["argv_status"], "invalid_encoding");
+        assert_eq!(args["filename_status"], "complete");
     }
 
     #[test]

@@ -7,7 +7,10 @@ expression: to_json(& event)
     "argv": [
       "/usr/bin/true"
     ],
-    "filename": "/usr/bin/true"
+    "argv_status": "unknown",
+    "exec_capture_version": 0,
+    "filename": "/usr/bin/true",
+    "filename_status": "unknown"
   },
   "event": {
     "layer": "tooling",

@@ -214,6 +214,11 @@ makes the cumulative run prefix incomplete. Later intervals with no new loss
 do not claim recovery; consumers apply their own explicit recovery semantics.
 # Openat acquisition status (capture version 1)
 
+Execve/execveat completeness is specified separately by
+[the #33 exec capture contract](exec-capture.md). Filesystem method recognition
+must consume that contract; short argv or absent completeness fields do not
+establish complete acquisition.
+
 New openat producers retain the fixed payload size and identify their use of
 formerly reserved bytes with `capture_version: 1`. NDJSON adds `dirfd`,
 `filename_status` (`complete`, `truncated`, `read_error`, or `unknown`) and
