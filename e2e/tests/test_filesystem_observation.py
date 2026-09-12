@@ -1,7 +1,64 @@
 """Collector facts for #52, without implementing downstream Evidence gates."""
 import json
+import shlex
 from pathlib import Path
 import subprocess
+
+
+def test_ptrace_hook_still_protects_daemon(
+        ssh_cmd, bloodhound_events, wait_for_events):
+    result = ssh_cmd("systemctl show bloodhound -p MainPID --value", user="root")
+    assert result.returncode == 0
+    daemon = int(result.stdout.strip())
+    assert daemon > 0
+    # Root has CAP_SYS_PTRACE, so DAC alone cannot make this test pass.
+    script = ('import os; from pathlib import Path; '
+              'Path("/proc/self/loginuid").write_text("1000"); '
+              f'os.readlink("/proc/{daemon}/root")')
+    result = ssh_cmd("python3 -c " + shlex.quote(script), user="root")
+    assert result.returncode != 0 and "PermissionError" in result.stderr
+    wait_for_events()
+    matches = [e for e in bloodhound_events() if e["event"]["name"] == "ptrace_access_check"
+               and e.get("args", {}).get("target_pid") == daemon]
+    assert matches and all(e["return_code"] == -1 for e in matches)
+    result = ssh_cmd("systemctl show bloodhound -p MainPID --value", user="root")
+    assert int(result.stdout.strip()) == daemon
+
+
+def test_openat_path_failures_and_relative_dirfd(
+        ssh_config, ssh_cmd, bloodhound_events, wait_for_events):
+    fixture = Path(__file__).resolve().parents[1] / "fixtures/openat-errors.c"
+    remote = "/tmp/bh-openat-errors"
+    subprocess.run(["sshpass", "-p", "root", "scp", "-o", "StrictHostKeyChecking=no",
+                    "-P", ssh_config["port"], str(fixture),
+                    f"root@{ssh_config['host']}:{remote}.c"], check=True)
+    result = ssh_cmd(f"gcc -O2 -Wall -Wextra -Werror {remote}.c -o {remote} && {remote}",
+                     user="root")
+    assert result.returncode == 0, result.stderr
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert len(records) == 5
+    wait_for_events()
+    events = bloodhound_events()
+    for record in records:
+        matches = [e for e in events if e["header"]["pid"] == record["pid"]
+                   and e["event"]["name"] == "openat"
+                   and e.get("return_code") == record["ret"]
+                   and e.get("args", {}).get("dirfd") == record["dirfd"]]
+        assert len(matches) == 1, (record, matches)
+        args = matches[0]["args"]
+        if record["case"] == "relative":
+            assert record["ret"] >= 0 and args["filename"] == "hostname"
+            assert args["file_identity_status"] == "complete"
+            assert (args["dev_major"], args["dev_minor"], args["ino"]) == (
+                record["major"], record["minor"], record["ino"])
+        else:
+            assert args["file_identity_status"] == "not_attempted"
+            assert "dev" not in args and "ino" not in args
+        expected = {"bad_pointer": ("read_error", -14), "long_path": ("truncated", -36),
+                    "empty": ("complete", -2), "bad_dirfd": ("complete", -9)}
+        if record["case"] in expected:
+            status, ret = expected[record["case"]]
+            assert args["filename_status"] == status and record["ret"] == ret
 
 
 def test_openat_map_pressure_is_not_silent(
@@ -79,6 +136,11 @@ def test_two_namespace_methods(ssh_config, ssh_cmd, bloodhound_events, wait_for_
         service["major"], service["minor"], service["ino"])
     assert host["sha256"] != service["sha256"]
     methods = {m["name"]: m for m in report["methods"]}
+    changes = report["changes"]
+    assert changes["host_after"]["ino"] != host["ino"]
+    assert changes["service_after"]["ino"] != service["ino"]
+    assert changes["namespace_before"] == changes["namespace_after"]
+    assert changes["mountinfo_changed"] is True
     assert methods["namespace_self"]["stdout"] != methods["namespace_target"]["stdout"]
     assert methods["copy_old"]["destination"]["sha256"] == host["sha256"]
     for name in ("copy_service", "recopy_service"):
@@ -86,7 +148,7 @@ def test_two_namespace_methods(ssh_config, ssh_cmd, bloodhound_events, wait_for_
     wait_for_events()
     events = bloodhound_events()
     for method in report["methods"]:
-        assert method["returncode"] == (1 if method["name"] == "missing" else 0)
+        assert method["returncode"] == (1 if method["name"] in ("missing", "target_exited") else 0)
         actor = [e for e in events if e["header"]["pid"] == method["pid"]]
         execs = [e for e in actor if e["event"]["name"] == "execve"
                  and e.get("args", {}).get("filename") == method["executable"]]
@@ -104,7 +166,9 @@ def test_two_namespace_methods(ssh_config, ssh_cmd, bloodhound_events, wait_for_
         assert len(exits) == 1, (method, actor)
         assert exits[0]["args"]["exit_code"] == method["returncode"]
 
-    for name, observation in (("cat_host", host), ("cat_service", service)):
+    for name, observation in (("cat_host", host), ("cat_service", service),
+                              ("cat_replaced_host", changes["host_after"]),
+                              ("cat_remounted_service", changes["service_after"])):
         matches = [e for e in events if e["header"]["pid"] == methods[name]["pid"]
                    and e["event"]["name"] == "openat"
                    and e.get("args", {}).get("filename") == observation["path"]]

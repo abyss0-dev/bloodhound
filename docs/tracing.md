@@ -98,13 +98,12 @@ TTY bytes. Downstream consumers are responsible for decoding and parsing
 
 ### argv capture policy
 
-DECIDED: Capture argv using a per-CPU array map as scratch buffer.
-This bypasses the 512-byte BPF stack limit and allows capturing up to
-~4KB of argv data. The primary purpose is identifying which program was
-run and with what flags. Entries that exceed the buffer are truncated.
-The total argv serialization budget is used greedily -- fill as many
-entries as fit. The same per-CPU map approach is used for `filename`
-in openat (up to PATH_MAX = 4096 bytes).
+Argv acquisition uses per-CPU scratch storage, then saves the bytes in a
+thread-keyed map until syscall exit. The [exec capture contract](exec-capture.md)
+defines the 20-entry, 255-byte-per-argument and bounded-buffer limits, explicit
+completeness states, and conservative capacity checks. Empty arguments remain
+present. Openat similarly owns its pathname in a thread-keyed map across entry
+and exit; no invocation retains a pointer into reusable per-CPU scratch storage.
 
 ### envp capture
 
@@ -300,13 +299,16 @@ and allows downstream consumers to filter noise from pipe I/O in pipelines.
 from the underlying inode at `sys_exit`. The traversal walks
 `task_struct → files_struct → fdtable → file → inode → super_block` using
 `bpf_probe_read_kernel`. The kernel offsets used are fixed at compile time
-to the target VM (kernel `6.8.0-49-generic`); when offsets cannot be read
-(unsupported kernel, NULL pointer in chain, or fd out of range), both
-fields are emitted as 0 and the userspace deserializer omits them from
-the JSON output.
+to the measured target VM (kernel `6.8.0-49-generic`). Readable but incorrect
+offsets on other kernels cannot be detected from read success alone.
 
-Consumers should match on `(dev, ino)` for symlink-resilient file identity.
-A `0` value means "unresolved", not "real inode 0".
+Openat version 1 reports each component's read validity independently and
+exposes `file_identity_status`; only complete pairs on a validated layout are
+consumable as complete identity. Valid zero components are retained. Legacy
+openat records have unknown status; mmap retains its legacy numeric interface.
+Kernel `dev` encoding differs from userspace `st_dev`, so normalize through
+major/minor before comparison. The [filesystem measurement](development/filesystem-observation.md)
+records offsets, acquisition times, FD close/reuse limitations and verification.
 
 ### Vectored I/O traversal cap
 

@@ -376,9 +376,11 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
         }
         obj.insert("capture_version".into(), serde_json::json!(1));
         obj.insert("dirfd".into(), serde_json::json!(openat.dirfd));
-        obj.insert("filename_status".into(), serde_json::json!(match path {
+        let filename_status = match path {
+            4 if std::str::from_utf8(&var_data[..filename_len]).is_err() => "invalid_encoding",
             4 => "complete", 8 => "read_error", _ => "truncated",
-        }));
+        };
+        obj.insert("filename_status".into(), serde_json::json!(filename_status));
         obj.insert("file_identity_status".into(), serde_json::json!(
             if openat.return_code < 0 { "not_attempted" }
             else { match valid { 3 => "complete", 0 => "unavailable", _ => "partial" } }
@@ -1672,6 +1674,10 @@ mod tests {
         assert_eq!(args["dev_major"], 8);
         assert_eq!(args["dev_minor"], 257);
         assert_eq!(args["dirfd"], -100);
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"\xff");
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["filename_status"], "invalid_encoding");
+        assert_eq!(args["file_identity_status"], "complete");
         payload.return_code = -2;
         let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
         assert!(deserialize(&data).is_err());

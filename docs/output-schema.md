@@ -34,8 +34,8 @@ BehaviorEvent
 |   +-- flags    : [string]   (human-readable, e.g. ["O_RDONLY", "O_SYNC"])
 |   +-- data     : string     (raw TTY data, Base64 encoded)
 |   +-- fd_type  : string     (regular, pipe, socket, tty, other)
-|   +-- dev      : u64        (openat/mmap: encoded MKDEV(major, minor); omitted when 0)
-|   +-- ino      : u64        (openat/mmap: inode number; omitted when 0)
+|   +-- dev      : u64        (kernel encoding; openat validity is explicit, mmap is legacy)
+|   +-- ino      : u64        (inode number; openat validity is explicit, mmap is legacy)
 |   +-- oldfd    : u32        (dup/dup2/dup3/fcntl-DUPFD: source fd)
 |   +-- newfd    : i32        (dup family: destination fd, == return value)
 |   +-- cloexec  : bool       (dup3 with O_CLOEXEC, fcntl(F_DUPFD_CLOEXEC))
@@ -221,7 +221,7 @@ establish complete acquisition.
 
 New openat producers retain the fixed payload size and identify their use of
 formerly reserved bytes with `capture_version: 1`. NDJSON adds `dirfd`,
-`filename_status` (`complete`, `truncated`, `read_error`, or `unknown`) and
+`filename_status` (`complete`, `truncated`, `read_error`, `invalid_encoding`, or `unknown`) and
 `file_identity_status` (`complete`, `partial`, `unavailable`, `not_attempted`,
 or `unknown`). Consumers must require an explicitly complete status, not infer
 it from nonzero numbers or the absence of a truncation field. Older or unknown

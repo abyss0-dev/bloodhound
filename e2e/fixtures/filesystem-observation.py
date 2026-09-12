@@ -56,7 +56,11 @@ def main():
             time.sleep(0.02)
         else:
             raise RuntimeError("namespace fixture did not become ready")
-        report = dict(kernel=os.uname().release, target_pid=child.pid,
+        report = dict(kernel=os.uname().release,
+                      os_release=Path("/etc/os-release").read_text(),
+                      tool_versions={tool: subprocess.check_output([tool, "--version"], text=True)
+                                     .splitlines()[0] for tool in ("ps", "stat", "readlink", "cat", "cp")},
+                      target_pid=child.pid,
                       root=str(root), initial=[observe(host), observe(source)], methods=[])
         workloads = [
             ("process", ["ps", "-p", str(child.pid), "-o", "pid=,comm="]),
@@ -77,7 +81,7 @@ def main():
             ("recopy_service", ["cp", "--", source, dest]),
             ("missing", ["cat", "--", str(root / "missing")]),
         ]
-        for name, argv in workloads:
+        def run_method(name, argv):
             executable = os.path.realpath(shutil.which(argv[0]))
             process = subprocess.Popen(argv, executable=executable, user=1000, group=1000,
                                        extra_groups=[], stdout=subprocess.PIPE,
@@ -86,6 +90,32 @@ def main():
             report["methods"].append(dict(name=name, argv=argv, executable=executable,
                 pid=process.pid, returncode=process.returncode, stdout=stdout, stderr=stderr,
                 destination=observe(dest) if Path(dest).exists() else None))
+        for name, argv in workloads:
+            run_method(name, argv)
+
+        # Changes occur between complete methods, never during acquisition.
+        # Keep the old inode live so allocation cannot immediately reuse it.
+        with open(host, "rb"):
+            replacement = root / "host-replacement.chk"
+            replacement.write_text("replaced-host\n")
+            os.replace(replacement, host)
+            host_after = observe(host)
+            run_method("cat_replaced_host", ["cat", "--", host])
+        namespace_before = os.readlink(f"/proc/{child.pid}/ns/mnt")
+        mountinfo_before = Path(f"/proc/{child.pid}/mountinfo").read_text()
+        (root / "replacement-view").mkdir()
+        (root / "replacement-view/current.chk").write_text("remounted-view\n")
+        subprocess.run(["nsenter", "--target", str(child.pid), "--mount", "mount", "--bind",
+                        str(root / "replacement-view"), str(root / "view")], check=True)
+        service_after = observe(source)
+        run_method("cat_remounted_service", ["cat", "--", source])
+        report["changes"] = dict(host_after=host_after, service_after=service_after,
+            namespace_before=namespace_before,
+            namespace_after=os.readlink(f"/proc/{child.pid}/ns/mnt"),
+            mountinfo_changed=mountinfo_before != Path(f"/proc/{child.pid}/mountinfo").read_text())
+        child.terminate()
+        child.wait(timeout=10)
+        run_method("target_exited", ["cat", "--", source])
         print(json.dumps(report))
     finally:
         child.terminate()

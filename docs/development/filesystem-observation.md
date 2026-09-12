@@ -74,13 +74,13 @@ backup directory. It runs each method with UID/AUID 1000 and records the method
 PID, resolved executable, argv, exit status, stdout/stderr, and destination
 identity/content hash after the operation. It removes its own resources on exit.
 
-The first measurement is retained in [methods.json](filesystem-observation/methods.json).
+The latest method measurement is retained in [methods.json](filesystem-observation/methods.json).
 That file includes event counts (including raw syscall numbers) for each method.
 [methods.ndjson](filesystem-observation/methods.ndjson) retains the corresponding
 exec, process-exit, and workload-path openat records, selected by immutable
 process reference; unrelated startup and library reads are excluded from this
-excerpt. These are measurements before the #33 completeness implementation, so
-matching short argv here does **not** establish argv completeness.
+excerpt. Each retained exec record explicitly reports complete argv and filename
+under the shared #33 contract; the method report includes immutable actor references.
 
 | Method | Measured executable / argv prefix | Required observed proxy | Direct reinforcement |
 |---|---|---|---|
@@ -91,7 +91,7 @@ matching short argv here does **not** establish argv completeness.
 | Content | /usr/bin/cat; cat -- PATH | exec + process_exit | openat identity matches World-style stat observation |
 | Copy and recopy | /usr/bin/cp; cp -- SOURCE DEST | exec + process_exit | source/destination openat; separate destination hash |
 
-All 16 positive method invocations succeeded; the missing-file cat exited 1
+All 18 positive invocations succeeded; the missing-file and exited-target cats exited 1
 and its failing openat reported `not_attempted` identity. The two sources had
 different identities and content. Copying the old source produced its content;
 copying and recopying the service source produced that source's content.
@@ -139,5 +139,49 @@ and filename status for both exec syscalls. The new 20-case guest test covers
 complete, truncated, unreadable, and invalid-encoding inputs. Unit tests cover
 unknown legacy completeness. The filesystem method test additionally requires
 complete argv and filename; it no longer relies on short argument lengths.
-The earlier retained measurement files above remain historical pre-#33 records,
-not demonstrations of this newer capability.
+The retained method measurement has been refreshed with this capability and
+with file replacement, remount, and target-exit workloads.
+
+## Sequential changes and negative paths
+
+The extended fixture holds the old host file open while replacing its pathname,
+then observes the new inode. It remounts a replacement directory in the target
+process namespace between methods: the namespace link remains equal, mountinfo
+changes, and the next cat open observes the replacement file identity. Finally
+it terminates the target and verifies that `/proc/P/root` access fails. These
+observations do not retroactively change earlier records and do not promise
+instant detection of unobserved changes. PID-reuse separation is covered by the
+existing lifecycle/stream unit tests and process E2E regression; namespace IDs
+and path-embedded PIDs are not used as immutable view identities.
+
+The openat negative-path fixture verifies EFAULT with filename read_error,
+ENAMETOOLONG with truncated filename, ENOENT for an empty pathname, a successful
+relative pathname with its captured dirfd, and EBADF for an invalid dirfd.
+Failed accesses have not_attempted identity; valid relative access matches
+fstat on the actual returned FD. Unit tests separately exercise partial and
+unavailable identity decoding, including valid zero components. Lossy pathname
+text is invalid_encoding even if the independent file identity is complete.
+
+A privileged target-AUID `/proc/DAEMON/root` attempt verifies the narrowed ptrace
+hook still emits a denial and preserves the daemon. Ordinary target-process
+access succeeds in the two-view fixture. Together these test the actual hook's
+scope rather than relying on DAC alone.
+
+The focused filesystem suite passed all five tests. The first full E2E run
+passed 61 tests and exposed a hard-coded SSH port in the existing TTY limit
+test; after honoring ssh_config, that test passed on port 2252 as well.
+
+## Measured image provenance
+
+The baseline is the existing E2E Ubuntu 24.04 rootfs, independently copied before
+boot and then updated with the development collector. The method report records
+os-release and executable versions: procps-ng 4.0.4 and GNU coreutils 9.4.
+Hashes identify the baseline artifacts (not the writable guest after workload):
+
+- baseline rootfs.ext4 SHA-256: `6bf588891d1ebf783b6b82a4488aaa0e2845d793c709b7cc534409893a9675eb`
+- boot vmlinuz SHA-256: `9b7af34a5f065e1c8c80ea96fa13e9da492aa752ba7a105a2c86b0e46a3909aa`
+- collector used for methods.json SHA-256: `76f8475cb98fee979b25b71f1eb45fc4ecceb29dbfb61b0a5eed1028eb562e3b`
+
+The collector corresponds to the #33 implementation in 2e5fb2b; the fixture also
+includes the subsequently added sequential-change cases. These hashes are
+provenance, not a claim that the image is rebuilt byte-for-byte from Dockerfile.
