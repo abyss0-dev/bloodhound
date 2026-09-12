@@ -95,6 +95,7 @@ pub enum EventKind {
     SignalGenerate = 223,
     ExecView = 224,
     ExecStdio = 225,
+    ForkFiles = 226,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -174,6 +175,7 @@ impl EventKind {
             223 => Some(Self::SignalGenerate),
             224 => Some(Self::ExecView),
             225 => Some(Self::ExecStdio),
+            226 => Some(Self::ForkFiles),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -1068,6 +1070,7 @@ mod tests {
             EventKind::SignalGenerate,
             EventKind::ExecView,
             EventKind::ExecStdio,
+            EventKind::ForkFiles,
         ];
 
         for variant in &all_variants {
@@ -1166,6 +1169,7 @@ mod tests {
             EventKind::SignalGenerate,
             EventKind::ExecView,
             EventKind::ExecStdio,
+            EventKind::ForkFiles,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1370,3 +1374,19 @@ pub const EXEC_STDIO_FIELDS: [(&str, &str); 6] = [
     ("file", "f_inode"),
     ("inode", "i_mode"),
 ];
+
+/// Bounded child FD-table classification at sched_process_fork.
+/// No descriptor identities, paths or ownership graph are exported.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ForkFilesPayload {
+    pub version: u8,
+    pub status: u8,
+    pub has_pipe: u8,
+    pub _pad: u8,
+    pub scanned_slots: u32,
+}
+impl ForkFilesPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+pub const FORK_FILES_MAX_SLOTS: u32 = 256;

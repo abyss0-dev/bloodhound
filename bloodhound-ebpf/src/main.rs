@@ -5,6 +5,7 @@ mod fd_ident;
 mod filter;
 mod exec_view;
 mod exec_stdio;
+mod fork_files;
 mod helpers;
 mod layer1_tty;
 mod layer2_exec;

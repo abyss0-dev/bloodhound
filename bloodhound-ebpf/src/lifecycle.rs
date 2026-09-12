@@ -75,6 +75,9 @@ unsafe fn try_process_fork(ctx: &RawTracePointContext) -> Result<(), i64> {
         child_start_boottime_ns: child_ref.start_boottime_ns,
         clone_flags: pending_clone_flags(),
     };
+    let mut files_header = child_header;
+    files_header.timestamp_ns = fork_header.timestamp_ns;
+    crate::fork_files::emit(&files_header, child as usize);
     emit_fixed(&fork_header, Some(&payload));
     Ok(())
 }

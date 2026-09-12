@@ -8,20 +8,20 @@ unsafe fn offset(index: usize) -> usize {
             .add(index),
     ) as usize
 }
-unsafe fn read<T: Copy>(base: usize, index: usize) -> Result<T, i64> {
+pub(crate) unsafe fn read<T: Copy>(base: usize, index: usize) -> Result<T, i64> {
     bpf_probe_read_kernel((base + offset(index)) as *const T)
 }
-unsafe fn pointer(base: usize, index: usize) -> Result<usize, i64> {
+pub(crate) unsafe fn pointer(base: usize, index: usize) -> Result<usize, i64> {
     let value: usize = read(base, index)?;
     if value == 0 {
         return Err(-1);
     }
     Ok(value)
 }
-unsafe fn descriptor(table: usize, fd: usize) -> Result<usize, i64> {
+pub(crate) unsafe fn descriptor(table: usize, fd: usize) -> Result<usize, i64> {
     bpf_probe_read_kernel((table + fd * core::mem::size_of::<usize>()) as *const usize)
 }
-unsafe fn kind(file: usize) -> Result<u8, i64> {
+pub(crate) unsafe fn kind(file: usize) -> Result<u8, i64> {
     if file == 0 {
         return Ok(1);
     } // closed is an explicit observation
