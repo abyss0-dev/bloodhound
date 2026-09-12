@@ -95,7 +95,7 @@ pub enum EventKind {
     SignalGenerate = 223,
     ExecView = 224,
     ExecStdio = 225,
-    ForkFiles = 226,
+    // 226 was the removed experimental fork-file scan; do not reuse.
     BashLaunch = 227,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
@@ -176,7 +176,6 @@ impl EventKind {
             223 => Some(Self::SignalGenerate),
             224 => Some(Self::ExecView),
             225 => Some(Self::ExecStdio),
-            226 => Some(Self::ForkFiles),
             227 => Some(Self::BashLaunch),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
@@ -1072,7 +1071,6 @@ mod tests {
             EventKind::SignalGenerate,
             EventKind::ExecView,
             EventKind::ExecStdio,
-            EventKind::ForkFiles,
             EventKind::BashLaunch,
         ];
 
@@ -1172,7 +1170,6 @@ mod tests {
             EventKind::SignalGenerate,
             EventKind::ExecView,
             EventKind::ExecStdio,
-            EventKind::ForkFiles,
             EventKind::BashLaunch,
         ];
         let mut seen = [false; 256];
@@ -1378,22 +1375,6 @@ pub const EXEC_STDIO_FIELDS: [(&str, &str); 6] = [
     ("file", "f_inode"),
     ("inode", "i_mode"),
 ];
-
-/// Bounded child FD-table classification at sched_process_fork.
-/// No descriptor identities, paths or ownership graph are exported.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ForkFilesPayload {
-    pub version: u8,
-    pub status: u8,
-    pub has_pipe: u8,
-    pub _pad: u8,
-    pub scanned_slots: u32,
-}
-impl ForkFilesPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-pub const FORK_FILES_MAX_SLOTS: u32 = 256;
 
 /// Scalar arguments at a verified Bash execution boundary; never command grammar.
 #[repr(C)]

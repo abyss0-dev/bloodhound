@@ -6,7 +6,6 @@ mod filter;
 mod exec_view;
 mod bash_launch;
 mod exec_stdio;
-mod fork_files;
 mod helpers;
 mod layer1_tty;
 mod layer2_exec;

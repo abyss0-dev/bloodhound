@@ -137,7 +137,6 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         }
         EventKind::ExecView => parse_exec_view(payload)?,
         EventKind::ExecStdio => parse_exec_stdio(payload)?,
-        EventKind::ForkFiles => parse_fork_files(payload)?,
         EventKind::BashLaunch => crate::bash_launch::decode_payload(payload)?,
         EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
         EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
@@ -328,56 +327,6 @@ fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String,
         "tooling".into(),
         Some(args),
         Some(execve.return_code as i64),
-    ))
-}
-
-fn parse_fork_files(
-    payload: &[u8],
-) -> Result<(
-    String,
-    String,
-    String,
-    Option<serde_json::Value>,
-    Option<i64>,
-)> {
-    if payload.len() != ForkFilesPayload::SIZE {
-        bail!("invalid fork files payload length");
-    }
-    let value = unsafe { core::ptr::read_unaligned(payload.as_ptr().cast::<ForkFilesPayload>()) };
-    let status = if value.version != 1 {
-        "unknown"
-    } else {
-        match value.status {
-            0 => "unsupported",
-            1 => "complete",
-            2 => "unavailable",
-            3 => "changed",
-            4 => "limit_exceeded",
-            _ => bail!("invalid fork files status"),
-        }
-    };
-    let mut args =
-        serde_json::json!({"files_capture_version": value.version, "files_status": status});
-    if value.version == 1 {
-        if value.status == 1 {
-            if value.has_pipe > 1
-                || value.scanned_slots == 0
-                || value.scanned_slots > FORK_FILES_MAX_SLOTS
-            {
-                bail!("invalid complete fork files observation");
-            }
-            args["has_pipe"] = (value.has_pipe == 1).into();
-            args["scanned_slots"] = value.scanned_slots.into();
-        } else if value.has_pipe != 0 || value.scanned_slots != 0 {
-            bail!("partial fork files observation");
-        }
-    }
-    Ok((
-        "TRACEPOINT".into(),
-        "fork_files".into(),
-        "behavior".into(),
-        Some(args),
-        None,
     ))
 }
 
@@ -1354,43 +1303,6 @@ mod tests {
         assert_eq!(args["root_inode"], 81);
         assert_eq!(args["mount_namespace"], 4026531840u32);
         assert_eq!(args["root_mount_id"], 27);
-    }
-
-    #[test]
-    fn fork_files_requires_complete_bounded_observation() {
-        assert_eq!(ForkFilesPayload::SIZE, 8);
-        assert_eq!(EventKind::from_u8(226), Some(EventKind::ForkFiles));
-        for slots in [1, 64, FORK_FILES_MAX_SLOTS] {
-            for pipe in [0, 1] {
-                let value = ForkFilesPayload { version: 1, status: 1, has_pipe: pipe, scanned_slots: slots, ..Default::default() };
-                let args = parse_fork_files(&payload_bytes(&value)).unwrap().3.unwrap();
-                assert_eq!(args["files_status"], "complete");
-                assert_eq!(args["has_pipe"], pipe == 1);
-                assert_eq!(args["scanned_slots"], slots);
-            }
-        }
-        for status in [0, 2, 3, 4] {
-            let mut value = ForkFilesPayload { version: 1, status, ..Default::default() };
-            let args = parse_fork_files(&payload_bytes(&value)).unwrap().3.unwrap();
-            assert_ne!(args["files_status"], "complete");
-            assert!(args.get("has_pipe").is_none());
-            assert!(args.get("scanned_slots").is_none());
-            value.scanned_slots = 1;
-            assert!(parse_fork_files(&payload_bytes(&value)).is_err());
-            value.scanned_slots = 0;
-            value.has_pipe = 1;
-            assert!(parse_fork_files(&payload_bytes(&value)).is_err());
-        }
-        for (status, pipe, slots) in [(1, 0, 0), (1, 0, FORK_FILES_MAX_SLOTS + 1), (1, 2, 64), (5, 0, 0)] {
-            let value = ForkFilesPayload { version: 1, status, has_pipe: pipe, scanned_slots: slots, ..Default::default() };
-            assert!(parse_fork_files(&payload_bytes(&value)).is_err());
-        }
-        let future = ForkFilesPayload { version: 2, status: 1, has_pipe: 1, scanned_slots: 64, ..Default::default() };
-        let args = parse_fork_files(&payload_bytes(&future)).unwrap().3.unwrap();
-        assert_eq!(args["files_status"], "unknown");
-        assert!(args.get("has_pipe").is_none());
-        assert!(parse_fork_files(&[0; 7]).is_err());
-        assert!(parse_fork_files(&[0; 9]).is_err());
     }
 
     #[test]

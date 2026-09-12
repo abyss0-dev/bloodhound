@@ -32,7 +32,7 @@ nesting, missing/duplicate records, return/exit boundaries and capacity before
 binding a context to a particular fork. Return is not a method exit status.
 Pipe descriptors are shell execution arguments before child redirection, not
 FD identity or output-delivery proof. In particular, the inherited-pipe boolean
-from the separate fork-files collector is insufficient for this distinction:
+from the removed experimental fork-files collector is insufficient for this distinction:
 ordinary interactive Bash commands can also inherit a synchronization pipe.
 
 Validation on kernel 6.8.0-49-generic: 154 daemon tests, 10 common tests and 51

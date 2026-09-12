@@ -92,46 +92,15 @@ Validation for the stdio addition: 150 daemon and 10 common Rust tests passed;
 the complete independent guest suite passed all 66 tests in 402.26 seconds.
 
 
-## Fork-time inherited pipe observation
+## Superseded fork-time pipe experiment
 
-Sanjaya guest testing found that `stat -- H > /dev/null | cat` has ordinary
-character-device stdio at exec and therefore passes the existing exec-only
-launch filter. The new `TRACEPOINT/fork_files` record (kind 226) observes the
-child task at `sched_process_fork`, before it can execute child-side redirections.
-Its immutable child identity and timestamp pair with the lifecycle fork record;
-this record does not identify a shell command or implement command grammar.
+The experimental kind 226 FD-table scan has been removed. It did not establish
+pipeline absence: ordinary interactive Bash commands inherited a job-control
+synchronization pipe. Scanning every inherited descriptor was therefore not a
+suitable dependency for Sanjaya method admission. Exec-entry stdio collection
+remains; verified Bash command context is described in [bash-launch.md](bash-launch.md).
 
-The version-1 fixed payload is eight bytes: version, status, pipe flag, padding,
-and scanned slot count. It reuses the six optional FD-table BTF offsets. A full
-scan is bounded to 256 table slots, including closed slots. Tables larger than
-256 return `limit_exceeded` even if their high slots happen to be empty. No
-per-descriptor identity, path, dynamic array or retained FD graph is exported.
-
-Statuses are `unsupported`, `complete`, `unavailable`, `changed` and
-`limit_exceeded`. Only `complete` includes `has_pipe` and `scanned_slots`; a
-missing record, unknown version or other status cannot establish pipe absence.
-The scan rechecks each descriptor pointer and its table endpoints. It does not
-prove absence of arbitrary concurrent close/reuse or shared-table mutations.
-FIFO classification is deliberately conservative: an unrelated inherited FIFO
-can also withhold a downstream method certification.
-
-Unit tests validate fixed size, version, status, complete bounds and rejection
-of partial data. `e2e/tests/test_fork_files.py` covers no pipe, an inherited pipe
-closed before exec, and a table exceeding the cap, while checking exact fork
-pairing and character-device exec stdio. These four focused guest tests (including
-the existing stdio test) pass on Ubuntu 24.04 kernel 6.8.0-49-generic. The kernel
-accepted and attached the new BPF program. The measured native release binary
-has SHA-256 `84074690be1d27370b59d136103b56f5beecc273f9b3e7b721062c12fc04f4cd`.
-The 12 paired fork/files/stdio/exec records in `exec-view/fork-files.ndjson` have
-SHA-256 `2283a35870623caae637a515d94f85dc220a3bd96e80d1eb2366cfa27bd2668a`.
-Sanjaya integration and redirected-pipeline end-to-end acceptance remain pending.
-
-
-The first broad guest run passed 66 tests and failed three: task-kill capture,
-ptrace protection and concurrent training-shell USDT events. That VM omitted
-`lsm=landlock,lockdown,yama,apparmor,bpf`, which the repository boot script
-requires. After rebooting with that argument, all three failures and the three
-new fork-files cases passed together (6 passed in 22.27 seconds). The USDT
-failure did not reproduce; its cause is not established by that rerun. The full suite then passed under the standard boot configuration:
-69 passed in 467.74 seconds, including the new fork-files observations and
-all existing process, filesystem, stdio and USDT cases.
+`exec-view/fork-files.ndjson` preserves the historical measured records. It is
+not output from the current producer. Event kind 226 is left unused; Bash
+launch observations retain kind 227. Current fork capture emits the existing
+process lifecycle record without scanning the child FD table.
