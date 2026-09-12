@@ -132,5 +132,6 @@ ptrace protection and concurrent training-shell USDT events. That VM omitted
 `lsm=landlock,lockdown,yama,apparmor,bpf`, which the repository boot script
 requires. After rebooting with that argument, all three failures and the three
 new fork-files cases passed together (6 passed in 22.27 seconds). The USDT
-failure did not reproduce; its cause is not established by that rerun. A full
-suite under the standard boot configuration is still being verified.
+failure did not reproduce; its cause is not established by that rerun. The full suite then passed under the standard boot configuration:
+69 passed in 467.74 seconds, including the new fork-files observations and
+all existing process, filesystem, stdio and USDT cases.
