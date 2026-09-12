@@ -40,4 +40,8 @@ pub struct Cli {
     /// set enabled=true/false; it cannot supply BPF, offsets, probes, or ABI.
     #[arg(long)]
     pub usdt_config: Vec<PathBuf>,
+
+    /// Opt-in launch observation for an exactly verified supported Bash image.
+    #[arg(long)]
+    pub bash_launch: Option<PathBuf>,
 }

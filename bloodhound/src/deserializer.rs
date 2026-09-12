@@ -138,6 +138,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::ExecView => parse_exec_view(payload)?,
         EventKind::ExecStdio => parse_exec_stdio(payload)?,
         EventKind::ForkFiles => parse_fork_files(payload)?,
+        EventKind::BashLaunch => crate::bash_launch::decode_payload(payload)?,
         EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
         EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,

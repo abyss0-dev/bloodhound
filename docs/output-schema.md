@@ -19,7 +19,7 @@ BehaviorEvent
 |   +-- process_ref  : { tgid, start_boottime_ns } (process events only)
 |
 +-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
+|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, UPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
 |   +-- name         : string (hook point name, e.g. "openat", "tty_read")
 |   +-- layer        : enum [intent, tooling, behavior]
 |
@@ -256,3 +256,12 @@ Path-read failure is represented on the event; unsuccessful FD-identity reads
 are represented by identity status. The counter does not certify unsupported
 paths or detect every FD-table race. A missing entry with no recorded entry
 (for example, tracing attached during an in-flight syscall) is not counted.
+
+### event.type UPROBE
+
+The opt-in verified Bash image collector emits `bash_command_entry` and
+`bash_command_return` with immutable actor headers. Version-1 complete entry
+records contain command type/flags, asynchronous, pipe-in and pipe-out scalar
+arguments. Returns contain no entry arguments. Unavailable or unknown capture
+never supplies default argument values. These are execution-boundary facts,
+not method completion, source binding or pipeline certification.

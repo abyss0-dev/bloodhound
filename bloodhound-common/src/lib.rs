@@ -96,6 +96,7 @@ pub enum EventKind {
     ExecView = 224,
     ExecStdio = 225,
     ForkFiles = 226,
+    BashLaunch = 227,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -176,6 +177,7 @@ impl EventKind {
             224 => Some(Self::ExecView),
             225 => Some(Self::ExecStdio),
             226 => Some(Self::ForkFiles),
+            227 => Some(Self::BashLaunch),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -1071,6 +1073,7 @@ mod tests {
             EventKind::ExecView,
             EventKind::ExecStdio,
             EventKind::ForkFiles,
+            EventKind::BashLaunch,
         ];
 
         for variant in &all_variants {
@@ -1170,6 +1173,7 @@ mod tests {
             EventKind::ExecView,
             EventKind::ExecStdio,
             EventKind::ForkFiles,
+            EventKind::BashLaunch,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1390,3 +1394,21 @@ impl ForkFilesPayload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 pub const FORK_FILES_MAX_SLOTS: u32 = 256;
+
+/// Scalar arguments at a verified Bash execution boundary; never command grammar.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct BashLaunchPayload {
+    pub version: u8,
+    pub status: u8,
+    pub phase: u8,
+    pub _pad: u8,
+    pub command_type: i32,
+    pub command_flags: u32,
+    pub asynchronous: i32,
+    pub pipe_in: i32,
+    pub pipe_out: i32,
+}
+impl BashLaunchPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}

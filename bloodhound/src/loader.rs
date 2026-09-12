@@ -15,6 +15,7 @@ pub fn load_and_attach(
     args: &Cli,
     usdt_selections: &[usdt::Selection],
 ) -> Result<(aya::Ebpf, Vec<BehaviorEvent>, usdt::AttachmentLinks)> {
+    let bash_image = args.bash_launch.as_deref().map(crate::bash_launch::verify_image).transpose()?;
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
@@ -244,6 +245,7 @@ pub fn load_and_attach(
         }
     }
 
+    if let Some(image) = bash_image.as_ref() { crate::bash_launch::attach(&mut bpf, image)?; }
     let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections
         .iter()

@@ -1,3 +1,4 @@
+mod bash_launch;
 mod btf_offsets;
 mod capture_health;
 mod cli;

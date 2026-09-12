@@ -4,6 +4,7 @@
 mod fd_ident;
 mod filter;
 mod exec_view;
+mod bash_launch;
 mod exec_stdio;
 mod fork_files;
 mod helpers;
