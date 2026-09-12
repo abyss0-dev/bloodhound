@@ -83,7 +83,7 @@ class TestSchemaValidation:
 
         events = bloodhound_events()
         allowed_types = {
-            "SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM",
+            "SYSCALL", "TTY", "PACKET", "KPROBE", "UPROBE", "TRACEPOINT", "LSM",
             # Userspace-synthesised types (see docs/output-schema.md).
             "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC",
         }

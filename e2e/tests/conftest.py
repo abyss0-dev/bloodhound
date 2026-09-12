@@ -9,6 +9,8 @@ import pytest
 
 
 def pytest_addoption(parser):
+    parser.addoption("--bash-launch-enabled", action="store_true", default=False,
+                     help="Require observations from the opt-in verified Bash collector")
     parser.addoption("--ssh-port", default="2222", help="SSH port for VM")
     parser.addoption("--ssh-host", default="localhost", help="SSH host for VM")
     parser.addoption("--ssh-user", default="testuser", help="SSH user")

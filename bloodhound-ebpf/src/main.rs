@@ -3,6 +3,9 @@
 
 mod fd_ident;
 mod filter;
+mod exec_view;
+mod bash_launch;
+mod exec_stdio;
 mod helpers;
 mod layer1_tty;
 mod layer2_exec;
@@ -80,3 +83,13 @@ pub static mut OFF_SIGNAL_GROUP_EXIT_CODE: u32 = 0;
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::hint::unreachable_unchecked() }
 }
+
+#[no_mangle]
+pub static mut OFF_EXEC_VIEW: [u32;14] = [0;14];
+#[no_mangle]
+pub static mut EXEC_VIEW_SUPPORTED: u32 = 0;
+
+#[no_mangle]
+pub static mut OFF_EXEC_STDIO: [u32; 6] = [0; 6];
+#[no_mangle]
+pub static mut EXEC_STDIO_SUPPORTED: u32 = 0;

@@ -186,6 +186,7 @@ dependencies = [
  "log",
  "serde",
  "serde_json",
+ "sha2",
  "tokio",
 ]
 
