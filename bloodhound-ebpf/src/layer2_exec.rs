@@ -156,6 +156,7 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
         };
         if !copied { entry.argv_len = 0; entry.header._pad[1] = 3; }
     }
+    crate::exec_view::emit(&entry.header);
     let _ = EXECVE_ENTRY_MAP.insert(&bpf_get_current_pid_tgid(), entry, 0);
     Ok(0)
 }
