@@ -94,6 +94,7 @@ pub enum EventKind {
     ProcessExit = 222,
     SignalGenerate = 223,
     ExecView = 224,
+    ExecStdio = 225,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -172,6 +173,7 @@ impl EventKind {
             222 => Some(Self::ProcessExit),
             223 => Some(Self::SignalGenerate),
             224 => Some(Self::ExecView),
+            225 => Some(Self::ExecStdio),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -1065,6 +1067,7 @@ mod tests {
             EventKind::ProcessExit,
             EventKind::SignalGenerate,
             EventKind::ExecView,
+            EventKind::ExecStdio,
         ];
 
         for variant in &all_variants {
@@ -1162,6 +1165,7 @@ mod tests {
             EventKind::ProcessExit,
             EventKind::SignalGenerate,
             EventKind::ExecView,
+            EventKind::ExecStdio,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1194,6 +1198,8 @@ mod tests {
 
     #[test]
     fn payload_sizes_match_mem_size() {
+        assert_eq!(ExecStdioPayload::SIZE, 8);
+        assert_eq!(EventKind::from_u8(225), Some(EventKind::ExecStdio));
         assert_eq!(ExecViewPayload::SIZE, 24);
         assert_eq!(EventKind::from_u8(224), Some(EventKind::ExecView));
         assert_eq!(ExecvePayload::SIZE, mem::size_of::<ExecvePayload>());
@@ -1341,4 +1347,26 @@ pub const EXEC_VIEW_FIELDS: [(&str, &str); 14] = [
     ("ns_common", "inum"),
     ("mount", "mnt"),
     ("mount", "mnt_id"),
+];
+
+/// Independent exec-entry descriptor classification. No paths or FD graph.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecStdioPayload {
+    pub version: u8,
+    pub status: u8,
+    pub stdin_kind: u8,
+    pub stdout_kind: u8,
+    pub _pad: [u8; 4],
+}
+impl ExecStdioPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+pub const EXEC_STDIO_FIELDS: [(&str, &str); 6] = [
+    ("task_struct", "files"),
+    ("files_struct", "fdt"),
+    ("fdtable", "max_fds"),
+    ("fdtable", "fd"),
+    ("file", "f_inode"),
+    ("inode", "i_mode"),
 ];

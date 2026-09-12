@@ -56,3 +56,37 @@ argv/view rerun and the full ready run passed. `systemctl is-active` alone is
 not a BPF attachment readiness signal; the guest log reported attachment about
 four seconds after service start. No capture completeness is claimed for that
 startup interval.
+
+## Exec standard descriptor kinds
+
+`TRACEPOINT/exec_stdio` independently records fd 0 and fd 1 kinds at the same
+entry timestamp and immutable actor as `exec_view` and exec. Its version-1
+payload is eight bytes. Runtime BTF resolves the task/files/fdtable/file/inode
+members; missing offsets are `unsupported`, read failures are `unavailable`,
+and changed table or descriptor pointer endpoints are `changed`. Failure
+records expose no partial descriptor kinds. Closed descriptors are explicitly
+`closed`; other categories are `regular`, `directory`, `character`, `block`,
+`fifo`, `socket`, and `other`. Unknown versions expose no kinds.
+
+The collector reads only these two descriptors and stores no FD graph or
+paths. Existing exec/view payloads are unchanged. Ring loss is accounted by
+the existing capture-health mechanism. Consumers must pair the exact actor
+and entry timestamp and must not infer non-pipe descriptors from a missing
+record. This reports attached descriptors, not original shell syntax,
+continuous stability, data flow, or delivery. In particular, shell operators
+whose connections were overridden by redirection are not reconstructed.
+
+The guest test exercises character devices, pipe input, pipe output, a Unix
+socket, closed input, and regular-file output, checking the matching successful
+exec for each actor. The [24-line excerpt](exec-view/stdio.ndjson) contains the
+original fork/view/stdio/exec records for those six invocations. The excerpt
+does not claim completeness of the entire reused guest log; one pre-existing
+non-JSON line outside the selected invocations was omitted during extraction.
+Its SHA-256 is
+`322909b4063c8e180e20443c97338a602d02bdeabc35e3ef4d3f9f4199e219bd`.
+The measured collector SHA-256 is
+`13bbff6c30118d712474d1c2a6b659eb6b4c882cc04cc36528af403b81a5f6cf`
+on the same independent kernel 6.8.0-49-generic guest.
+
+Validation for the stdio addition: 150 daemon and 10 common Rust tests passed;
+the complete independent guest suite passed all 66 tests in 402.26 seconds.
