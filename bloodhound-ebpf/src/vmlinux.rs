@@ -183,9 +183,9 @@ pub const PTY_TYPE_SLAVE: i16 = 0x0002;
 //   fdtable *fdt = files->fdt          (offset 0x20 in files_struct on 6.8.x)
 //   file **fd_array = fdt->fd          (offset 0x08 in fdtable)
 //   file *f = fd_array[fd]
-//   inode *i = f->f_inode              (offset 0x20 in file on 6.8.x)
+//   inode *i = f->f_inode              (offset 0xa8 in the measured target file)
 //   super_block *sb = i->i_sb          (offset 0x28 in inode on 6.8.x)
-//   dev_t dev = sb->s_dev              (offset 0x00 in super_block)
+//   dev_t dev = sb->s_dev              (offset 0x10 in super_block)
 //   u64 ino  = i->i_ino                (offset 0x40 in inode on 6.8.x)
 //
 // All offsets are for kernel 6.8.0-49-generic, x86_64. When the target
@@ -197,9 +197,9 @@ pub const PTY_TYPE_SLAVE: i16 = 0x0002;
 /// process's file table without embedding a fully padded `task_struct`
 /// definition.
 ///
-/// On kernel 6.8.0-49-generic, x86_64, this is 0xb20 (2848).
+/// On kernel 6.8.0-49-generic, x86_64, this is 0xc08 (3080).
 /// Verify with: `pahole -C task_struct vmlinux | grep files`.
-pub const FILES_OFFSET_IN_TASK: usize = 0xb20;
+pub const FILES_OFFSET_IN_TASK: usize = 0xc08;
 
 /// Linux `files_struct` (subset). `fdt` is a pointer to a `fdtable` describing
 /// the open file descriptor table.
@@ -224,12 +224,12 @@ pub struct fdtable {
 /// Linux `struct file` (subset). `f_inode` points to the inode of the open file.
 ///
 /// Field layout for kernel 6.8.0-49-generic (x86_64):
-///   - 0x00 .. 0x20: opaque (refcount, ops, etc.)
-///   - 0x20: `struct inode *f_inode`
+///   - 0x00 .. 0xa8: opaque (refcount, ops, etc.)
+///   - 0xa8: `struct inode *f_inode`
 #[repr(C)]
 pub struct file {
-    _pad0: [u8; 0x20],
-    /// Pointer to the underlying inode (offset 0x20).
+    _pad0: [u8; 0xa8],
+    /// Pointer to the underlying inode (offset 0xa8).
     pub f_inode: *mut inode,
 }
 
@@ -254,6 +254,7 @@ pub struct inode {
 /// device-major/minor identification.
 #[repr(C)]
 pub struct super_block {
-    /// Encoded device id (`MKDEV(major, minor)`). Offset 0x00.
+    _pad0: [u8; 0x10],
+    /// Encoded device id (`MKDEV(major, minor)`). Offset 0x10.
     pub s_dev: u32,
 }

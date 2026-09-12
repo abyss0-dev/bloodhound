@@ -1,4 +1,4 @@
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
 use bloodhound_common::*;
@@ -135,8 +135,8 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             // syscall/TTY deserializer.
             crate::usdt::decode_payload(kind, payload)?
         }
-        EventKind::Execve => parse_execve(payload, "execve")?,
-        EventKind::Execveat => parse_execve(payload, "execveat")?,
+        EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
+        EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
         EventKind::Openat => parse_openat(payload)?,
         EventKind::Read => parse_read_write(payload, "read")?,
@@ -277,7 +277,7 @@ fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Opti
 }
 
 
-fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < ExecvePayload::SIZE {
         bail!("Execve payload too short");
     }
@@ -292,9 +292,30 @@ fn parse_execve(payload: &[u8], name: &str) -> Result<(String, String, String, O
     let argv_data = &var_data[argv_start..argv_start + argv_len];
     let argv = extract_argv(argv_data);
 
+    let mut argv_status = "unknown";
+    let mut filename_status = "unknown";
+    if capture[0] == 1 {
+        if execve.filename_len as usize + execve.argv_len as usize != var_data.len() {
+            bail!("Exec capture lengths do not match record");
+        }
+        let status = |code| match code { 1 => Some("complete"), 2 => Some("truncated"),
+                                       3 => Some("read_error"), _ => None };
+        argv_status = status(capture[1]).context("invalid argv capture status")?;
+        filename_status = status(capture[2]).context("invalid filename capture status")?;
+        if argv_len > 0 && argv_data.last() != Some(&0) {
+            bail!("Exec argv lacks final separator");
+        }
+        if std::str::from_utf8(argv_data).is_err() && argv_status == "complete" {
+            argv_status = "invalid_encoding";
+        }
+        if std::str::from_utf8(&var_data[..filename_len]).is_err() && filename_status == "complete" {
+            filename_status = "invalid_encoding";
+        }
+    }
     let args = serde_json::json!({
-        "filename": filename,
-        "argv": argv,
+        "filename": filename, "argv": argv,
+        "exec_capture_version": capture[0],
+        "argv_status": argv_status, "filename_status": filename_status,
     });
 
     Ok((
@@ -336,18 +357,46 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     let filename = extract_string(&var_data[..filename_len]);
     let flags = decode_open_flags(openat.flags);
 
-    // dev/ino are populated only when the open succeeded and the kernel
-    // fd-table traversal was successful. Zero ⇒ omit, so consumers can
-    // distinguish "unresolved" from "real inode 0 on dev 0".
     let mut args = serde_json::json!({
         "filename": filename,
         "flags": flags,
         "mode": openat.mode,
+        "file_identity_status": "unknown",
+        "filename_status": "unknown",
     });
-    if openat.dev != 0 || openat.ino != 0 {
-        let obj = args.as_object_mut().expect("openat args is an object");
-        obj.insert("dev".into(), serde_json::Value::from(openat.dev));
-        obj.insert("ino".into(), serde_json::Value::from(openat.ino));
+    let obj = args.as_object_mut().expect("openat args is an object");
+    if openat.capture_version == 1 {
+        let valid = openat.capture_flags & 3;
+        let path = openat.capture_flags & 12;
+        if openat.capture_flags & !15 != 0 || path == 12
+            || (openat.return_code < 0 && valid != 0)
+            || openat.filename_len as usize > var_data.len()
+        {
+            bail!("Invalid openat capture metadata");
+        }
+        obj.insert("capture_version".into(), serde_json::json!(1));
+        obj.insert("dirfd".into(), serde_json::json!(openat.dirfd));
+        let filename_status = match path {
+            4 if std::str::from_utf8(&var_data[..filename_len]).is_err() => "invalid_encoding",
+            4 => "complete", 8 => "read_error", _ => "truncated",
+        };
+        obj.insert("filename_status".into(), serde_json::json!(filename_status));
+        obj.insert("file_identity_status".into(), serde_json::json!(
+            if openat.return_code < 0 { "not_attempted" }
+            else { match valid { 3 => "complete", 0 => "unavailable", _ => "partial" } }
+        ));
+        if valid & 1 != 0 {
+            obj.insert("dev".into(), serde_json::json!(openat.dev));
+            obj.insert("dev_major".into(), serde_json::json!(openat.dev >> 20));
+            obj.insert("dev_minor".into(), serde_json::json!(openat.dev & ((1 << 20) - 1)));
+        }
+        if valid & 2 != 0 {
+            obj.insert("ino".into(), serde_json::json!(openat.ino));
+        }
+    } else if openat.dev != 0 || openat.ino != 0 {
+        // Preserve legacy numeric fields without certifying their validity.
+        obj.insert("dev".into(), serde_json::json!(openat.dev));
+        obj.insert("ino".into(), serde_json::json!(openat.ino));
     }
 
     Ok((
@@ -966,10 +1015,10 @@ fn extract_argv(data: &[u8]) -> Vec<String> {
     if data.is_empty() {
         return argv;
     }
-    for chunk in data.split(|&b| b == 0) {
-        if !chunk.is_empty() {
-            argv.push(String::from_utf8_lossy(chunk).to_string());
-        }
+    // Strip exactly the framing terminator, preserving empty arguments.
+    let content = data.strip_suffix(&[0]).unwrap_or(data);
+    for chunk in content.split(|&b| b == 0) {
+        argv.push(String::from_utf8_lossy(chunk).to_string());
     }
     argv
 }
@@ -1158,6 +1207,36 @@ mod tests {
     #[test]
     fn test_extract_argv_empty() {
         assert_eq!(extract_argv(b""), Vec::<String>::new());
+        assert_eq!(extract_argv(b"\0"), vec![""]);
+        assert_eq!(extract_argv(b"a\0\0b\0\0"), vec!["a", "", "b", ""]);
+    }
+
+    #[test]
+    fn exec_completeness_requires_a_known_version_and_valid_framing() {
+        let payload = ExecvePayload { filename_len: 1, argv_len: 2, return_code: 0 };
+        let mut data = build_event_with_vardata(EventKind::Execve, &payload, b"xa\0");
+        for (version, code, expected) in [(0, 0, "unknown"), (2, 1, "unknown"),
+            (1, 1, "complete"), (1, 2, "truncated"), (1, 3, "read_error")] {
+            data[1..4].copy_from_slice(&[version, code, 1]);
+            assert_eq!(deserialize(&data).unwrap().args.unwrap()["argv_status"], expected);
+        }
+        data[1..4].copy_from_slice(&[1, 0, 1]);
+        assert!(deserialize(&data).is_err());
+        data[2] = 1;
+        *data.last_mut().unwrap() = b'x';
+        assert!(deserialize(&data).is_err());
+        data.pop();
+        assert!(deserialize(&data).is_err());
+    }
+
+    #[test]
+    fn exec_lossy_text_cannot_be_consumed_as_complete_argv() {
+        let payload = ExecvePayload { filename_len: 1, argv_len: 2, return_code: 0 };
+        let mut data = build_event_with_vardata(EventKind::Execve, &payload, b"x\xff\0");
+        data[1..4].copy_from_slice(&[1, 1, 1]);
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["argv_status"], "invalid_encoding");
+        assert_eq!(args["filename_status"], "complete");
     }
 
     #[test]
@@ -1314,8 +1393,8 @@ mod tests {
     #[test]
     fn openat_classification() {
         let payload = OpenatPayload {
-            flags: 0, mode: 0, filename_len: 0, _pad: [0; 2], return_code: 0,
-            _pad2: [0; 4], dev: 0, ino: 0,
+            flags: 0, mode: 0, filename_len: 0, capture_version: 0, capture_flags: 0, return_code: 0,
+            dirfd: 0, dev: 0, ino: 0,
         };
         let event = deserialize(&build_event(EventKind::Openat, &payload)).unwrap();
         assert_eq!(event.event.event_type, "TRACEPOINT");
@@ -1494,9 +1573,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: 0,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 0,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };
@@ -1556,6 +1635,54 @@ mod tests {
         assert_eq!(argv_arr, vec!["ls", "-la", "/tmp"]);
     }
 
+    #[test]
+    fn openat_capture_status_does_not_infer_validity_from_values() {
+        for (version, bits, ret, status, dev_present, ino_present) in [
+            (1, 3, 3, "complete", true, true),
+            (1, 1, 3, "partial", true, false),
+            (1, 2, 3, "partial", false, true),
+            (1, 0, 3, "unavailable", false, false),
+            (1, 0, -2, "not_attempted", false, false),
+            (0, 0, 3, "unknown", false, false),
+            (2, 3, 3, "unknown", false, false),
+        ] {
+            let payload = OpenatPayload {
+                flags: 0, mode: 0, filename_len: 1,
+                capture_version: version, capture_flags: bits | 4,
+                return_code: ret, dirfd: -100, dev: 0, ino: 0,
+            };
+            let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args["file_identity_status"], status);
+            assert_eq!(args.get("dev").is_some(), dev_present);
+            assert_eq!(args.get("ino").is_some(), ino_present);
+        }
+    }
+
+    #[test]
+    fn openat_capture_rejects_missing_path_and_impossible_success_metadata() {
+        let mut payload = OpenatPayload {
+            flags: 0, mode: 0, filename_len: 2,
+            capture_version: 1, capture_flags: 7,
+            return_code: 3, dirfd: -100, dev: (8 << 20) | 257, ino: 9,
+        };
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        assert!(deserialize(&data).is_err());
+        payload.filename_len = 1;
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["dev_major"], 8);
+        assert_eq!(args["dev_minor"], 257);
+        assert_eq!(args["dirfd"], -100);
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"\xff");
+        let args = deserialize(&data).unwrap().args.unwrap();
+        assert_eq!(args["filename_status"], "invalid_encoding");
+        assert_eq!(args["file_identity_status"], "complete");
+        payload.return_code = -2;
+        let data = build_event_with_vardata(EventKind::Openat, &payload, b"x");
+        assert!(deserialize(&data).is_err());
+    }
+
     /// Openat events must correctly extract the filename path.
     #[test]
     fn openat_extracts_filename() {
@@ -1564,9 +1691,9 @@ mod tests {
             flags: 0o2, // O_RDWR
             mode: 0o644,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 3,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };
@@ -1586,9 +1713,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: 3,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0xfd00,
             ino: 12345,
         };
@@ -1607,9 +1734,9 @@ mod tests {
             flags: 0,
             mode: 0,
             filename_len: path.len() as u16,
-            _pad: [0; 2],
+            capture_version: 0, capture_flags: 0,
             return_code: -1,
-            _pad2: [0; 4],
+            dirfd: 0,
             dev: 0,
             ino: 0,
         };

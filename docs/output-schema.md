@@ -34,8 +34,8 @@ BehaviorEvent
 |   +-- flags    : [string]   (human-readable, e.g. ["O_RDONLY", "O_SYNC"])
 |   +-- data     : string     (raw TTY data, Base64 encoded)
 |   +-- fd_type  : string     (regular, pipe, socket, tty, other)
-|   +-- dev      : u64        (openat/mmap: encoded MKDEV(major, minor); omitted when 0)
-|   +-- ino      : u64        (openat/mmap: inode number; omitted when 0)
+|   +-- dev      : u64        (kernel encoding; openat validity is explicit, mmap is legacy)
+|   +-- ino      : u64        (inode number; openat validity is explicit, mmap is legacy)
 |   +-- oldfd    : u32        (dup/dup2/dup3/fcntl-DUPFD: source fd)
 |   +-- newfd    : i32        (dup family: destination fd, == return value)
 |   +-- cloexec  : bool       (dup3 with O_CLOEXEC, fcntl(F_DUPFD_CLOEXEC))
@@ -212,3 +212,47 @@ emitted before the next raw-derived event.
 Ring-buffer drops and deserialization rejection are separate causes. Either
 makes the cumulative run prefix incomplete. Later intervals with no new loss
 do not claim recovery; consumers apply their own explicit recovery semantics.
+# Openat acquisition status (capture version 1)
+
+Execve/execveat completeness is specified separately by
+[the #33 exec capture contract](exec-capture.md). Filesystem method recognition
+must consume that contract; short argv or absent completeness fields do not
+establish complete acquisition.
+
+New openat producers retain the fixed payload size and identify their use of
+formerly reserved bytes with `capture_version: 1`. NDJSON adds `dirfd`,
+`filename_status` (`complete`, `truncated`, `read_error`, `invalid_encoding`, or `unknown`) and
+`file_identity_status` (`complete`, `partial`, `unavailable`, `not_attempted`,
+or `unknown`). Consumers must require an explicitly complete status, not infer
+it from nonzero numbers or the absence of a truncation field. Older or unknown
+producer versions have unknown status; legacy numeric fields remain available.
+
+Successful opens can have complete, partial, or unavailable identity. Failed
+opens have negative `return_code` and identity `not_attempted`. For version 1,
+only successfully read components are emitted, including valid zero values.
+`dev` is kernel-encoded major << 20 | minor. Compare `dev_major`/`dev_minor`
+against userspace major(st_dev)/minor(st_dev), rather than comparing encoded
+device values. A complete pair requires both components and a validated target
+kernel layout. Current fixed layouts were measured on x86_64 6.8.0-49-generic.
+
+Actor header and pathname are captured at entry; returned FD and identity at
+exit. Later proc enrichment is not an operation-time snapshot. FD close/reuse
+races and readable but incorrect kernel offsets cannot always be detected.
+See [measurement and limits](development/filesystem-observation.md).
+
+`DIAGNOSTIC/openat.collection` reports detected pre-ring-buffer loss with
+`reason_code`, `failure_count_delta`, `failure_count_total`, `scope: openat`,
+`sampling: userspace_poll`, and `run_prefix_incomplete: true`. Reasons are
+`entry_capture_failed`, `entry_save_failed`, `exit_capture_failed`, and
+`invocation_interrupted`. Counter-read failure has reason `counter_read_failed`
+and null counts, never a fabricated zero. Counts are polled once per second and
+once after kernel production stops during graceful shutdown. Their timestamps
+describe the poll, not a missing operation, and do not identify affected actors.
+
+This notification is distinct from ring-buffer drops and deserialize rejection.
+It covers openat entry metadata/scratch acquisition, entry-map insertion, exit
+metadata/assembly acquisition, and pending invocations removed at task exit.
+Path-read failure is represented on the event; unsuccessful FD-identity reads
+are represented by identity status. The counter does not certify unsupported
+paths or detect every FD-table race. A missing entry with no recorded entry
+(for example, tracing attached during an in-flight syscall) is not counted.

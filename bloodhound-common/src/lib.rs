@@ -184,6 +184,9 @@ impl EventKind {
 #[derive(Clone, Copy, Debug)]
 pub struct EventHeader {
     pub kind: u8,
+    /// Execve/Execveat only: [capture version, argv status, filename status].
+    /// Version 1 statuses: 1 complete, 2 truncated, 3 read error. Other kinds
+    /// retain zero padding; old exec producers have unknown completeness.
     pub _pad: [u8; 3],
     pub timestamp_ns: u64,
     pub auid: u32,
@@ -315,14 +318,15 @@ pub struct OpenatPayload {
     pub flags: u32,
     pub mode: u32,
     pub filename_len: u16,
-    pub _pad: [u8; 2],
+    pub capture_version: u8,
+    /// Bits 0/1: device/inode valid; 2: path complete; 3: path read failed.
+    pub capture_flags: u8,
     pub return_code: i32,
-    pub _pad2: [u8; 4],
-    /// Device of the underlying inode (kernel `s_dev`, encoded as `MKDEV(major, minor)`).
-    /// Zero when the open failed or identity resolution did not succeed.
+    pub dirfd: i32,
+    /// Device of the underlying inode (kernel `s_dev`, major << 20 | minor).
+    /// Valid only when capture_version == 1 and capture_flags bit 0 is set.
     pub dev: u64,
-    /// Inode number of the opened file. Zero when the open failed or
-    /// identity resolution did not succeed.
+    /// Inode number; valid only when version 1 and flags bit 1 is set.
     pub ino: u64,
     // Followed by: filename bytes
 }

@@ -16,8 +16,8 @@
 //! BPF helper invocation, which is much cheaper than an unrolled load loop
 //! (verifier-friendly). All offsets come from `vmlinux.rs` and are
 //! compile-time fixed to the target kernel; field reads that fail (wrong
-//! offset, NULL pointer, fd out of range) return zero rather than aborting,
-//! matching the userspace contract that "0 means unresolved".
+//! offset, NULL pointer, fd out of range) leave validity bits clear. A
+//! successful read of zero is valid; a nonzero value alone proves nothing.
 //!
 //! This module is shared by the `openat` (dev, ino) extension (issue #6)
 //! and the file-backed `mmap` rich extractor (issue #10).
@@ -28,18 +28,21 @@ use crate::vmlinux::{fdtable, file, files_struct, inode, super_block, FILES_OFFS
 
 /// `(device, inode)` pair returned by [`fd_to_dev_ino`].
 ///
-/// Both fields are zero when the fd does not resolve to a file-backed inode
-/// (closed fd, anonymous mapping, or kernel struct layout mismatch).
+/// Validity bits: 1 = device read succeeded, 2 = inode read succeeded.
+/// Partial reads retain only the valid component. Fixed-offset layout
+/// mismatches can return readable but incorrect data and must be checked
+/// against the target kernel separately.
 #[derive(Clone, Copy, Default)]
 pub struct DevIno {
     pub dev: u64,
     pub ino: u64,
+    pub valid: u8,
 }
 
 /// Resolve a process-local fd to the underlying `(dev, ino)` pair.
 ///
-/// Returns [`DevIno::default`] (both zero) on any failure: negative fd,
-/// out-of-range fd, NULL pointer in the chain, or any read failure.
+/// Returns no valid components if traversal fails before the inode; later
+/// failures can leave a partial identity. No FD reference is pinned.
 ///
 /// # Safety
 ///
@@ -101,22 +104,29 @@ pub unsafe fn fd_to_dev_ino(fd: i32) -> DevIno {
 
     // inode->i_ino
     let i_ino_p = core::ptr::addr_of!((*i).i_ino);
-    let ino = bpf_probe_read_kernel(i_ino_p).unwrap_or(0);
+    let (ino, ino_valid) = match bpf_probe_read_kernel(i_ino_p) {
+        Ok(value) => (value, 2),
+        Err(_) => (0, 0),
+    };
 
     // inode->i_sb
     let sb_p = core::ptr::addr_of!((*i).i_sb);
     let sb = match bpf_probe_read_kernel(sb_p) {
         Ok(p) if !p.is_null() => p,
-        _ => return DevIno { dev: 0, ino },
+        _ => return DevIno { dev: 0, ino, valid: ino_valid },
     };
 
     // super_block->s_dev (u32 encoded)
     let s_dev_p = core::ptr::addr_of!((*sb).s_dev);
-    let dev = bpf_probe_read_kernel(s_dev_p).unwrap_or(0);
+    let (dev, dev_valid) = match bpf_probe_read_kernel(s_dev_p) {
+        Ok(value) => (value, 1),
+        Err(_) => (0, 0),
+    };
 
     DevIno {
         dev: dev as u64,
         ino,
+        valid: ino_valid | dev_valid,
     }
 }
 

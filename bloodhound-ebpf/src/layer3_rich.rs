@@ -9,7 +9,7 @@ use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::{emit_event, bpf_memcpy, increment_drop_count};
 use crate::maps::{
-    ASSEMBLY_BUF, RICH_ENTRY_MAP, SCRATCH_BUF, SOCKET_TABLE, SYSCALL_TMP_BUF, SocketInfo,
+    OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, ASSEMBLY_BUF, RICH_ENTRY_MAP, SCRATCH_BUF, SOCKET_TABLE, SYSCALL_TMP_BUF, SocketInfo,
 };
 
 // ── Emit helpers ─────────────────────────────────────────────────────────────
@@ -72,19 +72,11 @@ unsafe fn emit_varlen<T: Sized>(header: &EventHeader, payload: &T, var_data: &[u
 
 // ── openat ───────────────────────────────────────────────────────────────────
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct OpenatEntryData {
-    flags: u32,
-    mode: u32,
-    filename_len: u16,
-}
-
 #[tracepoint]
 pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_openat(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe { crate::maps::openat_failure(0); } 0 },
     }
 }
 
@@ -95,44 +87,32 @@ unsafe fn try_sys_enter_openat(ctx: &TracePointContext) -> Result<u32, i64> {
     // sys_enter_openat: offset 16=dfd, 24=filename, 32=flags, 40=mode
     let filename_ptr: u64 = ctx.read_at(24).map_err(|_| -1i64)?;
     let flags: u32 = ctx.read_at(32).map_err(|_| -1i64)?;
-    let mode: u64 = ctx.read_at(40).unwrap_or(0);
+    let mode: u64 = ctx.read_at(40).map_err(|_| -1i64)?;
 
     let pid_tgid = bpf_get_current_pid_tgid();
     let header = get_task_info(EventKind::Openat as u8);
 
-    let filename_len = if filename_ptr != 0 {
-        let buf = match SCRATCH_BUF.get_ptr_mut(0) {
-            Some(b) => &mut (*b).buf,
-            None => return Ok(0),
-        };
-        match bpf_probe_read_user_str_bytes(filename_ptr as *const u8, buf) {
-            Ok(s) => s.len() as u16,
-            Err(_) => 0,
-        }
-    } else {
-        0
+    let entry = match OPENAT_TMP_BUF.get_ptr_mut(0) {
+        Some(p) => &mut *p,
+        None => return Err(-1),
     };
-
-    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => p,
-        None => return Ok(0),
-    };
-    let entry = unsafe { &mut *entry_ptr };
-    entry.data_len = 0;
     entry.header = header;
-    let ed = OpenatEntryData {
-        flags,
-        mode: mode as u32,
-        filename_len,
+    entry.flags = flags;
+    entry.dirfd = ctx.read_at::<i32>(16).map_err(|_| -1i64)?;
+    entry.capture_flags = 0;
+    entry.mode = mode as u32;
+    entry.filename_len = match bpf_probe_read_user_str_bytes(
+        filename_ptr as *const u8, &mut entry.filename,
+    ) {
+        Ok(s) => {
+            if s.len() < MAX_PATH_SIZE - 1 { entry.capture_flags = 4; }
+            s.len() as u16
+        }
+        Err(_) => { entry.capture_flags = 8; 0 },
     };
-    core::ptr::copy_nonoverlapping(
-        &ed as *const _ as *const u8,
-        entry.data.as_mut_ptr(),
-        core::mem::size_of::<OpenatEntryData>().min(256),
-    );
-    entry.data_len = core::mem::size_of::<OpenatEntryData>() as u16;
-
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    if OPENAT_ENTRY_MAP.insert(&pid_tgid, entry, 0).is_err() {
+        crate::maps::openat_failure(1);
+    }
     Ok(0)
 }
 
@@ -140,62 +120,42 @@ unsafe fn try_sys_enter_openat(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn sys_exit_openat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_exit_openat(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe {
+            crate::maps::openat_failure(2);
+            let _ = OPENAT_ENTRY_MAP.remove(&bpf_get_current_pid_tgid());
+        } 0 },
     }
 }
 
 unsafe fn try_sys_exit_openat(ctx: &TracePointContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
-    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) {
-        Some(e) => *e,
+    let entry = match OPENAT_ENTRY_MAP.get(&pid_tgid) {
+        Some(e) => e,
         None => return Ok(0),
     };
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let ed: OpenatEntryData =
-        core::ptr::read_unaligned(entry.data.as_ptr() as *const OpenatEntryData);
-
-    // Resolve (dev, ino) from the returned fd. Negative return ⇒ open failed,
-    // skip the traversal and emit zeros (per issue #6 acceptance criteria).
     let dev_ino = if ret >= 0 {
         fd_to_dev_ino(ret as i32)
     } else {
         crate::fd_ident::DevIno::default()
     };
-
-    let filename_len = (ed.filename_len as usize).min(MAX_PATH_SIZE - 1);
-
-    // For successful opens, resolve the returned fd to a (dev, ino) pair so
-    // downstream consumers can match on inode identity rather than path string
-    // (issue #6). Zero values indicate unresolved/failed opens.
-    let dev_ino = if ret >= 0 {
-        crate::fd_ident::fd_to_dev_ino(ret as i32)
-    } else {
-        crate::fd_ident::DevIno::default()
-    };
+    let filename_len = (entry.filename_len as usize).min(MAX_PATH_SIZE - 1);
 
     let payload = OpenatPayload {
-        flags: ed.flags,
-        mode: ed.mode,
-        filename_len: ed.filename_len,
-        _pad: [0; 2],
+        flags: entry.flags,
+        mode: entry.mode,
+        filename_len: filename_len as u16,
+        capture_version: 1,
+        capture_flags: entry.capture_flags | dev_ino.valid,
         return_code: ret as i32,
-        _pad2: [0; 4],
+        dirfd: entry.dirfd,
         dev: dev_ino.dev,
         ino: dev_ino.ino,
     };
 
-    if filename_len > 0 {
-        if let Some(scratch) = SCRATCH_BUF.get_ptr(0) {
-            let data = &(&(*scratch).buf)[..filename_len];
-            emit_varlen(&entry.header, &payload, data);
-        } else {
-            emit_fixed(&entry.header, &payload);
-        }
-    } else {
-        emit_fixed(&entry.header, &payload);
-    }
-
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    if ASSEMBLY_BUF.get_ptr_mut(0).is_none() { return Err(-1); }
+    emit_varlen(&entry.header, &payload, &entry.filename[..filename_len]);
+    let _ = OPENAT_ENTRY_MAP.remove(&pid_tgid);
     Ok(0)
 }
 

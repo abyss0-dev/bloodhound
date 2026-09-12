@@ -174,7 +174,7 @@ class TestMaxTtyDataInvariant:
     """
 
     def test_no_tty_event_exceeds_max_tty_data_minus_one(
-        self, bloodhound_events, wait_for_events
+        self, bloodhound_events, wait_for_events, ssh_config
     ):
         """No tty_write / tty_read event's decoded data exceeds 4095 bytes.
 
@@ -192,10 +192,10 @@ class TestMaxTtyDataInvariant:
         )
         import subprocess
         full_cmd = [
-            "sshpass", "-p", "testpass",
+            "sshpass", "-p", ssh_config["password"],
             "ssh", "-o", "StrictHostKeyChecking=no",
-            "-p", "2222",
-            "testuser@localhost",
+            "-p", ssh_config["port"],
+            f"{ssh_config['user']}@{ssh_config['host']}",
             f"python3 -c '{script}'",
         ]
         payload = b"INVARIANT_TEST_" + b"X" * (5000 - len(b"INVARIANT_TEST_"))

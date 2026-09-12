@@ -4,7 +4,9 @@ expression: to_json(& event)
 ---
 {
   "args": {
+    "file_identity_status": "unknown",
     "filename": "/tmp/bh-golden-openat",
+    "filename_status": "unknown",
     "flags": [
       "O_WRONLY",
       "O_CREAT",
