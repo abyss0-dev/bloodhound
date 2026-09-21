@@ -48,7 +48,29 @@ observation need. Direct Bash internal-function probes, their CLI option and
 the exec-stdio/fork-file experiments have been removed. Their wire event IDs
 225, 226 and 227 remain reserved; exec view remains kind 224.
 
-## Current producer validation (2026-09-21)
+## Integrated producer validation (2026-09-21)
+
+PR #54 now includes main commit
+`dec0724912c6bf70bf6feac3209d37ece4cb2441` (PR #55), merged without rebasing
+as `7c4864e4a073b2f3727c41e3bd701f1f9bbd2504`. The pre-existing duplicate-exit
+defect described below is resolved by that integration. The
+[process-exit contract](process-exit.md) documents atomic `BPF_NOEXIST` claims,
+group-leader free cleanup and conservative collection-health reporting.
+
+On the integrated source, `cargo test --workspace --offline --locked
+--no-fail-fast` passed 213 tests (149 daemon, 13 common, 51 TUI).
+`cargo clippy --workspace --all-targets --offline --locked` completed with
+warnings and no errors. `make build-docker` succeeded and produced
+`target/docker/bloodhound` with SHA-256
+`de0994fad72be66145628884a7ffe7695e2fd50e555a05d42d2b83c22c5652ae`.
+These checks used the merge source above; the subsequent changes are confined
+to this document (excluded from the Docker build context).
+
+Guest and CI acceptance for this integrated producer is recorded on PR #54
+against its exact head. The measurements below belong to earlier sources and
+do not establish guest or joint acceptance for the integrated source.
+
+## Prior producer validation (before PR #55 integration; 2026-09-21)
 
 `cargo test --workspace --offline --locked --no-fail-fast` passed 209 tests
 (148 daemon, 10 common, 51 TUI). `cargo clippy --workspace --all-targets --offline
@@ -61,8 +83,8 @@ with **no USDT configuration**. After the attachment readiness marker, all
 seven tests in `test_exec_view.py` and `test_exec_completeness.py` passed:
 
 - Two distinct roots/namespaces matched guest measurements and exact execveat
-  actor/timestamp pairs. The [fresh four-record excerpt](exec-view/current-invocations.ndjson)
-  comes from this producer; the historical excerpt below is separate.
+  actor/timestamp pairs. The [prior four-record excerpt](exec-view/current-invocations.ndjson)
+  comes from this pre-integration producer; the original excerpt below is separate.
 - Sixteen concurrent actors made 48 exec attempts (32 failed, 16 successful).
   Every attempt had exactly one same-actor, same-timestamp view record.
 - Ordinary, redirected and both redirected-pipeline commands launched through
@@ -75,7 +97,7 @@ records. The removed `--bash-launch` option is rejected by argument parsing.
 Consumer joint acceptance is a separate validation owned by Sanjaya; these
 producer tests do not claim fresh World observations or Evidence admission.
 
-Sanjaya subsequently recorded [fresh command-contract joint acceptance](https://github.com/abyss0-dev/sanjaya/blob/9ca47f1004e3fe4b2068099aff7c07b97ea328e5/scripts/e2e/filesystem/measured-command-evidence.json)
+Sanjaya subsequently recorded [pre-integration command-contract joint acceptance](https://github.com/abyss0-dev/sanjaya/blob/9ca47f1004e3fe4b2068099aff7c07b97ea328e5/scripts/e2e/filesystem/measured-command-evidence.json)
 using producer `319c16c04e2e1f4c54115f3074f4f38765218896` and consumer
 `c1a798eb9d5b822f18f499418423f1a8c43cacb2`. All 28 Evidence commands had exact
 exec/view/exit pairing. Coverage included 16 normal operations, four grammar
@@ -84,9 +106,12 @@ atomic withdrawal on source/mount/exit invalidation. The producer used only
 `--uid 1000`, with zero Bash UPROBE, USDT or stdio observations. This validates
 the new `FilesystemCommandEvidence` kind 4, not historical shell Evidence.
 
-### Unresolved CI gate: existing concurrent process-exit duplication
+### Historical CI gate: concurrent process-exit duplication resolved by PR #55
 
-**PR #54 is not merge-ready.** The [E2E run on producer 319c16c](https://github.com/abyss0-dev/bloodhound/actions/runs/35580486916)
+The following records the failure before PR #55; it is retained as provenance.
+The defect is now fixed on the integrated branch. Integrated guest and CI
+acceptance is recorded separately on PR #54 against its exact head. At the time, **PR #54 was not
+merge-ready**. The [E2E run on producer 319c16c](https://github.com/abyss0-dev/bloodhound/actions/runs/35580486916)
 finished with 69 passes and one failure in the multithread `os._exit(7)` case
 of `test_normal_exit_group_and_multithread_teardown_emit_once`. Its predicate
 requires exactly one exit, so timeout does not distinguish missing events
@@ -96,7 +121,7 @@ USDT checks passed. Earlier local 70-test success and joint acceptance do not
 override this failed CI gate.
 
 A separate two-vCPU QEMU/KVM guest on kernel `6.8.0-49-generic` reproduced
-duplicate exits with the current producer and the unchanged main baseline:
+duplicate exits with the then-current producer and unchanged main baseline:
 
 | Producer exact source SHA | Attempts | One exit | Two exits | Missing exits | Maximum drop count |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -116,14 +141,14 @@ For example, current PID 1081/start 94826466637 and baseline PID 2319/start
 from an isolated archive of the exact main commit; SHA-256:
 `3dcbf45d7aacd3378c5f819786b098f66c90fb5e5de4225eb6e6bea403e6ff73`.
 
-`bloodhound-ebpf/src/lifecycle.rs:113` reads shared `signal.live == 0` at
-each task's exit tracepoint; it does not elect a single emitter. In
+Before PR #55, `bloodhound-ebpf/src/lifecycle.rs:113` read shared `signal.live == 0` at
+each task's exit tracepoint; it did not elect a single emitter. In
 [Linux v6.8 do_exit](https://github.com/torvalds/linux/blob/v6.8/kernel/exit.c#L833),
 the atomic decrement precedes the per-task tracepoint. Multiple exiting
 threads can consequently observe zero. Userspace removes the actor after
 the first exit and synthesizes another start before the second. Both
-`bloodhound-ebpf/src/lifecycle.rs` and `bloodhound/src/lifecycle.rs` are
-identical to main. The repeated observations establish a pre-existing
+`bloodhound-ebpf/src/lifecycle.rs` and `bloodhound/src/lifecycle.rs` were
+identical to main at that time. The repeated observations establish a pre-existing
 lifecycle defect; they do not establish the unavailable CI PID's trace.
 
 Local raw traces were retained at `/tmp/pr54-exit-current.ndjson`
@@ -132,8 +157,9 @@ and `/tmp/pr54-exit-main1000.ndjson`
 (`ec4547bd87fff21b1293be2eee955a979935ea654cd994910b2c3b194282d7c2`),
 with the driver at `/tmp/pr54-exit-repeat.py`. These host-local files are not
 portable repository fixtures. No lifecycle redesign or test relaxation was
-included in #54, and the failed CI run was not retried. Resolving the lifecycle
-defect and obtaining a valid passing CI result remain separate gates.
+included in that #54 source, and the failed CI run was not retried at that
+stage. PR #55 subsequently resolved the lifecycle defect and is now merged
+into this branch; the failed historical CI result itself remains unchanged.
 
 ## Historical measurement
 
