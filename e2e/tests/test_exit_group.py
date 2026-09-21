@@ -1,5 +1,7 @@
 """Kernel-observed process lifecycle contract tests for issue #43."""
 
+import collections
+import json
 import signal
 
 import pytest
@@ -74,6 +76,75 @@ def test_normal_exit_group_and_multithread_teardown_emit_once(
     assert stable_ref["start_boottime_ns"] > 0
 
 
+def test_concurrent_thread_group_exit_stress_emits_once(
+    ssh_cmd, bloodhound_events, wait_for_matching_events
+):
+    # Multiple tasks can reach sched_process_exit after signal.live is already
+    # zero. One successful run cannot exclude this race: the unfixed producer
+    # emitted duplicate exits in 27 of 1,000 measured two-thread terminations.
+    child = (
+        "import os,threading,time; "
+        "threading.Thread(target=lambda: time.sleep(30),daemon=True).start(); "
+        "print(os.getpid(),flush=True); os._exit(7)"
+    )
+    driver = f'''
+import json, os, subprocess
+assert open("/proc/self/loginuid").read().strip() == "1000"
+pids = []
+for _ in range(100):
+    result = subprocess.run(["/usr/bin/python3", "-c", {child!r}],
+                            capture_output=True, text=True, check=False)
+    assert result.returncode == 7, result
+    pids.append(int(result.stdout.strip()))
+print(json.dumps({{"children": pids, "barrier": os.getpid()}}), flush=True)
+'''
+    pids = []
+    barriers = []
+    # Bound each SSH invocation; the complete regression covers 1,000 exits.
+    for _ in range(10):
+        result = ssh_cmd(python_command(driver))
+        assert result.returncode == 0, result.stderr
+        batch = json.loads(result.stdout)
+        pids.extend(batch["children"])
+        barriers.append(batch["barrier"])
+    assert len(set(pids)) == 1000, "stress fixture unexpectedly reused a PID"
+
+    # Every driver reaps its children before it exits. Waiting for all driver
+    # exits drains the preceding exit records; do not return at the first
+    # child exit, which could hide an immediately following duplicate.
+    barrier_set = set(barriers)
+    events = wait_for_matching_events(
+        bloodhound_events,
+        lambda current: barrier_set <= {
+            event["header"]["pid"] for event in current
+            if event.get("event", {}).get("name") == "process_exit"
+        },
+        "all reaping driver exits after 1,000 concurrent thread-group exits",
+    )
+    targets = set(pids)
+    by_name = collections.defaultdict(list)
+    for event in events:
+        if event.get("header", {}).get("pid") in targets:
+            by_name[event["event"]["name"]].append(event)
+    for name in ("process_start", "process_exit"):
+        counts = collections.Counter(event["header"]["pid"] for event in by_name[name])
+        assert counts == collections.Counter(pids), {
+            pid: counts[pid] for pid in pids if counts[pid] != 1
+        }
+    starts = {event["header"]["pid"]: event for event in by_name["process_start"]}
+    for event in by_name["process_exit"]:
+        assert event["args"]["exit_code"] == 7
+        assert event["header"]["auid"] == 1000
+        assert event["header"]["process_ref"] == starts[event["header"]["pid"]]["header"]["process_ref"]
+    successful_execs = collections.Counter(
+        event["header"]["pid"] for event in by_name["execve"]
+        if event.get("return_code") == 0
+    )
+    assert successful_execs == collections.Counter(pids)
+    # This barrier covers lifecycle records, not asynchronous health sampling.
+    # Collector-health counters require separate final-sample validation.
+
+
 def test_fatal_signal_emits_one_signal_exit(
     ssh_cmd, bloodhound_events, wait_for_matching_events
 ):
@@ -105,6 +176,24 @@ def test_last_worker_reports_the_group_leader_exit_status(
     assert len(exits) == 1
     assert exits[0]["args"]["exit_kind"] == "code"
     assert exits[0]["args"]["exit_code"] == 42
+
+
+def test_nonleader_exec_keeps_process_identity_and_exits_once(
+    ssh_cmd, bloodhound_events, wait_for_matching_events
+):
+    # de_thread replaces the group leader during a worker's exec. The old
+    # leader's later free must not remove the replacement process's claim.
+    script = (
+        "import os,threading,time; print(os.getpid(),flush=True); "
+        "threading.Thread(target=lambda: os.execv('/bin/true',['true'])).start(); "
+        "time.sleep(30)"
+    )
+    pid = _pid_from(ssh_cmd(python_command(script)))
+    events = _wait_for_one_exit(wait_for_matching_events, bloodhound_events, pid)
+    starts, exits = _starts(events, pid), _exits(events, pid)
+    assert len(starts) == len(exits) == 1
+    assert exits[0]["args"]["exit_code"] == 0
+    assert starts[0]["header"]["process_ref"] == exits[0]["header"]["process_ref"]
 
 
 def test_short_lived_process_has_complete_identity_and_ordering(
