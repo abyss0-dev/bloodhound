@@ -136,8 +136,6 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             crate::usdt::decode_payload(kind, payload)?
         }
         EventKind::ExecView => parse_exec_view(payload)?,
-        EventKind::ExecStdio => parse_exec_stdio(payload)?,
-        EventKind::BashLaunch => crate::bash_launch::decode_payload(payload)?,
         EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
         EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
@@ -327,62 +325,6 @@ fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String,
         "tooling".into(),
         Some(args),
         Some(execve.return_code as i64),
-    ))
-}
-
-fn parse_exec_stdio(
-    payload: &[u8],
-) -> Result<(
-    String,
-    String,
-    String,
-    Option<serde_json::Value>,
-    Option<i64>,
-)> {
-    if payload.len() != ExecStdioPayload::SIZE {
-        bail!("invalid exec stdio payload length");
-    }
-    let value = unsafe { core::ptr::read_unaligned(payload.as_ptr().cast::<ExecStdioPayload>()) };
-    let status = if value.version != 1 {
-        "unknown"
-    } else {
-        match value.status {
-            0 => "unsupported",
-            1 => "complete",
-            2 => "unavailable",
-            3 => "changed",
-            _ => bail!("invalid exec stdio status"),
-        }
-    };
-    let mut args = serde_json::json!({"stdio_capture_version":value.version,"stdio_status":status});
-    if value.version == 1 {
-        if value.status != 1 && (value.stdin_kind != 0 || value.stdout_kind != 0) {
-            bail!("partial exec stdio identity");
-        }
-        if value.status == 1 {
-            let kind = |value| -> Result<&str> {
-                Ok(match value {
-                    1 => "closed",
-                    2 => "regular",
-                    3 => "directory",
-                    4 => "character",
-                    5 => "block",
-                    6 => "fifo",
-                    7 => "socket",
-                    8 => "other",
-                    _ => bail!("invalid descriptor kind"),
-                })
-            };
-            args["stdin_kind"] = kind(value.stdin_kind)?.into();
-            args["stdout_kind"] = kind(value.stdout_kind)?.into();
-        }
-    }
-    Ok((
-        "TRACEPOINT".into(),
-        "exec_stdio".into(),
-        "behavior".into(),
-        Some(args),
-        None,
     ))
 }
 
@@ -1303,38 +1245,6 @@ mod tests {
         assert_eq!(args["root_inode"], 81);
         assert_eq!(args["mount_namespace"], 4026531840u32);
         assert_eq!(args["root_mount_id"], 27);
-    }
-
-    #[test]
-    fn exec_stdio_decodes_explicit_kinds_without_partial_fallback() {
-        let mut value = ExecStdioPayload {
-            version: 1,
-            status: 1,
-            stdin_kind: 4,
-            stdout_kind: 6,
-            _pad: [0; 4],
-        };
-        let args = parse_exec_stdio(&payload_bytes(&value)).unwrap().3.unwrap();
-        assert_eq!(args["stdio_status"], "complete");
-        assert_eq!(args["stdin_kind"], "character");
-        assert_eq!(args["stdout_kind"], "fifo");
-        for status in [0, 2, 3] {
-            value.status = status;
-            assert!(parse_exec_stdio(&payload_bytes(&value)).is_err());
-        }
-        value.stdin_kind = 0;
-        value.stdout_kind = 0;
-        let args = parse_exec_stdio(&payload_bytes(&value)).unwrap().3.unwrap();
-        assert_eq!(args["stdio_status"], "changed");
-        assert!(args.get("stdin_kind").is_none());
-        value.status = 1;
-        assert!(parse_exec_stdio(&payload_bytes(&value)).is_err());
-        value.version = 2;
-        let args = parse_exec_stdio(&payload_bytes(&value)).unwrap().3.unwrap();
-        assert_eq!(args["stdio_status"], "unknown");
-        assert!(args.get("stdin_kind").is_none());
-        assert!(parse_exec_stdio(&[0; 7]).is_err());
-        assert!(parse_exec_stdio(&[0; 9]).is_err());
     }
 
     #[test]

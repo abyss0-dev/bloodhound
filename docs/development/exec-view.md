@@ -26,6 +26,61 @@ versions decode as `unknown`, with no identity. Existing exec argument capture
 version and payload layout remain unchanged. The additional ring record uses
 the existing loss accounting; losing it cannot establish a positive view match.
 
+## Command Evidence boundary
+
+The filesystem PoC consumer correlates an individual command's complete argv,
+verified executable, immutable actor, successful exit and exec-entry view with
+fresh pre/post World observations. A command within a pipeline or redirection
+may satisfy that contract. Neither pipeline syntax absence nor standard
+descriptor kinds are admission requirements. This weak Evidence does not
+certify the whole pipeline, stdout delivery, viewing, understanding or byte
+transfer. Bloodhound supplies observations; the consumer owns admission,
+World binding and Evidence invalidation.
+
+The view wire contract remains version 1 with exactly the same meaning. It
+does not encode a command admission policy. Consumers must distinguish the
+revised command Evidence contract from earlier shell-context-gated Evidence;
+they must not silently reinterpret an old Evidence kind with weaker guarantees.
+
+This kernel collector introduces no USDT dependency. Application semantic
+probes must use the existing USDT contract and require a concrete unmet
+observation need. Direct Bash internal-function probes, their CLI option and
+the exec-stdio/fork-file experiments have been removed. Their wire event IDs
+225, 226 and 227 remain reserved; exec view remains kind 224.
+
+## Current producer validation (2026-09-21)
+
+`cargo test --workspace --offline --locked --no-fail-fast` passed 209 tests
+(148 daemon, 10 common, 51 TUI). `cargo clippy --workspace --all-targets --offline
+--locked` completed with existing warnings, and `make build-docker` produced
+the static x86-64 musl binary with SHA-256
+`1bc38f7f9989ffc93afff91b9845a091bcc87c5024f095acc3d4bafcbb54e332`.
+
+That binary ran in a dedicated QEMU/KVM overlay on kernel `6.8.0-49-generic`
+with **no USDT configuration**. After the attachment readiness marker, all
+seven tests in `test_exec_view.py` and `test_exec_completeness.py` passed:
+
+- Two distinct roots/namespaces matched guest measurements and exact execveat
+  actor/timestamp pairs. The [fresh four-record excerpt](exec-view/current-invocations.ndjson)
+  comes from this producer; the historical excerpt below is separate.
+- Sixteen concurrent actors made 48 exec attempts (32 failed, 16 successful).
+  Every attempt had exactly one same-actor, same-timestamp view record.
+- Ordinary, redirected and both redirected-pipeline commands launched through
+  `/bin/sh` exposed complete argv, matching view and successful command exit.
+  This verifies producer observations, not downstream Evidence or pipeline success.
+- The existing 20-case execve/execveat argv completeness fixture passed.
+
+The captured stream contained no USDT, Bash UPROBE, exec-stdio or fork-file
+records. The removed `--bash-launch` option is rejected by argument parsing.
+Consumer joint acceptance is a separate validation owned by Sanjaya; these
+producer tests do not claim fresh World observations or Evidence admission.
+
+## Historical measurement
+
+The following excerpt and test counts predate the scope reduction. They are
+retained only as provenance for the original view measurement, not acceptance
+evidence for the current producer. Fresh validation is recorded separately.
+
 The E2E test executes a static program using an open executable fd, first in the
 ordinary root and then after a new mount namespace and chroot. It checks root
 device/inode, namespace inode, root mount ID, and the exact exec pairing against
@@ -56,51 +111,3 @@ argv/view rerun and the full ready run passed. `systemctl is-active` alone is
 not a BPF attachment readiness signal; the guest log reported attachment about
 four seconds after service start. No capture completeness is claimed for that
 startup interval.
-
-## Exec standard descriptor kinds
-
-`TRACEPOINT/exec_stdio` independently records fd 0 and fd 1 kinds at the same
-entry timestamp and immutable actor as `exec_view` and exec. Its version-1
-payload is eight bytes. Runtime BTF resolves the task/files/fdtable/file/inode
-members; missing offsets are `unsupported`, read failures are `unavailable`,
-and changed table or descriptor pointer endpoints are `changed`. Failure
-records expose no partial descriptor kinds. Closed descriptors are explicitly
-`closed`; other categories are `regular`, `directory`, `character`, `block`,
-`fifo`, `socket`, and `other`. Unknown versions expose no kinds.
-
-The collector reads only these two descriptors and stores no FD graph or
-paths. Existing exec/view payloads are unchanged. Ring loss is accounted by
-the existing capture-health mechanism. Consumers must pair the exact actor
-and entry timestamp and must not infer non-pipe descriptors from a missing
-record. This reports attached descriptors, not original shell syntax,
-continuous stability, data flow, or delivery. In particular, shell operators
-whose connections were overridden by redirection are not reconstructed.
-
-The guest test exercises character devices, pipe input, pipe output, a Unix
-socket, closed input, and regular-file output, checking the matching successful
-exec for each actor. The [24-line excerpt](exec-view/stdio.ndjson) contains the
-original fork/view/stdio/exec records for those six invocations. The excerpt
-does not claim completeness of the entire reused guest log; one pre-existing
-non-JSON line outside the selected invocations was omitted during extraction.
-Its SHA-256 is
-`322909b4063c8e180e20443c97338a602d02bdeabc35e3ef4d3f9f4199e219bd`.
-The measured collector SHA-256 is
-`13bbff6c30118d712474d1c2a6b659eb6b4c882cc04cc36528af403b81a5f6cf`
-on the same independent kernel 6.8.0-49-generic guest.
-
-Validation for the stdio addition: 150 daemon and 10 common Rust tests passed;
-the complete independent guest suite passed all 66 tests in 402.26 seconds.
-
-
-## Superseded fork-time pipe experiment
-
-The experimental kind 226 FD-table scan has been removed. It did not establish
-pipeline absence: ordinary interactive Bash commands inherited a job-control
-synchronization pipe. Scanning every inherited descriptor was therefore not a
-suitable dependency for Sanjaya method admission. Exec-entry stdio collection
-remains; verified Bash command context is described in [bash-launch.md](bash-launch.md).
-
-`exec-view/fork-files.ndjson` preserves the historical measured records. It is
-not output from the current producer. Event kind 226 is left unused; Bash
-launch observations retain kind 227. Current fork capture emits the existing
-process lifecycle record without scanning the child FD table.

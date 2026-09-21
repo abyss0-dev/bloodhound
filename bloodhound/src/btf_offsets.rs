@@ -29,7 +29,6 @@ const SYS_BTF: &str = "/sys/kernel/btf/vmlinux";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskStructOffsets {
     pub exec_view: Option<[u32; 14]>,
-    pub exec_stdio: Option<[u32; 6]>,
     /// `task_struct::loginuid` (a `kuid_t`; its first member is the `u32`
     /// audit login UID).
     pub loginuid: u32,
@@ -164,7 +163,6 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
 
     let mut task_offsets = None;
     let mut view_offsets = [None; 14];
-    let mut stdio_offsets = [None; 6];
     let mut signal_offsets = None;
     let mut pos = type_base;
     while pos + 12 <= type_end {
@@ -178,12 +176,6 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
         if kind == BTF_KIND_STRUCT && vlen > 0 {
             let struct_name = r.str_at(str_base, name_off)?;
             let struct_size = r.u32(pos + 8)?;
-            for (i, (owner, field)) in bloodhound_common::EXEC_STDIO_FIELDS.iter().enumerate() {
-                if struct_name == *owner {
-                    stdio_offsets[i] =
-                        read_named_member(&r, str_base, members_pos, vlen, struct_size, field).ok();
-                }
-            }
             for (i, (owner, field)) in bloodhound_common::EXEC_VIEW_FIELDS.iter().enumerate() {
                 if struct_name == *owner {
                     view_offsets[i] =
@@ -228,11 +220,6 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
         .collect::<Option<Vec<_>>>()
         .and_then(|v| v.try_into().ok());
     offsets.signal_live = live;
-    offsets.exec_stdio = stdio_offsets
-        .iter()
-        .copied()
-        .collect::<Option<Vec<_>>>()
-        .and_then(|v| v.try_into().ok());
     offsets.signal_group_exit_code = group_exit_code;
     Ok(offsets)
 }
@@ -288,7 +275,6 @@ fn read_task_members(
 
     let off = TaskStructOffsets {
         exec_view: None,
-        exec_stdio: None,
         loginuid: loginuid.context("task_struct::loginuid not found in BTF")?,
         sessionid: sessionid.context("task_struct::sessionid not found in BTF")?,
         tgid: tgid.context("task_struct::tgid not found in BTF")?,
@@ -529,44 +515,6 @@ mod tests {
             } else {
                 assert_eq!(result.exec_view, None);
             }
-        }
-    }
-
-    #[test]
-    fn exec_stdio_offsets_are_optional_and_all_required_for_capture() {
-        for missing in [false, true] {
-            let mut b = BtfBuilder::new();
-            add_lifecycle_structs(
-                &mut b,
-                &[
-                    ("pid", 8),
-                    ("tgid", 12),
-                    ("group_leader", 16),
-                    ("start_boottime", 24),
-                    ("signal", 32),
-                    ("exit_code", 40),
-                    ("comm", 48),
-                    ("loginuid", 64),
-                    ("sessionid", 68),
-                    ("files", 88),
-                ],
-            );
-            b.add_struct("files_struct", &[("fdt", 16)], false);
-            b.add_struct("fdtable", &[("max_fds", 32), ("fd", 48)], false);
-            b.add_struct("file", &[("f_inode", 64)], false);
-            if !missing {
-                b.add_struct("inode", &[("i_mode", 80)], false);
-            }
-            let result = parse_task_offsets(&b.build()).unwrap();
-            assert_eq!(
-                result.exec_stdio,
-                if missing {
-                    None
-                } else {
-                    Some([88, 16, 32, 48, 64, 80])
-                }
-            );
-            assert_eq!(result.exec_view, None);
         }
     }
 

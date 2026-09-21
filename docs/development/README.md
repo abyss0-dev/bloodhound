@@ -6,3 +6,5 @@ historical engineering notes in `docs/devnotes/`.
 
 - [Trusted USDT collectors](usdt-collectors.md): architecture, trust boundary,
   code ownership, and the contribution path for a collector.
+- [Exec-entry filesystem view](exec-view.md): runtime BTF acquisition,
+  invocation pairing, incomplete capture and validation boundaries.

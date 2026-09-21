@@ -15,7 +15,6 @@ pub fn load_and_attach(
     args: &Cli,
     usdt_selections: &[usdt::Selection],
 ) -> Result<(aya::Ebpf, Vec<BehaviorEvent>, usdt::AttachmentLinks)> {
-    let bash_image = args.bash_launch.as_deref().map(crate::bash_launch::verify_image).transpose()?;
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
@@ -25,13 +24,9 @@ pub fn load_and_attach(
     // Load BPF programs with global variables set BEFORE loading
     let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
     let view_supported = u32::from(offsets.exec_view.is_some());
-    let stdio_offsets = offsets.exec_stdio.unwrap_or([0; 6]);
-    let stdio_supported = u32::from(offsets.exec_stdio.is_some());
     let mut bpf = EbpfLoader::new()
         .set_global("OFF_EXEC_VIEW", &view_offsets, true)
         .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
-        .set_global("OFF_EXEC_STDIO", &stdio_offsets, true)
-        .set_global("EXEC_STDIO_SUPPORTED", &stdio_supported, true)
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
         .set_global("OFF_LOGINUID", &offsets.loginuid, true)
@@ -245,7 +240,6 @@ pub fn load_and_attach(
         }
     }
 
-    if let Some(image) = bash_image.as_ref() { crate::bash_launch::attach(&mut bpf, image)?; }
     let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections
         .iter()
