@@ -7,6 +7,12 @@ Bloodhound behavior event. It is a compiled feature, not a general-purpose
 runtime plugin: configuration may select a collector, but it may not define a
 target, probe, argument layout, memory read, or output mapping.
 
+USDT is the only supported application semantic-probe contract. Direct probes
+on application-internal functions are not permitted, even with a pinned image
+digest and compiled offsets. Kernel observation does not imply a dependency on
+USDT: introduce a semantic probe only for a concrete observation requirement
+that the existing observations cannot satisfy.
+
 This boundary exists because USDT metadata describes how to read a process at
 a probe site. Accepting that metadata from a guest configuration would allow
 untrusted input to control privileged tracing behavior. Bloodhound instead

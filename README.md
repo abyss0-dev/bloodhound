@@ -42,6 +42,9 @@ graph TD
 
 - **Layer 1 — TTY capture**: kprobe hooks on `pty_write` / `n_tty_read` for raw terminal I/O
 - **Layer 2 — Process tracking**: `execve` / `execveat` tracepoints with full argv capture
+- **Exec filesystem view**: root device/inode, mount namespace and root mount ID
+  captured at exec entry, with explicit acquisition status and exact actor/time
+  pairing ([contract](docs/development/exec-view.md))
 - **Layer 3 — Syscall tracing**: raw syscall stream + rich extraction for 30+ syscalls (file, network, process, directory operations)
 - **Signal observation**: non-enforcing `signal_generate` raw tracepoint with immutable sender and target identities
 - **Packet capture**: TC (Traffic Control) hooks on all network interfaces, ingress and egress
@@ -67,6 +70,13 @@ graph TD
 
 BPF LSM is optional and belongs to the separate tamper-resistance boundary.
 The `signal_generate` collector neither enables nor depends on LSM.
+
+Application semantic probes use the [trusted USDT contract](docs/usdt-collectors.md).
+Probing arbitrary application-internal functions or fixed binary offsets is not
+supported. Exec filesystem view capture is a kernel observation and needs no
+USDT collector. Filesystem command correlation belongs to the consumer; it does
+not require proof that shell pipeline syntax was absent or classify commands
+by their standard descriptor kinds.
 
 ## Quick Start
 

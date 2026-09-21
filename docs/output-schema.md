@@ -256,3 +256,18 @@ Path-read failure is represented on the event; unsuccessful FD-identity reads
 are represented by identity status. The counter does not certify unsupported
 paths or detect every FD-table race. A missing entry with no recorded entry
 (for example, tracing attached during an in-flight syscall) is not counted.
+
+### Exec-entry filesystem view
+
+`TRACEPOINT/exec_view` carries `view_capture_version` and `view_status`.
+Version 1 complete capture exposes `root_inode`, kernel-encoded `root_dev`,
+normalized `root_dev_major` / `root_dev_minor`, `mount_namespace` and
+`root_mount_id`. Unsupported, unavailable, changed and unknown captures expose
+no identity. Pair only with exec's exact immutable `process_ref` and entry
+`timestamp`; a view record alone proves neither a successful exec nor exit.
+See the [capture contract](development/exec-view.md) for acquisition and limits.
+
+Wire event kinds 225, 226 and 227 are reserved for removed experiments and must
+not be reused. The current producer emits no exec-stdio, fork-file or Bash
+internal-function records. Application semantic probes remain `USDT` events
+under the existing trusted collector contract.

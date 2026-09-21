@@ -22,7 +22,11 @@ pub fn load_and_attach(
     let offsets = btf_offsets::resolve()?;
 
     // Load BPF programs with global variables set BEFORE loading
+    let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
+    let view_supported = u32::from(offsets.exec_view.is_some());
     let mut bpf = EbpfLoader::new()
+        .set_global("OFF_EXEC_VIEW", &view_offsets, true)
+        .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
         .set_global("OFF_LOGINUID", &offsets.loginuid, true)
