@@ -67,8 +67,20 @@ These checks used the merge source above; the subsequent changes are confined
 to this document (excluded from the Docker build context).
 
 Guest and CI acceptance for this integrated producer is recorded on PR #54
-against its exact head. The measurements below belong to earlier sources and
-do not establish guest or joint acceptance for the integrated source.
+against its exact head. In a fresh two-vCPU, 2-GiB QEMU/KVM guest on kernel
+`6.8.0-49-generic`, this binary passed all 18 focused tests in 77.04 seconds:
+six exec-view tests, the exec completeness test, and 11 lifecycle tests including
+1,000 concurrent thread-group terminations. The collector used only `--uid 1000`,
+without any USDT configuration. Direct kernel-map inspection after the tests
+found zero retained exit claims, zero lifecycle failures on either CPU, and zero
+ring drops. The code-7 fixtures produced 1,001 distinct actors (the normal case
+plus the stress batch), each with exactly one start and one exit.
+
+The [integrated four-record excerpt](exec-view/integrated-invocations.ndjson)
+contains same-actor, same-timestamp view/execveat pairs for both measured roots
+and namespaces. It is distinct from the earlier excerpts below. These producer
+checks do not rerun Sanjaya's joint Evidence admission; the measurements below
+retain their original source provenance.
 
 ## Prior producer validation (before PR #55 integration; 2026-09-21)
 
