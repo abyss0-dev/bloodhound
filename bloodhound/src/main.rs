@@ -94,7 +94,17 @@ async fn main() -> Result<()> {
     let capture_map: PerCpuArray<_, u64> = PerCpuArray::try_from(capture_map)?;
     let (capture_shutdown_tx, capture_shutdown_rx) = tokio::sync::oneshot::channel();
     let capture_handle = tokio::spawn(capture_health::monitor(
+        "openat", capture_health::OPENAT_REASONS,
         capture_map, sequence_tx.clone(), capture_shutdown_rx,
+    ));
+
+    let exit_map = bpf.take_map("EXIT_FAILURES")
+        .context("EXIT_FAILURES map not found in BPF object")?;
+    let exit_map: PerCpuArray<_, u64> = PerCpuArray::try_from(exit_map)?;
+    let (exit_shutdown_tx, exit_shutdown_rx) = tokio::sync::oneshot::channel();
+    let exit_health_handle = tokio::spawn(capture_health::monitor(
+        "process_exit", bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
+        exit_map, sequence_tx.clone(), exit_shutdown_rx,
     ));
 
     // Set up ring buffer consumer
@@ -175,10 +185,15 @@ async fn main() -> Result<()> {
     // Stop kernel production first, then ask the ring-buffer consumer to
     // perform one final drain into the same sequencer. The heartbeat sender
     // is removed so channel closure proves that every admitted item drained.
+    // Exit claims are session-local and never pinned/reused. Either detach
+    // order is safe: removing cleanup first retains claims (no re-emission),
+    // removing exit first stops new claims. The whole object is then destroyed.
+    // Health map FDs remain owned by the monitors for their final sample.
     drop(bpf);
     drop(usdt_links);
     heartbeat_handle.abort();
     let _ = capture_shutdown_tx.send(());
+    let _ = exit_shutdown_tx.send(());
     let _ = consumer_shutdown_tx.send(());
 
     let deadline = tokio::time::Instant::now() + drain_timeout;
@@ -203,6 +218,7 @@ async fn main() -> Result<()> {
     }
 
     capture_handle.await.context("openat collection monitor panicked")?;
+    exit_health_handle.await.context("process exit collection monitor panicked")?;
     sequencer.flush()?;
     eprintln!("Shutdown complete");
     Ok(())
