@@ -57,6 +57,8 @@ pub fn load_and_attach(
     // first so startup cannot enqueue clone/exec observations before the
     // corresponding process_fork edge is observable.
     info!("Attaching kernel process lifecycle hooks...");
+    // Cleanup must be installed before any exit claim can be created.
+    attach_raw_tracepoint(&mut bpf, "sched_process_free", "sched_process_free")?;
     attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
     attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
 
