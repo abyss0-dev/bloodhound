@@ -1,5 +1,7 @@
 #![no_std]
 
+pub mod exit_claim;
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const MAX_ARGV_SIZE: usize = 4096;

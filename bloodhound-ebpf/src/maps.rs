@@ -148,3 +148,17 @@ pub struct DaemonPath {
 
 #[map]
 pub static DAEMON_PATH: Array<DaemonPath> = Array::with_max_entries(1, 0);
+
+// Shared, non-LRU: eviction would let a second exiting thread claim again.
+#[map]
+pub static EXIT_CLAIMS: HashMap<exit_claim::ExitClaimKey, u8> =
+    HashMap::with_max_entries(exit_claim::EXIT_CLAIM_CAPACITY, 0);
+
+#[map]
+pub static EXIT_FAILURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+
+pub unsafe fn exit_failure(reason: u32) {
+    if let Some(counter) = EXIT_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
