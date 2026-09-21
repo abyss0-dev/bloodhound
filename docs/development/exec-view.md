@@ -75,6 +75,66 @@ records. The removed `--bash-launch` option is rejected by argument parsing.
 Consumer joint acceptance is a separate validation owned by Sanjaya; these
 producer tests do not claim fresh World observations or Evidence admission.
 
+Sanjaya subsequently recorded [fresh command-contract joint acceptance](https://github.com/abyss0-dev/sanjaya/blob/9ca47f1004e3fe4b2068099aff7c07b97ea328e5/scripts/e2e/filesystem/measured-command-evidence.json)
+using producer `319c16c04e2e1f4c54115f3074f4f38765218896` and consumer
+`c1a798eb9d5b822f18f499418423f1a8c43cacb2`. All 28 Evidence commands had exact
+exec/view/exit pairing. Coverage included 16 normal operations, four grammar
+negatives with positive barriers, four pipeline/redirection positives and
+atomic withdrawal on source/mount/exit invalidation. The producer used only
+`--uid 1000`, with zero Bash UPROBE, USDT or stdio observations. This validates
+the new `FilesystemCommandEvidence` kind 4, not historical shell Evidence.
+
+### Unresolved CI gate: existing concurrent process-exit duplication
+
+**PR #54 is not merge-ready.** The [E2E run on producer 319c16c](https://github.com/abyss0-dev/bloodhound/actions/runs/35580486916)
+finished with 69 passes and one failure in the multithread `os._exit(7)` case
+of `test_normal_exit_group_and_multithread_teardown_emit_once`. Its predicate
+requires exactly one exit, so timeout does not distinguish missing events
+from duplicates. The failure log does not preserve PID 757's full trace;
+the precise cause of that individual CI failure remains unproven. Build and
+USDT checks passed. Earlier local 70-test success and joint acceptance do not
+override this failed CI gate.
+
+A separate two-vCPU QEMU/KVM guest on kernel `6.8.0-49-generic` reproduced
+duplicate exits with the current producer and the unchanged main baseline:
+
+| Producer exact source SHA | Attempts | One exit | Two exits | Missing exits | Maximum drop count |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `319c16c04e2e1f4c54115f3074f4f38765218896` | 200 | 195 | 5 | 0 | 0 |
+| main `7a6c54f699f50e2db9e865e501275417f008f281`, first batch | 200 | 200 | 0 | 0 | 0 |
+| same main, additional bounded batch | 1,000 | 973 | 27 | 0 | 0 |
+
+The driver connected through SSH as `testuser`; `/proc/self/loginuid` and
+all target events' AUID were 1000. Each attempt launched Python with
+`import os,threading,time; threading.Thread(target=lambda: time.sleep(30),daemon=True).start(); print(os.getpid(),flush=True); os._exit(7)`.
+Every target had a captured process start and exactly one successful exec
+(PATH search also generated three failed exec attempts). All current-producer
+exec attempts had view records. Duplicate exits shared the exact same TGID
+and start-boottime identity, and also caused a second synthetic process start.
+For example, current PID 1081/start 94826466637 and baseline PID 2319/start
+359130732916 each emitted two code-7 exits. The baseline binary was built
+from an isolated archive of the exact main commit; SHA-256:
+`3dcbf45d7aacd3378c5f819786b098f66c90fb5e5de4225eb6e6bea403e6ff73`.
+
+`bloodhound-ebpf/src/lifecycle.rs:113` reads shared `signal.live == 0` at
+each task's exit tracepoint; it does not elect a single emitter. In
+[Linux v6.8 do_exit](https://github.com/torvalds/linux/blob/v6.8/kernel/exit.c#L833),
+the atomic decrement precedes the per-task tracepoint. Multiple exiting
+threads can consequently observe zero. Userspace removes the actor after
+the first exit and synthesizes another start before the second. Both
+`bloodhound-ebpf/src/lifecycle.rs` and `bloodhound/src/lifecycle.rs` are
+identical to main. The repeated observations establish a pre-existing
+lifecycle defect; they do not establish the unavailable CI PID's trace.
+
+Local raw traces were retained at `/tmp/pr54-exit-current.ndjson`
+(SHA-256 `1284e77035c05cebb98ef862911c5dcd076d22b4bc4a847d755b0e9fa25c1e74`)
+and `/tmp/pr54-exit-main1000.ndjson`
+(`ec4547bd87fff21b1293be2eee955a979935ea654cd994910b2c3b194282d7c2`),
+with the driver at `/tmp/pr54-exit-repeat.py`. These host-local files are not
+portable repository fixtures. No lifecycle redesign or test relaxation was
+included in #54, and the failed CI run was not retried. Resolving the lifecycle
+defect and obtaining a valid passing CI result remain separate gates.
+
 ## Historical measurement
 
 The following excerpt and test counts predate the scope reduction. They are
