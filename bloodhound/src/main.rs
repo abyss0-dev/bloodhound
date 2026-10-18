@@ -94,8 +94,17 @@ async fn main() -> Result<()> {
     let capture_map: PerCpuArray<_, u64> = PerCpuArray::try_from(capture_map)?;
     let (capture_shutdown_tx, capture_shutdown_rx) = tokio::sync::oneshot::channel();
     let capture_handle = tokio::spawn(capture_health::monitor(
-        "openat", capture_health::OPENAT_REASONS,
+        "openat", &capture_health::OPENAT_REASONS,
         capture_map, sequence_tx.clone(), capture_shutdown_rx,
+    ));
+
+    let exec_map = bpf.take_map("EXEC_FAILURES")
+        .context("EXEC_FAILURES map not found in BPF object")?;
+    let exec_map: PerCpuArray<_, u64> = PerCpuArray::try_from(exec_map)?;
+    let (exec_shutdown_tx, exec_shutdown_rx) = tokio::sync::oneshot::channel();
+    let exec_health_handle = tokio::spawn(capture_health::monitor(
+        "exec", &bloodhound_common::EXEC_FAILURE_REASONS,
+        exec_map, sequence_tx.clone(), exec_shutdown_rx,
     ));
 
     let exit_map = bpf.take_map("EXIT_FAILURES")
@@ -103,7 +112,7 @@ async fn main() -> Result<()> {
     let exit_map: PerCpuArray<_, u64> = PerCpuArray::try_from(exit_map)?;
     let (exit_shutdown_tx, exit_shutdown_rx) = tokio::sync::oneshot::channel();
     let exit_health_handle = tokio::spawn(capture_health::monitor(
-        "process_exit", bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
+        "process_exit", &bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
         exit_map, sequence_tx.clone(), exit_shutdown_rx,
     ));
 
@@ -193,6 +202,7 @@ async fn main() -> Result<()> {
     drop(usdt_links);
     heartbeat_handle.abort();
     let _ = capture_shutdown_tx.send(());
+    let _ = exec_shutdown_tx.send(());
     let _ = exit_shutdown_tx.send(());
     let _ = consumer_shutdown_tx.send(());
 
@@ -218,6 +228,7 @@ async fn main() -> Result<()> {
     }
 
     capture_handle.await.context("openat collection monitor panicked")?;
+    exec_health_handle.await.context("exec collection monitor panicked")?;
     exit_health_handle.await.context("process exit collection monitor panicked")?;
     sequencer.flush()?;
     eprintln!("Shutdown complete");

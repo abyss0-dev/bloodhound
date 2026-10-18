@@ -14,6 +14,21 @@ pub const MAX_ARGV_COUNT: usize = 128;
 pub const SYSCALL_ENTRY_MAP_SIZE: u32 = 10240;
 pub const SOCKET_TABLE_SIZE: u32 = 4096;
 
+/// Exec collection loss reasons. Indices into the BPF `EXEC_FAILURES`
+/// counters; names are the `reason_code` of `DIAGNOSTIC/exec.collection`.
+pub const EXEC_ENTRY_CAPTURE_FAILED: u32 = 0;
+pub const EXEC_ENTRY_SAVE_FAILED: u32 = 1;
+pub const EXEC_EXIT_CAPTURE_FAILED: u32 = 2;
+pub const EXEC_INVOCATION_INTERRUPTED: u32 = 3;
+pub const EXEC_ENTRY_CLEANUP_FAILED: u32 = 4;
+pub const EXEC_FAILURE_REASONS: [&str; 5] = [
+    "entry_capture_failed",
+    "entry_save_failed",
+    "exit_capture_failed",
+    "invocation_interrupted",
+    "entry_cleanup_failed",
+];
+
 // ── EventKind ────────────────────────────────────────────────────────────────
 
 #[repr(u8)]

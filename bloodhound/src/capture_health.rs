@@ -34,11 +34,11 @@ fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>)
 }
 
 pub async fn monitor(
-    scope: &'static str, reasons: [&'static str; 4],
+    scope: &'static str, reasons: &'static [&'static str],
     map: PerCpuArray<MapData, u64>, tx: mpsc::Sender<SequencedInput>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
-    let mut previous = [0u64; 4];
+    let mut previous = vec![0u64; reasons.len()];
     let mut ticker = tokio::time::interval(Duration::from_secs(1));
     loop {
         let final_sample = tokio::select! {
@@ -67,6 +67,18 @@ pub async fn monitor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn exec_collection_loss_reports_an_incomplete_prefix() {
+        for reason in bloodhound_common::EXEC_FAILURE_REASONS {
+            let event = diagnostic("exec", reason, Some(2), Some(4));
+            assert_eq!(event.event.name, "exec.collection");
+            let args = event.args.unwrap();
+            assert_eq!(args["scope"], "exec");
+            assert_eq!(args["reason_code"], reason);
+            assert_eq!(args["run_prefix_incomplete"], true);
+        }
+    }
 
     #[test]
     fn exit_claim_and_cleanup_failures_are_not_reported_as_ring_loss() {

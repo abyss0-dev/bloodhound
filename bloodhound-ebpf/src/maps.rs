@@ -20,7 +20,8 @@ pub static DROP_COUNT: PerCpuArray<u64> = PerCpuArray::with_max_entries(1, 0);
 
 // ── Syscall Entry Maps (enter/exit correlation) ──────────────────────────────
 
-/// Keyed by pid_tgid (u64). Stores execve entry data for sys_exit correlation.
+/// Keyed by task_struct address, which survives the de_thread() PID exchange
+/// of a non-leader exec. Stores execve entry data for sys_exit correlation.
 #[map]
 pub static EXECVE_ENTRY_MAP: HashMap<u64, ExecveEntry> =
     HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
@@ -64,6 +65,19 @@ pub static OPENAT_FAILURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 
 #[inline(always)]
 pub unsafe fn openat_failure(reason: u32) {
     if let Some(counter) = OPENAT_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
+
+/// Detected exec loss before ring-buffer emission, indexed by the
+/// `EXEC_*` reason constants in bloodhound-common.
+#[map]
+pub static EXEC_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(EXEC_FAILURE_REASONS.len() as u32, 0);
+
+#[inline(always)]
+pub unsafe fn exec_failure(reason: u32) {
+    if let Some(counter) = EXEC_FAILURES.get_ptr_mut(reason) {
         *counter = (*counter).wrapping_add(1);
     }
 }
