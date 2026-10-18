@@ -2,10 +2,10 @@ use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task,
     bpf_ktime_get_ns, bpf_probe_read_kernel,
 };
-use bloodhound_common::{EventHeader, COMM_SIZE};
+use bloodhound_common::{EventHeader, NsSnapshot, COMM_SIZE};
 
 use crate::{
-    DAEMON_PID, OFF_COMM, OFF_GROUP_LEADER, OFF_LOGINUID, OFF_SESSIONID,
+    DAEMON_PID, OFF_COMM, OFF_GROUP_LEADER, OFF_LOGINUID, OFF_PID, OFF_SESSIONID,
     OFF_START_BOOTTIME, OFF_TGID, TARGET_AUID,
 };
 
@@ -58,6 +58,15 @@ unsafe fn task_sessionid(task: *const u8) -> u32 {
     }
     let off = core::ptr::read_volatile(&raw const OFF_SESSIONID) as usize;
     bpf_probe_read_kernel((task as usize + off) as *const u32).unwrap_or(u32::MAX)
+}
+
+#[inline(always)]
+unsafe fn task_tid(task: *const u8) -> u32 {
+    if task.is_null() {
+        return 0;
+    }
+    let off = core::ptr::read_volatile(&raw const OFF_PID) as usize;
+    bpf_probe_read_kernel((task as usize + off) as *const u32).unwrap_or(0)
 }
 
 #[inline(always)]
@@ -117,39 +126,41 @@ pub unsafe fn should_trace() -> bool {
 /// Populate an EventHeader with current task info.
 #[inline(always)]
 pub unsafe fn get_task_info(kind: u8) -> EventHeader {
-    let timestamp_ns = bpf_ktime_get_ns();
-    let auid = get_current_auid();
-    let sessionid = get_current_sessionid();
+    let mut header: EventHeader = core::mem::zeroed();
+    fill_task_info(kind, &mut header);
+    header
+}
+
+/// Write current task info into `header` in place. Callers near the 512-byte
+/// combined stack limit pass map memory, so the header never sits on their
+/// stack frame.
+#[inline(always)]
+pub unsafe fn fill_task_info(kind: u8, header: &mut EventHeader) {
+    header.kind = kind;
+    header._pad = [0; 3];
+    header.timestamp_ns = bpf_ktime_get_ns();
+    header.auid = get_current_auid();
+    header.sessionid = get_current_sessionid();
     let pid_tgid = bpf_get_current_pid_tgid();
-    let tgid = (pid_tgid >> 32) as u32;
-    let process_start_boottime_ns = process_ref_from_task(bpf_get_current_task() as *const u8)
+    header.pid = (pid_tgid >> 32) as u32;
+    // ppid is populated in userspace from /proc
+    header.ppid = 0;
+    header.process_start_boottime_ns = process_ref_from_task(bpf_get_current_task() as *const u8)
         .map(|process_ref| process_ref.start_boottime_ns)
         .unwrap_or(0);
-
-    let comm = match bpf_get_current_comm() {
+    header.comm = match bpf_get_current_comm() {
         Ok(c) => c,
         Err(_) => [0u8; COMM_SIZE],
     };
-
-    // ppid is populated in userspace from /proc
-    EventHeader {
-        kind,
-        _pad: [0; 3],
-        timestamp_ns,
-        auid,
-        sessionid,
-        pid: tgid,
-        ppid: 0,
-        process_start_boottime_ns,
-        comm,
-    }
+    header.tid = pid_tgid as u32;
+    crate::ns::snapshot(bpf_get_current_task() as usize, &mut header.ns);
 }
 
 /// Populate an event header from a task supplied by a kernel hook.
 #[inline(always)]
 pub unsafe fn get_task_info_from_task(kind: u8, task: *const u8) -> EventHeader {
     let process_ref = process_ref_from_task(task);
-    EventHeader {
+    let mut header = EventHeader {
         kind,
         _pad: [0; 3],
         timestamp_ns: bpf_ktime_get_ns(),
@@ -161,5 +172,11 @@ pub unsafe fn get_task_info_from_task(kind: u8, task: *const u8) -> EventHeader 
             .map(|value| value.start_boottime_ns)
             .unwrap_or(0),
         comm: task_comm(task),
+        tid: task_tid(task),
+        ns: NsSnapshot::default(),
+    };
+    if !task.is_null() {
+        crate::ns::snapshot(task as usize, &mut header.ns);
     }
+    header
 }

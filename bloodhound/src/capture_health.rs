@@ -17,7 +17,7 @@ fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>)
     BehaviorEvent {
         header: EventHeaderJson {
             timestamp: monotonic_now_ns(), auid: 0, sessionid: 0, pid: 0,
-            ppid: None, comm: String::new(), process_ref: None,
+            ppid: None, comm: String::new(), process_ref: None, tid: None, ns: None,
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(), name: format!("{scope}.collection"),

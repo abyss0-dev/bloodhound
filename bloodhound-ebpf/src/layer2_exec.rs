@@ -5,7 +5,7 @@ use aya_ebpf::{
 };
 use bloodhound_common::*;
 
-use crate::filter::{get_task_info, should_trace};
+use crate::filter::{fill_task_info, should_trace};
 use crate::helpers::emit_event;
 use crate::maps::{ASSEMBLY_BUF, EXECVE_ENTRY_MAP, EXECVE_TMP_BUF, SCRATCH_BUF};
 
@@ -158,9 +158,6 @@ unsafe fn copy_checked(dst: *mut u8, src: *const u8, len: u32) -> bool {
 }
 
 unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Result<u32, i64> {
-    let header = get_task_info(kind as u8);
-    let (filename_len, filename_status) = read_filename(filename_ptr as *const u8);
-    let (argv_len, argv_status) = read_argv(argv_ptr as *const *const u8);
     let entry = match EXECVE_TMP_BUF.get_ptr_mut(0) {
         Some(p) => &mut *p,
         None => {
@@ -168,7 +165,11 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
             return Ok(0);
         }
     };
-    entry.header = header;
+    // This frame is close to the combined stack limit; build the header in
+    // the per-CPU entry buffer instead of on the stack.
+    fill_task_info(kind as u8, &mut entry.header);
+    let (filename_len, filename_status) = read_filename(filename_ptr as *const u8);
+    let (argv_len, argv_status) = read_argv(argv_ptr as *const *const u8);
     entry.header._pad = [1, argv_status, filename_status];
     entry.filename_len = filename_len;
     entry.argv_len = argv_len;

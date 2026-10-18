@@ -113,6 +113,8 @@ fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -> Be
             ppid: None,
             comm: String::new(),
             process_ref: None,
+            tid: None,
+            ns: None,
         },
         event: EventTypeJson {
             event_type: "HEARTBEAT".into(),

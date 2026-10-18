@@ -3,6 +3,10 @@
 The output schema is defined in `schema.json`. All events emitted by
 Bloodhound conform to this structure.
 
+`schema.json` is a byte-for-byte copy of the workspace-canonical
+`docs/spec/behavior_event/behavior_event.schema.json`, pinned at workspace
+commit `6337baa4be3b5eabc0c9ee64a1c1d75939c31625`.
+
 
 ## Structure Overview
 
@@ -14,12 +18,15 @@ BehaviorEvent
 |   +-- auid         : u32    (audit login UID)
 |   +-- sessionid    : u32    (audit session ID)
 |   +-- pid          : u32
+|   +-- tid          : u32    (kernel-captured task events only)
 |   +-- ppid         : u32    (optional in schema, but always populated)
 |   +-- comm         : string (max 16 bytes)
 |   +-- process_ref  : { tgid, start_boottime_ns } (process events only)
+|   +-- ns           : { mnt, net, uts, ipc, cgroup, user, pid } (present exactly with tid)
+|       +-- <slot>   : { status: complete|unsupported|unavailable, inode: u32 | null }
 |
 +-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
+|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, META, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
 |   +-- name         : string (hook point name, e.g. "openat", "tty_read")
 |   +-- layer        : enum [intent, tooling, behavior]
 |
@@ -88,6 +95,51 @@ comparable across boots, and does not define total kernel causal order.
 NDJSON line position is the canonical Bloodhound emission order. Each producer
 retains FIFO order; cross-producer order is successful admission to the bounded
 sequencer rather than timestamp sorting.
+
+### header.tid and header.ns
+
+Every kernel-captured record with a task context carries `tid` and the
+namespace snapshot `ns` of that task (workspace tracer contract §2.8.1). The
+snapshot is read inside the hook, at the same moment as `header.timestamp`.
+Syscall records whose header is taken at entry and emitted at exit, such as
+`execve`, therefore report the entry moment. A kernel-observed
+`process_start` describes the child, so its `tid` and `ns` are the child's.
+
+| Slot | Kernel source |
+|------|---------------|
+| `mnt`, `net`, `uts`, `ipc`, `cgroup` | `task->nsproxy-><type>_ns->ns.inum` |
+| `user` | `task->real_cred->user_ns->ns.inum` (as `/proc/<tid>/ns/user`) |
+| `pid` | `task->thread_pid->numbers[level].ns->ns.inum`, the task's own active PID namespace |
+
+Each `inode` is the nsfs inode number. Together with `nsfs_dev` from
+`META bloodhound_ready` it equals what `stat` on `/proc/<tid>/ns/<slot>`
+reports. A slot is `unsupported` when the running kernel's BTF lacks a member
+on its read path, and `unavailable` when a read fails or the task no longer
+holds its namespaces (for example during exit). Slots are independent.
+
+Records without a task context omit both fields: userspace-synthesised
+records (including bootstrap `process_start`), `HEARTBEAT`, `DIAGNOSTIC`,
+`META` and `PACKET`. Bloodhound never fills them in from `/proc`. The snapshot
+states which namespaces the task belonged to, not which namespace an
+operation acted on.
+
+### event.type META
+
+`event.name = "bloodhound_ready"` is emitted once per run after every probe is
+attached. It is admitted before the ring-buffer consumer starts, so it is the
+first record of a successful run, ahead of every kernel-captured record. The
+header is not attributable to a process (sentinel zeroes, empty `comm`).
+`args` carries:
+
+- `probes_attached` — successful program attachments: tracepoints, kprobes,
+  LSM hooks, each TC interface attachment and each USDT location
+- `ring_buffer_size` — capacity of the kernel ring buffer in bytes, as created
+- `nsfs_dev` — device number of nsfs. At startup Bloodhound opens
+  `/proc/self/ns/net`, verifies with `fstatfs` that it lives on nsfs, and
+  reports its `st_dev`. `null` when the check fails; header inodes are then
+  comparable only within this run.
+
+`bloodhound_shutdown`, `session_start` and `session_end` are not emitted yet.
 
 ### event.type PACKET
 

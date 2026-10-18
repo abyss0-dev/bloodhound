@@ -40,6 +40,54 @@ pub struct EventHeaderJson {
     pub comm: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_ref: Option<ProcessRefJson>,
+    /// Present exactly on kernel-captured records with a task context,
+    /// together with `ns` (tracer contract §2.8.1).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ns: Option<NamespaceSnapshotJson>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct NamespaceSlotJson {
+    pub status: &'static str,
+    pub inode: Option<u32>,
+}
+
+impl NamespaceSlotJson {
+    pub fn new(status: u8, inum: u32) -> Self {
+        match status {
+            NS_STATUS_COMPLETE if inum != 0 => Self { status: "complete", inode: Some(inum) },
+            NS_STATUS_UNSUPPORTED => Self { status: "unsupported", inode: None },
+            _ => Self { status: "unavailable", inode: None },
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+pub struct NamespaceSnapshotJson {
+    pub mnt: NamespaceSlotJson,
+    pub net: NamespaceSlotJson,
+    pub uts: NamespaceSlotJson,
+    pub ipc: NamespaceSlotJson,
+    pub cgroup: NamespaceSlotJson,
+    pub user: NamespaceSlotJson,
+    pub pid: NamespaceSlotJson,
+}
+
+impl From<&NsSnapshot> for NamespaceSnapshotJson {
+    fn from(snapshot: &NsSnapshot) -> Self {
+        let slot = |i: usize| NamespaceSlotJson::new(snapshot.status[i], snapshot.inum[i]);
+        Self {
+            mnt: slot(0),
+            net: slot(1),
+            uts: slot(2),
+            ipc: slot(3),
+            cgroup: slot(4),
+            user: slot(5),
+            pid: slot(6),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, Hash)]
@@ -122,6 +170,8 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             tgid: header.pid,
             start_boottime_ns: header.process_start_boottime_ns,
         }),
+        tid: (header.tid != 0).then_some(header.tid),
+        ns: (header.tid != 0).then(|| NamespaceSnapshotJson::from(&header.ns)),
     };
 
     let (event_type, name, layer, mut args, return_code) = match kind {
@@ -247,6 +297,8 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
             ppid: None,
             comm: String::new(),
             process_ref: None,
+            tid: None,
+            ns: None,
         },
         event: EventTypeJson {
             event_type: "PACKET".to_string(),
@@ -1186,7 +1238,54 @@ mod tests {
             ppid: 1,
             process_start_boottime_ns: 99,
             comm,
+            tid: 1235,
+            ns: NsSnapshot {
+                inum: [4026531841, 4026531840, 4026531838, 4026531839, 4026531835, 4026531837, 0],
+                status: [
+                    NS_STATUS_COMPLETE, NS_STATUS_COMPLETE, NS_STATUS_COMPLETE, NS_STATUS_COMPLETE,
+                    NS_STATUS_UNSUPPORTED, NS_STATUS_COMPLETE, NS_STATUS_UNAVAILABLE,
+                ],
+                _pad: 0,
+            },
         }
+    }
+
+    #[test]
+    fn task_header_reports_tid_and_namespace_snapshot() {
+        let header = make_event_header(EventKind::Fchdir);
+        let mut data = header_bytes(&header);
+        data.extend_from_slice(&[0; FdPayload::SIZE]);
+        let json = serde_json::to_value(deserialize(&data).unwrap()).unwrap();
+        assert_eq!(json["header"]["tid"], 1235);
+        assert_eq!(
+            json["header"]["ns"],
+            serde_json::json!({
+                "mnt": {"status": "complete", "inode": 4026531841u32},
+                "net": {"status": "complete", "inode": 4026531840u32},
+                "uts": {"status": "complete", "inode": 4026531838u32},
+                "ipc": {"status": "complete", "inode": 4026531839u32},
+                "cgroup": {"status": "unsupported", "inode": null},
+                "user": {"status": "complete", "inode": 4026531837u32},
+                "pid": {"status": "unavailable", "inode": null},
+            })
+        );
+    }
+
+    #[test]
+    fn header_without_task_context_omits_tid_and_ns() {
+        let mut header = make_event_header(EventKind::Fchdir);
+        header.tid = 0;
+        let mut data = header_bytes(&header);
+        data.extend_from_slice(&[0; FdPayload::SIZE]);
+        let json = serde_json::to_value(deserialize(&data).unwrap()).unwrap();
+        assert!(json["header"].get("tid").is_none(), "{json}");
+        assert!(json["header"].get("ns").is_none(), "{json}");
+    }
+
+    #[test]
+    fn complete_status_without_inode_is_unavailable() {
+        let slot = NamespaceSlotJson::new(NS_STATUS_COMPLETE, 0);
+        assert_eq!(slot, NamespaceSlotJson { status: "unavailable", inode: None });
     }
 
     fn header_bytes(h: &EventHeader) -> Vec<u8> {

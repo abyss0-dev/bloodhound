@@ -34,7 +34,7 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
             .map(|process_ref| process_ref.start_boottime_ns)
             .unwrap_or(0);
 
-    let header = EventHeader {
+    let mut header = EventHeader {
         kind,
         _pad: [0; 3],
         timestamp_ns,
@@ -44,7 +44,10 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
         ppid: 0,
         process_start_boottime_ns,
         comm,
+        tid: pid_tgid as u32,
+        ns: bloodhound_common::NsSnapshot::default(),
     };
+    crate::ns::snapshot(aya_ebpf::helpers::bpf_get_current_task() as usize, &mut header.ns);
 
     let total_size = EventHeader::SIZE + payload_bytes.len();
     let mut buf = [0u8; 256];
