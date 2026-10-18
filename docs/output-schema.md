@@ -20,8 +20,8 @@ re-vendored here. Runtime builds and tests read only these local files.
 | `network_context.schema.json` | `network_context.schema.json` | `a08efa47410d706feb349f9e4dc0ba110319d7310d5b834e5539294866db668f` |
 
 The SHA-256 values are the pin. Verify a copy with `sha256sum` against the
-canonical file. No workspace commit is recorded because the canonical commit
-carrying this version is not yet published.
+canonical file. Both files were vendored from `abyss0-dev/workspace` commit
+`eb52ed3a80beaa578497881ac2c974f7fade682c`.
 
 `network_context.schema.json` references the base by its `$id`
 (`https://workspace.invalid/spec/behavior_event/behavior_event.schema.json`),
