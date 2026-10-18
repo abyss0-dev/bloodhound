@@ -1,7 +1,36 @@
 # Output Schema: BehaviorEvent
 
 The output schema is defined in `schema.json`. All events emitted by
-Bloodhound conform to this structure.
+Bloodhound conform to this structure. `META/exec_entry_network_context`
+records additionally conform to `network_context.schema.json`.
+
+
+## Vendored schemas
+
+`schema.json` and `network_context.schema.json` are vendored, byte-identical
+copies of the abyss0 workspace canonical schemas
+`docs/spec/behavior_event/behavior_event.schema.json` and
+`docs/spec/behavior_event/network_context.schema.json`. Bloodhound does not
+edit them in place: a contract change is made in the workspace first and then
+re-vendored here. Runtime builds and tests read only these local files.
+
+| File | Canonical source | SHA-256 |
+|------|------------------|---------|
+| `schema.json` | `behavior_event.schema.json` | `4af35eea484bb068b7e58ce80adc497073c2231aa3ff52a35e68457f5e2427fb` |
+| `network_context.schema.json` | `network_context.schema.json` | `a08efa47410d706feb349f9e4dc0ba110319d7310d5b834e5539294866db668f` |
+
+The SHA-256 values are the pin. Verify a copy with `sha256sum` against the
+canonical file. No workspace commit is recorded because the canonical commit
+carrying this version is not yet published.
+
+`network_context.schema.json` references the base by its `$id`
+(`https://workspace.invalid/spec/behavior_event/behavior_event.schema.json`),
+which `schema.json` declares; resolution does not depend on file names. The
+e2e helpers register both files in one registry.
+
+`event.layer` is not part of the workspace contract (the canonical schema
+permits it as an extra key). Bloodhound still emits it on every event, and
+the e2e helpers check that locally rather than in the vendored schema.
 
 
 ## Structure Overview
@@ -19,9 +48,9 @@ BehaviorEvent
 |   +-- process_ref  : { tgid, start_boottime_ns } (process events only)
 |
 +-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
+|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, META, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
 |   +-- name         : string (hook point name, e.g. "openat", "tty_read")
-|   +-- layer        : enum [intent, tooling, behavior]
+|   +-- layer        : enum [intent, tooling, behavior] (Bloodhound-local, not in schema.json)
 |
 +-- proc (OPTIONAL)
 |   +-- main_executable : string (absolute path)
@@ -64,6 +93,7 @@ BehaviorEvent
 | behavior | LIFECYCLE    | process_start, process_fork, process_exit    |
 | behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
+| behavior | META         | exec_entry_network_context                   |
 
 
 ## Implementation Notes
@@ -256,6 +286,25 @@ Path-read failure is represented on the event; unsuccessful FD-identity reads
 are represented by identity status. The counter does not certify unsupported
 paths or detect every FD-table race. A missing entry with no recorded entry
 (for example, tracing attached during an in-flight syscall) is not counted.
+
+### Exec-entry network context
+
+`META/exec_entry_network_context` conforms to `network_context.schema.json`.
+The selected profile is guest monotonic nanoseconds, FIFO admission, existing
+`header.process_ref`, and `META/exec_entry_network_context`. Context identity
+is measured at syscall entry. `device` is the `st_dev` value of a followed
+namespace FD after startup verification that the descriptor is on nsfs;
+per-entry inode is read from the current task's
+`nsproxy -> net_ns -> ns_common.inum`. Device calibration is not an
+actor-specific `/proc` enrichment. No actor inode is inferred from the daemon
+or from later procfs state.
+
+The runtime must fail to `unavailable` when the calibration or required
+BTF/read is unavailable; pointer recheck disagreement is `changed`. Positive
+actor/time missing at entry is a collection-loss condition, not a
+schema-valid context. Linux nsfs singleton-superblock behavior must be
+verified on each supported target family and by the dedicated VM acceptance;
+the schema alone does not establish it.
 
 ### Exec-entry filesystem view
 

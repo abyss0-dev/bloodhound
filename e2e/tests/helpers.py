@@ -4,14 +4,19 @@ import shlex
 from typing import Optional
 
 import jsonschema
+from referencing import Registry, Resource
 
-# Load schema once
-SCHEMA_PATH = os.path.join(
-    os.path.dirname(__file__), "..", "..", "docs", "schema.json"
-)
+# Vendored workspace schemas (see docs/output-schema.md, "Vendored schemas").
+DOCS_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "docs")
+SCHEMA_PATH = os.path.join(DOCS_DIR, "schema.json")
+NETWORK_CONTEXT_SCHEMA_PATH = os.path.join(DOCS_DIR, "network_context.schema.json")
+
+# Bloodhound-local invariant, stricter than the workspace contract: every
+# event carries the legacy event.layer with one of these values.
+BLOODHOUND_LAYERS = {"intent", "tooling", "behavior"}
 
 _schema = None
-_network_context_validator = None
+_validators = None
 
 
 def python_command(script: str, *, sudo: bool = False) -> str:
@@ -28,28 +33,39 @@ def get_schema():
     return _schema
 
 
+def get_validators() -> tuple[jsonschema.Draft7Validator, jsonschema.Draft7Validator]:
+    """Return (base, network_context) validators sharing one base schema.
+
+    network_context.schema.json references the base by its $id, which
+    resolves to docs/schema.json through the registry.
+    """
+    global _validators
+    if _validators is None:
+        base = get_schema()
+        with open(NETWORK_CONTEXT_SCHEMA_PATH) as f:
+            network = json.load(f)
+        registry = Registry().with_resources(
+            (schema["$id"], Resource.from_contents(schema))
+            for schema in (base, network)
+        )
+        _validators = (
+            jsonschema.Draft7Validator(base, registry=registry),
+            jsonschema.Draft7Validator(network, registry=registry),
+        )
+    return _validators
+
+
 def validate_event(event: dict) -> None:
-    """Validate ordinary events and the separately pinned Network profile."""
-    if event.get("event", {}).get("name") == "exec_entry_network_context":
-        global _network_context_validator
-        if _network_context_validator is None:
-            from jsonschema import Draft7Validator, RefResolver
-            from pathlib import Path
-            schema_dir = Path(__file__).resolve().parents[2] / "docs/spec/behavior_event"
-            with (schema_dir / "behavior_event.schema.json").open() as handle:
-                base = json.load(handle)
-            with (schema_dir / "network_context.schema.json").open() as handle:
-                network = json.load(handle)
-            _network_context_validator = Draft7Validator(
-                network,
-                resolver=RefResolver.from_schema(
-                    network,
-                    store={"https://workspace.invalid/spec/behavior_event/behavior_event.schema.json": base},
-                ),
-            )
-        _network_context_validator.validate(event)
-        return
-    jsonschema.validate(instance=event, schema=get_schema())
+    """Validate an event against the base schema, its extension, and local invariants."""
+    base, network_context = get_validators()
+    base.validate(event)
+    if event["event"]["name"] == "exec_entry_network_context":
+        network_context.validate(event)
+    layer = event["event"].get("layer")
+    if layer not in BLOODHOUND_LAYERS:
+        raise jsonschema.ValidationError(
+            f"event.layer {layer!r} is not one of {sorted(BLOODHOUND_LAYERS)}"
+        )
 
 
 def validate_all_events(events: list[dict]) -> None:

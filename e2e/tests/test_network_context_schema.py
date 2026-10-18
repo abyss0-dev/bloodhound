@@ -1,20 +1,10 @@
 """Pinned network-context schema and successful-exec replay invariants."""
-import json
-from pathlib import Path
+import jsonschema
+import pytest
 
-from jsonschema import Draft7Validator, RefResolver
+from helpers import get_validators, validate_event
 
-ROOT = Path(__file__).resolve().parents[2]
-SCHEMA_DIR = ROOT / "docs/spec/behavior_event"
-BASE = json.loads((SCHEMA_DIR / "behavior_event.schema.json").read_text())
-NETWORK = json.loads((SCHEMA_DIR / "network_context.schema.json").read_text())
-VALIDATOR = Draft7Validator(
-    NETWORK,
-    resolver=RefResolver.from_schema(
-        NETWORK,
-        store={"https://workspace.invalid/spec/behavior_event/behavior_event.schema.json": BASE},
-    ),
-)
+BASE, VALIDATOR = get_validators()
 
 
 def context(status="complete", netns=None, pid=100, start=123, timestamp=456):
@@ -38,6 +28,24 @@ def test_network_context_schema_positive_and_status_null_negative():
     incomplete["args"]["netns"] = None
     assert not VALIDATOR.is_valid(incomplete)
     assert not VALIDATOR.is_valid(context("unavailable", {"device": 0, "inode": 7}))
+
+
+def test_network_context_extends_the_single_base_schema():
+    record = context()
+    assert BASE.is_valid(record)
+    validate_event(record)
+    float_time = context()
+    float_time["header"]["timestamp"] = 456.5
+    assert not BASE.is_valid(float_time)
+    assert not VALIDATOR.is_valid(float_time)
+    no_comm = context()
+    del no_comm["header"]["comm"]
+    assert not VALIDATOR.is_valid(no_comm)
+    no_layer = context()
+    del no_layer["event"]["layer"]
+    assert VALIDATOR.is_valid(no_layer)
+    with pytest.raises(jsonschema.ValidationError):
+        validate_event(no_layer)
 
 
 def test_context_must_pair_successful_exec_by_exact_actor_and_entry_time():

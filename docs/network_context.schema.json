@@ -4,7 +4,7 @@
   "title": "Network exec-entry context BehaviorEvent extension",
   "description": "Proposed raw Bloodhound actor record. Host run/boot binding and start_ticks are attached/derived by Sanjaya, not emitted by Bloodhound.",
   "allOf": [
-    {"$ref": "behavior_event.schema.json"},
+    {"$ref": "https://workspace.invalid/spec/behavior_event/behavior_event.schema.json"},
     {
       "type": "object",
       "required": ["header", "event", "args"],
