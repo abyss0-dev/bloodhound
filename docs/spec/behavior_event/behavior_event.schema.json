@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "BehaviorEvent",
+  "description": "Wire format for kernel-derived behavior records emitted by an in-VM tracer (reference producer: bloodhound). One UTF-8 NDJSON record per line. This schema is the workspace-canonical source of truth; producers and consumers vendor it with a commit pin (see docs/spec/behavior_event/README.md §4 for the compatibility model).",
+  "type": "object",
+  "required": ["header", "event"],
+  "properties": {
+    "header": {
+      "type": "object",
+      "description": "Correlation metadata shared across all event types.",
+      "required": ["timestamp", "auid", "sessionid", "pid", "comm"],
+      "properties": {
+        "timestamp": {
+          "type": "number",
+          "description": "Wall-clock seconds since epoch (float for sub-second precision)."
+        },
+        "auid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Audit User ID (Login UID). Survives privilege escalation."
+        },
+        "sessionid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Audit Session ID assigned by the kernel at login."
+        },
+        "pid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Process ID that produced the event."
+        },
+        "ppid": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Parent Process ID. Optional."
+        },
+        "comm": {
+          "type": "string",
+          "maxLength": 16,
+          "description": "Process command name (kernel TASK_COMM_LEN)."
+        }
+      }
+    },
+    "event": {
+      "type": "object",
+      "description": "Classification of the captured behavior. The pedagogical layer (L1/L2/L3) is not encoded here; consumers derive it from (type, name) per docs/spec/behavior_event/README.md §3.",
+      "required": ["type", "name"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": [
+            "SYSCALL",
+            "TTY",
+            "PACKET",
+            "KPROBE",
+            "TRACEPOINT",
+            "LSM",
+            "META",
+            "LIFECYCLE",
+            "HEARTBEAT"
+          ],
+          "description": "Source class of the event. SYSCALL/TTY/PACKET/KPROBE/TRACEPOINT/LSM are kernel-derived. LIFECYCLE is a userspace-synthesised process-lifecycle marker (process_start, process_fork, process_exit, thread_create). HEARTBEAT carries periodic drop / utilisation deltas. META carries tracer-internal lifecycle markers (e.g., bloodhound_ready, session_start)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Specific hook name (e.g., openat, tty_write) or META/LIFECYCLE/HEARTBEAT event name."
+        }
+      }
+    },
+    "proc": {
+      "type": "object",
+      "description": "Process context. Optional; fields are best-effort.",
+      "properties": {
+        "main_executable": {
+          "type": "string",
+          "description": "Absolute path to the binary; best-effort, may be empty for short-lived processes."
+        },
+        "cwd": {
+          "type": "string",
+          "description": "Current working directory at event time."
+        },
+        "tty": {
+          "type": "string",
+          "description": "Controlling TTY device path (e.g., /dev/pts/0)."
+        }
+      }
+    },
+    "args": {
+      "type": "object",
+      "description": "Event-type-specific payload. Field set is producer-defined; consumers should treat unknown keys permissively. Common fields used by reference scenarios include filename, argv, flags, fd_type, data, syscall_nr, raw_args.",
+      "additionalProperties": true
+    },
+    "return_code": {
+      "type": "integer",
+      "description": "Exit code or syscall return value, when applicable."
+    }
+  }
+}

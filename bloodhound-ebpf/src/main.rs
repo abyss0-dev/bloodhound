@@ -1,9 +1,10 @@
 #![no_std]
 #![no_main]
 
+mod exec_netns;
+mod exec_view;
 mod fd_ident;
 mod filter;
-mod exec_view;
 mod helpers;
 mod layer1_tty;
 mod layer2_exec;
@@ -83,6 +84,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 #[no_mangle]
-pub static mut OFF_EXEC_VIEW: [u32;14] = [0;14];
+pub static mut OFF_EXEC_VIEW: [u32; 14] = [0; 14];
 #[no_mangle]
 pub static mut EXEC_VIEW_SUPPORTED: u32 = 0;
+#[no_mangle]
+pub static mut OFF_EXEC_NETNS: [u32; 4] = [0; 4];
+#[no_mangle]
+pub static mut EXEC_NETNS_SUPPORTED: u32 = 0;
+#[no_mangle]
+pub static mut NSFS_DEVICE: u64 = 0;
+#[no_mangle]
+pub static mut NSFS_DEVICE_VALID: u32 = 0;

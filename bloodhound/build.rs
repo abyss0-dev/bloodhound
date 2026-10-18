@@ -30,8 +30,6 @@ fn main() {
         "\"",
         sep,
         "-Cdebuginfo=2",
-        sep,
-        "-Clink-arg=--btf",
     ] {
         rustflags.push(s);
     }

@@ -11,6 +11,27 @@ use bloodhound_common::*;
 use crate::btf_offsets;
 use crate::{cli::Cli, deserializer::BehaviorEvent, usdt};
 
+fn calibrate_nsfs_device() -> (u64, u32) {
+    const NSFS_MAGIC: libc::c_long = 0x6e736673;
+    let file = match std::fs::File::open("/proc/self/ns/net") {
+        Ok(file) => file,
+        Err(error) => {
+            log::warn!("cannot calibrate nsfs device: {error}");
+            return (0, 0);
+        }
+    };
+    let mut fs = unsafe { std::mem::zeroed::<libc::statfs>() };
+    let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstatfs(std::os::fd::AsRawFd::as_raw_fd(&file), &mut fs) } != 0
+        || fs.f_type as libc::c_long != NSFS_MAGIC
+        || unsafe { libc::fstat(std::os::fd::AsRawFd::as_raw_fd(&file), &mut stat) } != 0
+    {
+        log::warn!("/proc/self/ns/net descriptor did not verify as nsfs");
+        return (0, 0);
+    }
+    (stat.st_dev as u64, 1)
+}
+
 pub fn load_and_attach(
     args: &Cli,
     usdt_selections: &[usdt::Selection],
@@ -24,9 +45,20 @@ pub fn load_and_attach(
     // Load BPF programs with global variables set BEFORE loading
     let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
     let view_supported = u32::from(offsets.exec_view.is_some());
+    let netns_offsets = offsets.exec_netns.unwrap_or([0; 4]);
+    let netns_supported = u32::from(offsets.exec_netns.is_some());
+    let (nsfs_device, nsfs_device_valid) = calibrate_nsfs_device();
+    info!(
+        "exec-entry netns BTF offsets: {:?}; nsfs device calibration: valid={} st_dev={}",
+        offsets.exec_netns, nsfs_device_valid, nsfs_device
+    );
     let mut bpf = EbpfLoader::new()
         .set_global("OFF_EXEC_VIEW", &view_offsets, true)
         .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
+        .set_global("OFF_EXEC_NETNS", &netns_offsets, true)
+        .set_global("EXEC_NETNS_SUPPORTED", &netns_supported, true)
+        .set_global("NSFS_DEVICE", &nsfs_device, true)
+        .set_global("NSFS_DEVICE_VALID", &nsfs_device_valid, true)
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
         .set_global("OFF_LOGINUID", &offsets.loginuid, true)

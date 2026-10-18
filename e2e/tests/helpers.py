@@ -11,6 +11,7 @@ SCHEMA_PATH = os.path.join(
 )
 
 _schema = None
+_network_context_validator = None
 
 
 def python_command(script: str, *, sudo: bool = False) -> str:
@@ -28,7 +29,26 @@ def get_schema():
 
 
 def validate_event(event: dict) -> None:
-    """Validate a single event against the BehaviorEvent schema."""
+    """Validate ordinary events and the separately pinned Network profile."""
+    if event.get("event", {}).get("name") == "exec_entry_network_context":
+        global _network_context_validator
+        if _network_context_validator is None:
+            from jsonschema import Draft7Validator, RefResolver
+            from pathlib import Path
+            schema_dir = Path(__file__).resolve().parents[2] / "docs/spec/behavior_event"
+            with (schema_dir / "behavior_event.schema.json").open() as handle:
+                base = json.load(handle)
+            with (schema_dir / "network_context.schema.json").open() as handle:
+                network = json.load(handle)
+            _network_context_validator = Draft7Validator(
+                network,
+                resolver=RefResolver.from_schema(
+                    network,
+                    store={"https://workspace.invalid/spec/behavior_event/behavior_event.schema.json": base},
+                ),
+            )
+        _network_context_validator.validate(event)
+        return
     jsonschema.validate(instance=event, schema=get_schema())
 
 

@@ -1,5 +1,7 @@
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user, bpf_probe_read_user_str_bytes},
+    helpers::{
+        bpf_get_current_task, bpf_probe_read_user, bpf_probe_read_user_str_bytes,
+    },
     macros::tracepoint,
     programs::TracePointContext,
 };
@@ -15,7 +17,7 @@ use crate::maps::{ASSEMBLY_BUF, EXECVE_ENTRY_MAP, EXECVE_TMP_BUF, SCRATCH_BUF};
 pub fn sys_enter_execve(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe { crate::maps::exec_failure(0); } 0 }
     }
 }
 
@@ -39,20 +41,41 @@ unsafe fn try_sys_enter_execve(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn sys_exit_execve(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_exit_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe { crate::maps::exec_failure(2); } 0 }
     }
 }
 
 unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    // task_struct survives de_thread's PID/TID exchange on non-leader exec.
+    let task_key = bpf_get_current_task() as u64;
 
-    let entry = match EXECVE_ENTRY_MAP.get(&pid_tgid) {
+    let entry = match EXECVE_ENTRY_MAP.get(&task_key) {
         Some(e) => e,
         None => return Ok(0),
     };
 
-    // sys_exit tracepoint: offset 16 = return value (i64)
-    let return_code: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    // sys_exit tracepoint: offset 16 = return value (i64). If this read
+    // fails, release the saved invocation now; the wrapper reports the exit
+    // capture failure separately from a map cleanup failure.
+    let return_code: i64 = match ctx.read_at(16) {
+        Ok(code) => code,
+        Err(_) => {
+            if EXECVE_ENTRY_MAP.remove(&task_key).is_err() {
+                crate::maps::exec_failure(4);
+            }
+            return Err(-1);
+        }
+    };
+    if return_code >= 0
+        && entry.header.pid != 0
+        && entry.header.process_start_boottime_ns != 0
+        && entry.header.timestamp_ns != 0
+    {
+        let mut context_header = entry.header;
+        context_header.kind = EventKind::ExecEntryNetworkContext as u8;
+        context_header._pad = [0; 3];
+        crate::helpers::emit_fixed(&context_header, Some(&entry.netns));
+    }
 
     let mut header = entry.header;
     let mut filename_len = (entry.filename_len as usize).min(MAX_PATH_SIZE - 1);
@@ -61,31 +84,51 @@ unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
         let buf = &mut (*asm).buf;
         let fixed = EventHeader::SIZE + ExecvePayload::SIZE;
         let ptr = buf.as_mut_ptr();
-        if filename_len > 0 && !copy_checked(ptr.add(fixed), entry.filename_buf.as_ptr(), filename_len as u32) {
+        if filename_len > 0
+            && !copy_checked(
+                ptr.add(fixed),
+                entry.filename_buf.as_ptr(),
+                filename_len as u32,
+            )
+        {
             filename_len = 0;
             header._pad[2] = 3;
         }
         let argv_offset = fixed + filename_len;
-        if argv_len > 0 && !copy_checked(ptr.add(argv_offset), entry.argv_buf.as_ptr(), argv_len as u32) {
+        if argv_len > 0
+            && !copy_checked(
+                ptr.add(argv_offset),
+                entry.argv_buf.as_ptr(),
+                argv_len as u32,
+            )
+        {
             argv_len = 0;
             header._pad[1] = 3;
         }
         let payload = ExecvePayload {
-            filename_len: filename_len as u16, argv_len: argv_len as u16,
+            filename_len: filename_len as u16,
+            argv_len: argv_len as u16,
             return_code: return_code as i32,
         };
         core::ptr::copy_nonoverlapping(
-            &header as *const EventHeader as *const u8, ptr, EventHeader::SIZE,
+            &header as *const EventHeader as *const u8,
+            ptr,
+            EventHeader::SIZE,
         );
         core::ptr::copy_nonoverlapping(
             &payload as *const ExecvePayload as *const u8,
-            ptr.add(EventHeader::SIZE), ExecvePayload::SIZE,
+            ptr.add(EventHeader::SIZE),
+            ExecvePayload::SIZE,
         );
         let total = fixed + filename_len + argv_len;
-        if total <= buf.len() { emit_event(&buf[..total]); }
+        if total <= buf.len() {
+            emit_event(&buf[..total]);
+        }
     }
 
-    let _ = EXECVE_ENTRY_MAP.remove(&pid_tgid);
+    if EXECVE_ENTRY_MAP.remove(&task_key).is_err() {
+        crate::maps::exec_failure(4);
+    }
     Ok(0)
 }
 
@@ -95,7 +138,7 @@ unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn sys_enter_execveat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_execveat(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe { crate::maps::exec_failure(0); } 0 }
     }
 }
 
@@ -116,7 +159,7 @@ pub fn sys_exit_execveat(ctx: TracePointContext) -> u32 {
     // Reuse the same exit handler
     match unsafe { try_sys_exit_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => { unsafe { crate::maps::exec_failure(2); } 0 }
     }
 }
 
@@ -134,10 +177,11 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
     let (filename_len, filename_status) = read_filename(filename_ptr as *const u8);
     let (argv_len, argv_status) = read_argv(argv_ptr as *const *const u8);
     let entry = match EXECVE_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => &mut *p, None => return Ok(0),
+        Some(p) => &mut *p, None => { crate::maps::exec_failure(0); return Ok(0); },
     };
     entry.header = header;
     entry.header._pad = [1, argv_status, filename_status];
+    entry.netns = crate::exec_netns::capture();
     entry.filename_len = filename_len;
     entry.argv_len = argv_len;
     if filename_len > 0 {
@@ -157,7 +201,12 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
         if !copied { entry.argv_len = 0; entry.header._pad[1] = 3; }
     }
     crate::exec_view::emit(&entry.header);
-    let _ = EXECVE_ENTRY_MAP.insert(&bpf_get_current_pid_tgid(), entry, 0);
+    if header.pid == 0 || header.process_start_boottime_ns == 0 || header.timestamp_ns == 0 {
+        crate::maps::exec_failure(0);
+    }
+    if EXECVE_ENTRY_MAP.insert(&(bpf_get_current_task() as u64), entry, 0).is_err() {
+        crate::maps::exec_failure(1);
+    }
     Ok(0)
 }
 

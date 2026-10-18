@@ -85,7 +85,7 @@ class TestSchemaValidation:
         allowed_types = {
             "SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM",
             # Userspace-synthesised types (see docs/output-schema.md).
-            "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC",
+            "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC", "META",
         }
         for ev in events:
             assert ev["event"]["type"] in allowed_types, (

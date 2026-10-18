@@ -1,0 +1,36 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://workspace.invalid/spec/behavior_event/network_context.schema.json",
+  "title": "Network exec-entry context BehaviorEvent extension",
+  "description": "Proposed raw Bloodhound actor record. Host run/boot binding and start_ticks are attached/derived by Sanjaya, not emitted by Bloodhound.",
+  "allOf": [
+    {"$ref": "behavior_event.schema.json"},
+    {
+      "type": "object",
+      "required": ["header", "event", "args"],
+      "properties": {
+        "header": {"type": "object", "required": ["timestamp", "pid"], "properties": {"timestamp": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "pid": {"type": "integer", "minimum": 1, "maximum": 4294967295}}},
+        "event": {"type": "object", "required": ["type", "name"], "properties": {"type": {"const": "META"}, "name": {"const": "exec_entry_network_context"}}, "additionalProperties": true},
+        "args": {
+          "type": "object", "required": ["record_version", "actor", "entry_timestamp_ns", "netns", "status"],
+          "properties": {
+            "record_version": {"const": 1},
+            "actor": {"type": "object", "required": ["tgid", "start_boottime_ns"], "properties": {
+              "tgid": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+              "start_boottime_ns": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}, "additionalProperties": false},
+            "entry_timestamp_ns": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615},
+            "netns": {"type": ["object", "null"], "required": ["device", "inode"], "properties": {
+              "device": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
+              "inode": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}}, "additionalProperties": false},
+            "status": {"enum": ["complete", "unavailable", "changed"]}
+          },
+          "allOf": [
+            {"if": {"properties": {"status": {"const": "complete"}}}, "then": {"properties": {"netns": {"type": "object"}}}},
+            {"if": {"properties": {"status": {"enum": ["unavailable", "changed"]}}}, "then": {"properties": {"netns": {"type": "null"}}}}
+          ],
+          "additionalProperties": false
+        }
+      }
+    }
+  ]
+}

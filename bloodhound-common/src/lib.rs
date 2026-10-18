@@ -98,6 +98,7 @@ pub enum EventKind {
     ExecView = 224,
     // Reserved: 225 (removed exec stdio), 226 (removed fork-file scan),
     // 227 (removed Bash internal-function probes). Never reuse these wire IDs.
+    ExecEntryNetworkContext = 228,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -176,6 +177,7 @@ impl EventKind {
             222 => Some(Self::ProcessExit),
             223 => Some(Self::SignalGenerate),
             224 => Some(Self::ExecView),
+            228 => Some(Self::ExecEntryNetworkContext),
             240 => Some(Self::UsdtTrainingShellV3),
             241 => Some(Self::UsdtTrainingPeerV1),
             242 => Some(Self::UsdtTrainingShellV3CaptureError),
@@ -448,10 +450,7 @@ pub const SIGNAL_RESULT_LOSE_INFO: i32 = 4;
 /// authoritative for exit_group/fatal-signal teardown; otherwise Linux
 /// reports the thread-group leader's status even if another thread exits last.
 #[inline(always)]
-pub const fn select_process_exit_status(
-    group_exit_status: i32,
-    group_leader_status: i32,
-) -> i32 {
+pub const fn select_process_exit_status(group_exit_status: i32, group_leader_status: i32) -> i32 {
     if group_exit_status != 0 {
         group_exit_status
     } else {
@@ -852,6 +851,7 @@ pub struct ExecveEntry {
     pub header: EventHeader,
     pub filename_len: u16,
     pub argv_len: u16,
+    pub netns: ExecEntryNetworkContextPayload,
     pub filename_buf: [u8; MAX_PATH_SIZE],
     pub argv_buf: [u8; MAX_ARGV_SIZE],
 }
@@ -973,14 +973,50 @@ pub const MAP_ANONYMOUS: u32 = 0x20;
 pub const O_CLOEXEC: u32 = 0o2000000;
 
 pub const TIER2_SYSCALLS: &[u64] = &[
-    NR_EXECVE, NR_EXECVEAT, NR_OPENAT, NR_READ, NR_WRITE, NR_CONNECT,
-    NR_BIND, NR_LISTEN, NR_SOCKET, NR_CLONE, NR_CLONE3, NR_CHDIR, NR_FCHDIR,
-    NR_UNLINK, NR_UNLINKAT, NR_RENAME, NR_RENAMEAT2, NR_MKDIR, NR_MKDIRAT,
-    NR_RMDIR, NR_SYMLINK, NR_SYMLINKAT, NR_LINK, NR_LINKAT, NR_CHMOD,
-    NR_FCHMOD, NR_FCHMODAT, NR_CHOWN, NR_FCHOWN, NR_FCHOWNAT,
-    NR_TRUNCATE, NR_FTRUNCATE, NR_MOUNT, NR_UMOUNT2, NR_SENDTO, NR_RECVFROM,
-    NR_DUP, NR_DUP2, NR_DUP3,
-    NR_PREAD64, NR_PWRITE64, NR_READV, NR_WRITEV, NR_MMAP,
+    NR_EXECVE,
+    NR_EXECVEAT,
+    NR_OPENAT,
+    NR_READ,
+    NR_WRITE,
+    NR_CONNECT,
+    NR_BIND,
+    NR_LISTEN,
+    NR_SOCKET,
+    NR_CLONE,
+    NR_CLONE3,
+    NR_CHDIR,
+    NR_FCHDIR,
+    NR_UNLINK,
+    NR_UNLINKAT,
+    NR_RENAME,
+    NR_RENAMEAT2,
+    NR_MKDIR,
+    NR_MKDIRAT,
+    NR_RMDIR,
+    NR_SYMLINK,
+    NR_SYMLINKAT,
+    NR_LINK,
+    NR_LINKAT,
+    NR_CHMOD,
+    NR_FCHMOD,
+    NR_FCHMODAT,
+    NR_CHOWN,
+    NR_FCHOWN,
+    NR_FCHOWNAT,
+    NR_TRUNCATE,
+    NR_FTRUNCATE,
+    NR_MOUNT,
+    NR_UMOUNT2,
+    NR_SENDTO,
+    NR_RECVFROM,
+    NR_DUP,
+    NR_DUP2,
+    NR_DUP3,
+    NR_PREAD64,
+    NR_PWRITE64,
+    NR_READV,
+    NR_WRITEV,
+    NR_MMAP,
     // NR_FCNTL is intentionally omitted: rich extraction only fires for the
     // F_DUPFD command family (see `try_enter_fcntl` in `layer3_rich.rs`).
     // All other fcntl commands must remain visible via Tier 1 raw capture.
@@ -1069,6 +1105,7 @@ mod tests {
             EventKind::ProcessExit,
             EventKind::SignalGenerate,
             EventKind::ExecView,
+            EventKind::ExecEntryNetworkContext,
         ];
 
         for variant in &all_variants {
@@ -1089,7 +1126,9 @@ mod tests {
     fn event_kind_unknown_returns_none() {
         // Test values that are not assigned to any variant
         // Removed experimental wire IDs stay unknown rather than aliasing a new event.
-        for byte in [4, 5, 9, 11, 19, 65, 99, 102, 150, 199, 207, 225, 226, 227, 255] {
+        for byte in [
+            4, 5, 9, 11, 19, 65, 99, 102, 150, 199, 207, 225, 226, 227, 255,
+        ] {
             assert_eq!(
                 EventKind::from_u8(byte),
                 None,
@@ -1167,6 +1206,7 @@ mod tests {
             EventKind::ProcessExit,
             EventKind::SignalGenerate,
             EventKind::ExecView,
+            EventKind::ExecEntryNetworkContext,
         ];
         let mut seen = [false; 256];
         for v in &all_variants {
@@ -1201,12 +1241,22 @@ mod tests {
     fn payload_sizes_match_mem_size() {
         assert_eq!(ExecViewPayload::SIZE, 24);
         assert_eq!(EventKind::from_u8(224), Some(EventKind::ExecView));
+        assert_eq!(
+            EventKind::from_u8(228),
+            Some(EventKind::ExecEntryNetworkContext)
+        );
+        for reserved in [225, 226, 227] {
+            assert_eq!(EventKind::from_u8(reserved), None);
+        }
         assert_eq!(ExecvePayload::SIZE, mem::size_of::<ExecvePayload>());
         assert_eq!(RawSyscallPayload::SIZE, mem::size_of::<RawSyscallPayload>());
         assert_eq!(TtyPayload::SIZE, mem::size_of::<TtyPayload>());
         assert_eq!(OpenatPayload::SIZE, mem::size_of::<OpenatPayload>());
         assert_eq!(ReadWritePayload::SIZE, mem::size_of::<ReadWritePayload>());
-        assert_eq!(ConnectBindPayload::SIZE, mem::size_of::<ConnectBindPayload>());
+        assert_eq!(
+            ConnectBindPayload::SIZE,
+            mem::size_of::<ConnectBindPayload>()
+        );
         assert_eq!(SocketPayload::SIZE, mem::size_of::<SocketPayload>());
         assert_eq!(ClonePayload::SIZE, mem::size_of::<ClonePayload>());
         assert_eq!(ProcessForkPayload::SIZE, 32);
@@ -1257,8 +1307,14 @@ mod tests {
         );
         assert_eq!(LsmSetuidPayload::SIZE, mem::size_of::<LsmSetuidPayload>());
         assert_eq!(DupPayload::SIZE, mem::size_of::<DupPayload>());
-        assert_eq!(PreadPwritePayload::SIZE, mem::size_of::<PreadPwritePayload>());
-        assert_eq!(ReadvWritevPayload::SIZE, mem::size_of::<ReadvWritevPayload>());
+        assert_eq!(
+            PreadPwritePayload::SIZE,
+            mem::size_of::<PreadPwritePayload>()
+        );
+        assert_eq!(
+            ReadvWritevPayload::SIZE,
+            mem::size_of::<ReadvWritevPayload>()
+        );
         assert_eq!(MmapPayload::SIZE, mem::size_of::<MmapPayload>());
         assert_eq!(
             SendfileSplicePayload::SIZE,
@@ -1314,6 +1370,20 @@ mod tests {
     }
 }
 
+/// Exec-entry network context, captured at syscall entry.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ExecEntryNetworkContextPayload {
+    pub device: u64,
+    pub inode: u64,
+    /// 1=complete, 2=unavailable, 3=changed.
+    pub status: u8,
+    pub _pad: [u8; 7],
+}
+impl ExecEntryNetworkContextPayload {
+    pub const SIZE: usize = core::mem::size_of::<Self>();
+}
+
 /// Exec-entry filesystem context, paired by immutable actor and header timestamp.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -1331,6 +1401,13 @@ impl ExecViewPayload {
 }
 
 /// Ordered direct-member offsets for the bounded exec view pointer traversal.
+pub const EXEC_NETNS_FIELDS: [(&str, &str); 4] = [
+    ("task_struct", "nsproxy"),
+    ("nsproxy", "net_ns"),
+    ("net", "ns"),
+    ("ns_common", "inum"),
+];
+
 pub const EXEC_VIEW_FIELDS: [(&str, &str); 14] = [
     ("task_struct", "fs"),
     ("task_struct", "nsproxy"),

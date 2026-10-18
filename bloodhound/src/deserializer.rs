@@ -136,6 +136,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             crate::usdt::decode_payload(kind, payload)?
         }
         EventKind::ExecView => parse_exec_view(payload)?,
+        EventKind::ExecEntryNetworkContext => parse_exec_entry_network_context(payload, &header)?,
         EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
         EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
@@ -325,6 +326,45 @@ fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String,
         "tooling".into(),
         Some(args),
         Some(execve.return_code as i64),
+    ))
+}
+
+fn parse_exec_entry_network_context(
+    payload: &[u8],
+    header: &EventHeader,
+) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+    if payload.len() != ExecEntryNetworkContextPayload::SIZE {
+        bail!("Exec-entry network context payload has invalid size");
+    }
+    let value = unsafe {
+        core::ptr::read_unaligned(payload.as_ptr().cast::<ExecEntryNetworkContextPayload>())
+    };
+    let netns = match value.status {
+        1 if value.inode > 0 => serde_json::json!({"device": value.device, "inode": value.inode}),
+        2 | 3 if value.device == 0 && value.inode == 0 => serde_json::Value::Null,
+        1 => bail!("complete network context lacks measured identity"),
+        2 | 3 => bail!("incomplete network context carries identity"),
+        _ => bail!("unknown network context status"),
+    };
+    if header.pid == 0 || header.process_start_boottime_ns == 0 || header.timestamp_ns == 0 {
+        bail!("network context lacks exact actor or entry timestamp");
+    }
+    let status = match value.status {
+        1 => "complete",
+        2 => "unavailable",
+        _ => "changed",
+    };
+    Ok((
+        "META".into(),
+        "exec_entry_network_context".into(),
+        "behavior".into(),
+        Some(serde_json::json!({
+            "record_version": 1,
+            "actor": {"tgid": header.pid, "start_boottime_ns": header.process_start_boottime_ns},
+            "entry_timestamp_ns": header.timestamp_ns,
+            "netns": netns, "status": status
+        })),
+        None,
     ))
 }
 
@@ -2136,6 +2176,54 @@ mod tests {
         let mut buf = header_bytes(&h);
         buf.push(0); // Only 1 byte of payload where RawSyscallPayload::SIZE is needed
         assert!(deserialize(&buf).is_err());
+    }
+
+    #[test]
+    fn test_exec_net_context_exact_actor_and_entry_time() {
+        let payload = ExecEntryNetworkContextPayload {
+            device: 0,
+            inode: 44,
+            status: 1,
+            _pad: [0; 7],
+        };
+        let event = deserialize(&build_event(EventKind::ExecEntryNetworkContext, &payload)).unwrap();
+        assert_eq!(event.event.event_type, "META");
+        assert_eq!(event.event.name, "exec_entry_network_context");
+        assert_eq!(event.header.process_ref.unwrap(), ProcessRefJson {
+            tgid: 1234,
+            start_boottime_ns: 99,
+        });
+        let args = event.args.unwrap();
+        assert_eq!(args["actor"]["tgid"], 1234);
+        assert_eq!(args["actor"]["start_boottime_ns"], 99);
+        assert_eq!(args["entry_timestamp_ns"], 1_500_000_000u64);
+        assert_eq!(args["netns"]["device"], 0);
+        assert_eq!(args["netns"]["inode"], 44);
+
+        // Adjacent nanosecond identities remain distinct, not rounded to ticks.
+        let mut header = make_event_header(EventKind::ExecEntryNetworkContext);
+        header.process_start_boottime_ns = 100;
+        let mut bytes = header_bytes(&header);
+        bytes.extend_from_slice(&payload_bytes(&payload));
+        let adjacent = deserialize(&bytes).unwrap();
+        assert_eq!(adjacent.args.unwrap()["actor"]["start_boottime_ns"], 100);
+    }
+
+    #[test]
+    fn test_exec_net_context_status_identity_validation() {
+        for (status, device, inode, valid) in [
+            (1, 0, 1, true), (2, 0, 0, true), (3, 0, 0, true),
+            (1, 1, 0, false), (2, 1, 1, false), (3, 0, 1, false), (4, 0, 0, false),
+        ] {
+            let payload = ExecEntryNetworkContextPayload { device, inode, status, _pad: [0; 7] };
+            assert_eq!(deserialize(&build_event(EventKind::ExecEntryNetworkContext, &payload)).is_ok(), valid);
+        }
+        let payload = ExecEntryNetworkContextPayload { status: 2, ..Default::default() };
+        let mut header = make_event_header(EventKind::ExecEntryNetworkContext);
+        header.process_start_boottime_ns = 0;
+        let mut bytes = header_bytes(&header);
+        bytes.extend_from_slice(&payload_bytes(&payload));
+        assert!(deserialize(&bytes).is_err());
     }
 
     // ── proc field: initially None, to be filled by enricher ─────────────

@@ -29,6 +29,7 @@ const SYS_BTF: &str = "/sys/kernel/btf/vmlinux";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskStructOffsets {
     pub exec_view: Option<[u32; 14]>,
+    pub exec_netns: Option<[u32; 4]>,
     /// `task_struct::loginuid` (a `kuid_t`; its first member is the `u32`
     /// audit login UID).
     pub loginuid: u32,
@@ -163,6 +164,7 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
 
     let mut task_offsets = None;
     let mut view_offsets = [None; 14];
+    let mut netns_offsets = [None; 4];
     let mut signal_offsets = None;
     let mut pos = type_base;
     while pos + 12 <= type_end {
@@ -176,6 +178,12 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
         if kind == BTF_KIND_STRUCT && vlen > 0 {
             let struct_name = r.str_at(str_base, name_off)?;
             let struct_size = r.u32(pos + 8)?;
+            for (i, (owner, field)) in bloodhound_common::EXEC_NETNS_FIELDS.iter().enumerate() {
+                if struct_name == *owner {
+                    netns_offsets[i] =
+                        read_named_member(&r, str_base, members_pos, vlen, struct_size, field).ok();
+                }
+            }
             for (i, (owner, field)) in bloodhound_common::EXEC_VIEW_FIELDS.iter().enumerate() {
                 if struct_name == *owner {
                     view_offsets[i] =
@@ -215,6 +223,11 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
     let (live, group_exit_code) =
         signal_offsets.context("required signal_struct members not found in BTF")?;
     offsets.exec_view = view_offsets
+        .iter()
+        .copied()
+        .collect::<Option<Vec<_>>>()
+        .and_then(|v| v.try_into().ok());
+    offsets.exec_netns = netns_offsets
         .iter()
         .copied()
         .collect::<Option<Vec<_>>>()
@@ -275,6 +288,7 @@ fn read_task_members(
 
     let off = TaskStructOffsets {
         exec_view: None,
+        exec_netns: None,
         loginuid: loginuid.context("task_struct::loginuid not found in BTF")?,
         sessionid: sessionid.context("task_struct::sessionid not found in BTF")?,
         tgid: tgid.context("task_struct::tgid not found in BTF")?,
@@ -468,6 +482,7 @@ mod tests {
         assert_eq!(off.tgid, 0x9a4);
         assert_eq!(off.comm, 0xb00);
         assert_eq!(off.exec_view, None);
+        assert_eq!(off.exec_netns, None);
     }
 
     #[test]
@@ -642,5 +657,9 @@ mod tests {
         assert!(offsets.comm > 0);
         assert!(offsets.signal_live > 0);
         assert!(offsets.signal_group_exit_code > 0);
+        assert!(
+            offsets.exec_netns.is_some(),
+            "running BTF must expose current netns chain"
+        );
     }
 }
