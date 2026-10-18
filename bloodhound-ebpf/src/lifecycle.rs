@@ -105,6 +105,15 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         crate::maps::openat_failure(3);
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
     }
+    // Same for an exec that never reached sys_exit; a later task may reuse
+    // this task_struct address.
+    let task_key = aya_ebpf::helpers::bpf_get_current_task() as u64;
+    if crate::maps::EXECVE_ENTRY_MAP.get(&task_key).is_some() {
+        crate::maps::exec_failure(bloodhound_common::EXEC_INVOCATION_INTERRUPTED);
+        if crate::maps::EXECVE_ENTRY_MAP.remove(&task_key).is_err() {
+            crate::maps::exec_failure(bloodhound_common::EXEC_ENTRY_CLEANUP_FAILED);
+        }
+    }
     if !should_trace() {
         return Ok(());
     }

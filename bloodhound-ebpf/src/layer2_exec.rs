@@ -1,5 +1,5 @@
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user, bpf_probe_read_user_str_bytes},
+    helpers::{bpf_get_current_task, bpf_probe_read_user, bpf_probe_read_user_str_bytes},
     macros::tracepoint,
     programs::TracePointContext,
 };
@@ -15,7 +15,10 @@ use crate::maps::{ASSEMBLY_BUF, EXECVE_ENTRY_MAP, EXECVE_TMP_BUF, SCRATCH_BUF};
 pub fn sys_enter_execve(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { crate::maps::exec_failure(EXEC_ENTRY_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
@@ -39,20 +42,32 @@ unsafe fn try_sys_enter_execve(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn sys_exit_execve(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_exit_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { crate::maps::exec_failure(EXEC_EXIT_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
 unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
-    let pid_tgid = bpf_get_current_pid_tgid();
+    // A non-leader exec takes over the leader PID in de_thread() before this
+    // exit, so pid_tgid differs from entry. The task_struct address does not.
+    let task_key = bpf_get_current_task() as u64;
 
-    let entry = match EXECVE_ENTRY_MAP.get(&pid_tgid) {
+    let entry = match EXECVE_ENTRY_MAP.get(&task_key) {
         Some(e) => e,
         None => return Ok(0),
     };
 
-    // sys_exit tracepoint: offset 16 = return value (i64)
-    let return_code: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    // sys_exit tracepoint: offset 16 = return value (i64). On failure, still
+    // release the pending entry; the caller reports the exit capture loss.
+    let return_code: i64 = match ctx.read_at(16) {
+        Ok(code) => code,
+        Err(_) => {
+            remove_entry(task_key);
+            return Err(-1);
+        }
+    };
 
     let mut header = entry.header;
     let mut filename_len = (entry.filename_len as usize).min(MAX_PATH_SIZE - 1);
@@ -85,8 +100,15 @@ unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
         if total <= buf.len() { emit_event(&buf[..total]); }
     }
 
-    let _ = EXECVE_ENTRY_MAP.remove(&pid_tgid);
+    remove_entry(task_key);
     Ok(0)
+}
+
+#[inline(always)]
+unsafe fn remove_entry(task_key: u64) {
+    if EXECVE_ENTRY_MAP.remove(&task_key).is_err() {
+        crate::maps::exec_failure(EXEC_ENTRY_CLEANUP_FAILED);
+    }
 }
 
 // ── sys_enter_execveat ───────────────────────────────────────────────────────
@@ -95,7 +117,10 @@ unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn sys_enter_execveat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_execveat(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { crate::maps::exec_failure(EXEC_ENTRY_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
@@ -116,7 +141,10 @@ pub fn sys_exit_execveat(ctx: TracePointContext) -> u32 {
     // Reuse the same exit handler
     match unsafe { try_sys_exit_execve(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { crate::maps::exec_failure(EXEC_EXIT_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
@@ -134,7 +162,11 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
     let (filename_len, filename_status) = read_filename(filename_ptr as *const u8);
     let (argv_len, argv_status) = read_argv(argv_ptr as *const *const u8);
     let entry = match EXECVE_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => &mut *p, None => return Ok(0),
+        Some(p) => &mut *p,
+        None => {
+            crate::maps::exec_failure(EXEC_ENTRY_CAPTURE_FAILED);
+            return Ok(0);
+        }
     };
     entry.header = header;
     entry.header._pad = [1, argv_status, filename_status];
@@ -157,7 +189,9 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
         if !copied { entry.argv_len = 0; entry.header._pad[1] = 3; }
     }
     crate::exec_view::emit(&entry.header);
-    let _ = EXECVE_ENTRY_MAP.insert(&bpf_get_current_pid_tgid(), entry, 0);
+    if EXECVE_ENTRY_MAP.insert(&(bpf_get_current_task() as u64), entry, 0).is_err() {
+        crate::maps::exec_failure(EXEC_ENTRY_SAVE_FAILED);
+    }
     Ok(0)
 }
 

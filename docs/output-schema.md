@@ -257,6 +257,16 @@ are represented by identity status. The counter does not certify unsupported
 paths or detect every FD-table race. A missing entry with no recorded entry
 (for example, tracing attached during an in-flight syscall) is not counted.
 
+`DIAGNOSTIC/exec.collection` reports the same kind of loss for `execve` /
+`execveat`, with the same fields, polling and shutdown behavior, and
+`scope: exec`. Reasons are `entry_capture_failed`, `entry_save_failed`,
+`exit_capture_failed`, `invocation_interrupted` (a pending exec removed at task
+exit), and `entry_cleanup_failed` (the pending entry could not be removed).
+Entry and exit are paired by the calling task, not by PID/TID, so an exec from a
+non-leader thread keeps its pairing after the kernel hands it the leader PID.
+A failed return-value read still releases the pending entry and is reported as
+`exit_capture_failed`.
+
 ### Exec-entry filesystem view
 
 `TRACEPOINT/exec_view` carries `view_capture_version` and `view_status`.
