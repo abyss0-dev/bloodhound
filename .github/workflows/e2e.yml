@@ -26,6 +26,7 @@ jobs:
 
       - uses: cicd-sensor/cicd-sensor-action@a803a7bc1890f85d3f2feb7c29b74b5c730da6c2 # v0.0.37
         with:
+          cicd-sensor-version: v0.0.46
           manager-url: https://manager.cicdsensor.cloud.shisho.dev
           manager-token: ${{ steps.auth.outputs.token }}
 
