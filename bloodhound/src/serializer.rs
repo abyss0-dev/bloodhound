@@ -60,6 +60,8 @@ mod tests {
                 ppid: Some(1),
                 comm: "test".to_string(),
                 process_ref: None,
+                tid: None,
+                ns: None,
             },
             event: EventTypeJson {
                 event_type: "TRACEPOINT".to_string(),

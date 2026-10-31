@@ -1,94 +1,165 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "BehaviorEvent Schema",
-  "description": "Schema for internal behavioral events captured by the eBPF tracing daemon.",
+  "$id": "https://workspace.invalid/spec/behavior_event/behavior_event.schema.json",
+  "title": "BehaviorEvent",
+  "description": "Wire format for kernel-derived behavior records emitted by an in-VM tracer (reference producer: bloodhound). One UTF-8 NDJSON record per line. This schema is the workspace-canonical source of truth; producers and consumers vendor it byte-for-byte with a commit pin (see docs/spec/behavior_event/README.md §4 for the compatibility model).",
   "type": "object",
   "required": ["header", "event"],
+  "definitions": {
+    "namespace_slot": {
+      "type": "object",
+      "description": "One namespace identity read at a single hook moment. inode is the nsfs inode number; it is non-null only when status is complete.",
+      "required": ["status", "inode"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["complete", "unsupported", "unavailable"],
+          "description": "complete: identity read. unsupported: the running kernel does not provide this namespace or the producer cannot locate it. unavailable: the read failed or the task no longer holds its namespaces (e.g., during exit)."
+        },
+        "inode": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "status": { "const": "complete" } } }, "then": { "properties": { "inode": { "type": "integer" } } } },
+        { "if": { "properties": { "status": { "enum": ["unsupported", "unavailable"] } } }, "then": { "properties": { "inode": { "type": "null" } } } }
+      ],
+      "additionalProperties": false
+    },
+    "namespace_snapshot": {
+      "type": "object",
+      "description": "Namespaces the task itself belonged to at one hook moment (docs/spec/tracer/README.md §2.8). pid is the task's own active PID namespace, not the namespace for its children.",
+      "required": ["mnt", "net", "uts", "ipc", "cgroup", "user", "pid"],
+      "properties": {
+        "mnt": { "$ref": "#/definitions/namespace_slot" },
+        "net": { "$ref": "#/definitions/namespace_slot" },
+        "uts": { "$ref": "#/definitions/namespace_slot" },
+        "ipc": { "$ref": "#/definitions/namespace_slot" },
+        "cgroup": { "$ref": "#/definitions/namespace_slot" },
+        "user": { "$ref": "#/definitions/namespace_slot" },
+        "pid": { "$ref": "#/definitions/namespace_slot" }
+      },
+      "additionalProperties": false
+    }
+  },
   "properties": {
     "header": {
       "type": "object",
-      "description": "Correlation metadata shared across all layers.",
+      "description": "Correlation metadata shared across all event types.",
       "required": ["timestamp", "auid", "sessionid", "pid", "comm"],
       "properties": {
         "timestamp": {
           "type": "integer",
           "minimum": 0,
-          "description": "CLOCK_MONOTONIC nanoseconds in the observed VM. This is provenance time, not a total kernel causal order."
+          "maximum": 18446744073709551615,
+          "description": "CLOCK_MONOTONIC nanoseconds in the observed VM. Comparable within one boot only; not wall-clock time and not a total kernel causal order. NDJSON line position is the emission order."
         },
         "auid": {
           "type": "integer",
-          "description": "Audit User ID (Login UID). Remains constant across privilege escalations."
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Audit User ID (Login UID). Survives privilege escalation."
         },
         "sessionid": {
           "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295,
           "description": "Audit Session ID assigned by the kernel at login."
         },
         "pid": {
           "type": "integer",
-          "description": "Thread-group ID (TGID) of the process that triggered the event."
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Thread-group ID (TGID) of the process that produced the event."
+        },
+        "tid": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295,
+          "description": "Thread ID of the task the header describes, in the PID namespace observed by the producer. Present on kernel-captured events with a task context; omitted otherwise."
         },
         "ppid": {
           "type": "integer",
-          "description": "Parent Process ID."
+          "minimum": 0,
+          "maximum": 4294967295,
+          "description": "Parent Process ID. Optional."
         },
         "comm": {
           "type": "string",
-          "description": "The command name of the process."
+          "maxLength": 16,
+          "description": "Process command name (kernel TASK_COMM_LEN)."
         },
         "process_ref": {
           "type": "object",
-          "description": "Stable process-instance reference within one kernel boot and the PID namespace observed by Bloodhound.",
+          "description": "Stable process-instance reference within one kernel boot and the PID namespace observed by the producer. Omitted when the producer cannot read a complete stable reference; never a PID-only substitute.",
           "required": ["tgid", "start_boottime_ns"],
           "properties": {
-            "tgid": { "type": "integer", "minimum": 1 },
-            "start_boottime_ns": { "type": "integer", "minimum": 1 }
+            "tgid": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+            "start_boottime_ns": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
           },
           "additionalProperties": false
+        },
+        "ns": {
+          "$ref": "#/definitions/namespace_snapshot",
+          "description": "Namespaces of the task identified by tid, read at the same hook moment as timestamp. Present exactly when tid is present; never filled in later from /proc."
         }
+      },
+      "dependencies": {
+        "tid": ["ns"],
+        "ns": ["tid"]
       }
     },
     "event": {
       "type": "object",
-      "description": "Classification of the captured behavior.",
-      "required": ["type", "name", "layer"],
+      "description": "Classification of the captured behavior. The pedagogical layer (L1/L2/L3) is not part of the contract; consumers derive it from (type, name) per docs/spec/behavior_event/README.md §3. Producers may carry additional keys (bloodhound emits a legacy `layer`); consumers MUST NOT depend on them.",
+      "required": ["type", "name"],
       "properties": {
         "type": {
           "type": "string",
-          "enum": ["SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM", "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC"],
-          "description": "The source/nature of the event. LIFECYCLE events are kernel-observed process-lifecycle signals, with userspace bootstrap for processes that predate attachment. HEARTBEAT events are periodic userspace-synthesised pulses carrying drop deltas for undecidable-interval detection. USDT events are emitted only by compiled, verified in-tree collectors. DIAGNOSTIC events report bounded collector, process-identity, or stream health state."
+          "enum": [
+            "SYSCALL",
+            "TTY",
+            "PACKET",
+            "KPROBE",
+            "TRACEPOINT",
+            "LSM",
+            "META",
+            "LIFECYCLE",
+            "HEARTBEAT",
+            "USDT",
+            "DIAGNOSTIC"
+          ],
+          "description": "Source class of the event. SYSCALL/TTY/PACKET/KPROBE/TRACEPOINT/LSM are kernel-derived. LIFECYCLE is a kernel-observed process-lifecycle marker (process_start, process_fork, process_exit), with userspace bootstrap for processes that predate attachment. HEARTBEAT carries periodic drop / utilisation deltas. USDT is emitted only by compiled, verified in-tree collectors. DIAGNOSTIC reports bounded collector, process-identity, or stream health state. META carries tracer-emitted metadata records (e.g., bloodhound_ready)."
         },
         "name": {
           "type": "string",
-          "description": "Specific name of the hook point (e.g., 'openat', 'tty_write')."
-        },
-        "layer": {
-          "type": "string",
-          "enum": ["intent", "tooling", "behavior"],
-          "description": "The abstraction layer this event belongs to."
+          "description": "Specific hook name (e.g., openat, tty_write) or META/LIFECYCLE/HEARTBEAT/USDT/DIAGNOSTIC event name."
         }
       }
     },
     "proc": {
       "type": "object",
-      "description": "Process context at the time of the event.",
+      "description": "Process context. Optional; fields are best-effort.",
       "properties": {
         "main_executable": {
           "type": "string",
-          "description": "Absolute path to the binary being executed."
+          "description": "Absolute path to the binary; best-effort, may be empty for short-lived processes."
         },
         "cwd": {
           "type": "string",
-          "description": "Current working directory of the process."
+          "description": "Current working directory at event time."
         },
         "tty": {
           "type": "string",
-          "description": "Associated TTY device path."
+          "description": "Controlling TTY device path (e.g., /dev/pts/0)."
         }
       }
     },
     "args": {
       "type": "object",
-      "description": "Extracted arguments or payload of the event. Fields vary by event type.",
+      "description": "Event-type-specific payload. The field set is producer-defined; consumers should treat unknown keys permissively. The common fields below have fixed types wherever they appear.",
       "properties": {
         "filename": { "type": "string" },
         "argv": {
@@ -97,33 +168,59 @@
         },
         "flags": {
           "type": "array",
-          "items": { "type": "string" }
+          "items": { "type": "string" },
+          "description": "Decoded flag names (e.g., [\"O_RDONLY\", \"O_SYNC\"])."
         },
         "data": {
           "type": "string",
-          "description": "Base64-encoded raw bytes (used for TTY input/output)."
+          "description": "Base64-encoded raw bytes (TTY input/output, packet payload)."
         },
         "fd_type": {
           "type": "string",
           "enum": ["regular", "pipe", "socket", "tty", "other"],
-          "description": "File descriptor type classification (used for read/write events)."
+          "description": "File descriptor type classification (read/write family)."
         },
         "syscall_nr": {
           "type": "integer",
-          "description": "Syscall number (used for SYSCALL type Tier 1 raw events)."
+          "description": "Syscall number (Tier 1 raw SYSCALL events)."
         },
         "raw_args": {
           "type": "array",
           "items": { "type": "integer" },
           "maxItems": 6,
-          "description": "Raw syscall arguments as integers (used for SYSCALL type Tier 1 raw events)."
+          "description": "Raw syscall arguments as integers (Tier 1 raw SYSCALL events)."
+        },
+        "nstype": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Decoded namespace-type flags requested by setns (e.g., [\"CLONE_NEWNET\"]). Empty when the caller passed 0."
+        },
+        "exit_timestamp_ns": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615,
+          "description": "Moment of the syscall-exit hook at which *_at_exit fields were read (setns / unshare). Same clock as header.timestamp."
+        },
+        "ns_at_exit": {
+          "$ref": "#/definitions/namespace_snapshot",
+          "description": "Namespaces of the same task read at exit_timestamp_ns (setns / unshare)."
+        },
+        "pid_for_children_at_exit": {
+          "$ref": "#/definitions/namespace_slot",
+          "description": "PID namespace the task's future children will enter, read at exit_timestamp_ns (setns / unshare)."
+        },
+        "nsfs_dev": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 18446744073709551615,
+          "description": "Device number of nsfs for this producer run (META bloodhound_ready). Null when not verified."
         }
       },
       "additionalProperties": true
     },
     "return_code": {
       "type": "integer",
-      "description": "Exit code or return value of the syscall/operation."
+      "description": "Exit code or syscall return value, when applicable."
     }
   }
 }

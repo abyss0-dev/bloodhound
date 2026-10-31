@@ -16,9 +16,12 @@
 //!
 //! Exec view capture resolves each direct member in its pointer chain here.
 //! Missing view members disable that optional observation, without guessing
-//! offsets or disabling the required lifecycle fields.
+//! offsets or disabling the required lifecycle fields. Namespace snapshot
+//! slots are resolved the same way, one slot at a time: a slot whose members
+//! are missing is reported as unsupported while the others stay complete.
 
 use anyhow::{bail, Context, Result};
+use bloodhound_common::{NS_FIELDS, NS_OFFSETS_LEN, NS_SLOT_FIELDS, NS_UPID_SIZE_INDEX};
 use log::info;
 
 /// Path to the running kernel's BTF, exposed by the kernel when built
@@ -29,6 +32,7 @@ const SYS_BTF: &str = "/sys/kernel/btf/vmlinux";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskStructOffsets {
     pub exec_view: Option<[u32; 14]>,
+    pub namespaces: NamespaceOffsets,
     /// `task_struct::loginuid` (a `kuid_t`; its first member is the `u32`
     /// audit login UID).
     pub loginuid: u32,
@@ -44,6 +48,34 @@ pub struct TaskStructOffsets {
     pub comm: u32,
     pub signal_live: u32,
     pub signal_group_exit_code: u32,
+}
+
+/// Offsets for `NS_FIELDS` (unresolved members are 0) followed by
+/// `sizeof(struct upid)`, and the support bit of each namespace slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NamespaceOffsets {
+    pub offsets: [u32; NS_OFFSETS_LEN],
+    pub supported: u32,
+}
+
+impl NamespaceOffsets {
+    fn from_resolved(fields: &[Option<u32>; NS_FIELDS.len()], upid_size: Option<u32>) -> Self {
+        let mut offsets = [0; NS_OFFSETS_LEN];
+        for (offset, field) in offsets.iter_mut().zip(fields) {
+            *offset = field.unwrap_or(0);
+        }
+        offsets[NS_UPID_SIZE_INDEX] = upid_size.unwrap_or(0);
+        let mut supported = 0;
+        for (bit, needed) in NS_SLOT_FIELDS.iter().enumerate() {
+            let pid_slot = needed.contains(&9);
+            if needed.iter().all(|&index| fields[index].is_some())
+                && (!pid_slot || upid_size.is_some_and(|size| size > 0))
+            {
+                supported |= 1 << bit;
+            }
+        }
+        Self { offsets, supported }
+    }
 }
 
 /// Resolve every required lifecycle offset from the running kernel and fail
@@ -163,6 +195,8 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
 
     let mut task_offsets = None;
     let mut view_offsets = [None; 14];
+    let mut ns_offsets = [None; NS_FIELDS.len()];
+    let mut upid_size = None;
     let mut signal_offsets = None;
     let mut pos = type_base;
     while pos + 12 <= type_end {
@@ -181,6 +215,18 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
                     view_offsets[i] =
                         read_named_member(&r, str_base, members_pos, vlen, struct_size, field).ok();
                 }
+            }
+            for (i, (owner, field)) in NS_FIELDS.iter().enumerate() {
+                if struct_name == *owner {
+                    // `pid.numbers` is a flexible array member, so its offset
+                    // may equal the struct size.
+                    ns_offsets[i] =
+                        member_offset(&r, str_base, members_pos, vlen, field)?
+                            .filter(|&offset| offset <= struct_size);
+                }
+            }
+            if struct_name == "upid" {
+                upid_size = Some(struct_size);
             }
             if struct_name == "task_struct" {
                 task_offsets = Some(read_task_members(
@@ -219,6 +265,7 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
         .copied()
         .collect::<Option<Vec<_>>>()
         .and_then(|v| v.try_into().ok());
+    offsets.namespaces = NamespaceOffsets::from_resolved(&ns_offsets, upid_size);
     offsets.signal_live = live;
     offsets.signal_group_exit_code = group_exit_code;
     Ok(offsets)
@@ -275,6 +322,7 @@ fn read_task_members(
 
     let off = TaskStructOffsets {
         exec_view: None,
+        namespaces: NamespaceOffsets::from_resolved(&[None; NS_FIELDS.len()], None),
         loginuid: loginuid.context("task_struct::loginuid not found in BTF")?,
         sessionid: sessionid.context("task_struct::sessionid not found in BTF")?,
         tgid: tgid.context("task_struct::tgid not found in BTF")?,
@@ -308,6 +356,22 @@ fn read_task_members(
     }
 
     Ok(off)
+}
+
+fn member_offset(
+    r: &Reader,
+    str_base: usize,
+    members_pos: usize,
+    vlen: usize,
+    wanted: &str,
+) -> Result<Option<u32>> {
+    for i in 0..vlen {
+        let m = members_pos + i * 12;
+        if r.str_at(str_base, r.u32(m)?)? == wanted {
+            return Ok(Some((r.u32(m + 8)? & 0x00ff_ffff) / 8));
+        }
+    }
+    Ok(None)
 }
 
 fn read_named_member(
@@ -518,6 +582,69 @@ mod tests {
         }
     }
 
+    fn add_namespace_structs(b: &mut BtfBuilder, skip: Option<(&str, &str)>) {
+        let mut structs = std::collections::BTreeMap::<&str, Vec<(&str, u32)>>::new();
+        for (i, &(owner, member)) in NS_FIELDS.iter().enumerate() {
+            if skip == Some((owner, member)) || owner == "task_struct" {
+                continue;
+            }
+            structs.entry(owner).or_default().push((member, 8 + (i as u32) * 8));
+        }
+        for (owner, members) in structs {
+            if owner == "pid" {
+                // numbers[] is a flexible array: its offset equals the size.
+                let size = members.iter().map(|(_, o)| *o).max().unwrap();
+                b.add_struct_sized(owner, &members, false, size);
+            } else {
+                b.add_struct(owner, &members, false);
+            }
+        }
+    }
+
+    fn lifecycle_task_with(extra: &[(&'static str, u32)]) -> Vec<(&'static str, u32)> {
+        let mut task = vec![
+            ("pid", 8),
+            ("tgid", 12),
+            ("group_leader", 16),
+            ("start_boottime", 24),
+            ("signal", 32),
+            ("exit_code", 40),
+            ("comm", 48),
+            ("loginuid", 64),
+            ("sessionid", 68),
+        ];
+        task.extend_from_slice(extra);
+        task
+    }
+
+    #[test]
+    fn namespace_slots_are_supported_independently() {
+        let task = lifecycle_task_with(&[("nsproxy", 80), ("real_cred", 88), ("thread_pid", 96)]);
+        let mut b = BtfBuilder::new();
+        add_lifecycle_structs(&mut b, &task);
+        add_namespace_structs(&mut b, None);
+        let ns = parse_task_offsets(&b.build()).unwrap().namespaces;
+        assert_eq!(ns.supported, 0xff);
+        assert_eq!(ns.offsets[0], 80);
+        assert_eq!(ns.offsets[6], 88);
+        assert_eq!(ns.offsets[8], 96);
+        assert_eq!(ns.offsets[10], 8 + 10 * 8, "flexible pid.numbers resolves");
+        assert!(ns.offsets[NS_UPID_SIZE_INDEX] > 0);
+
+        // A kernel without cgroup namespaces keeps every other slot.
+        let mut b = BtfBuilder::new();
+        add_lifecycle_structs(&mut b, &task);
+        add_namespace_structs(&mut b, Some(("cgroup_namespace", "ns")));
+        assert_eq!(parse_task_offsets(&b.build()).unwrap().namespaces.supported, 0xff & !(1 << 4));
+
+        // Without task_struct::nsproxy only user and pid remain.
+        let task = lifecycle_task_with(&[("real_cred", 88), ("thread_pid", 96)]);
+        let mut b = BtfBuilder::new();
+        add_lifecycle_structs(&mut b, &task);
+        add_namespace_structs(&mut b, None);
+        assert_eq!(parse_task_offsets(&b.build()).unwrap().namespaces.supported, (1 << 5) | (1 << 6));
+    }
+
     #[test]
     fn resolves_drifted_offsets() {
         // The exact drift from issue #37 (6.8.0-117): loginuid/sessionid
@@ -642,5 +769,6 @@ mod tests {
         assert!(offsets.comm > 0);
         assert!(offsets.signal_live > 0);
         assert!(offsets.signal_group_exit_code > 0);
+        assert_eq!(offsets.namespaces.supported, 0xff, "{:?}", offsets.namespaces);
     }
 }

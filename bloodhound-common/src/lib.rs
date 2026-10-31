@@ -218,6 +218,11 @@ pub struct EventHeader {
     /// `pid` (the TGID), this identifies one process instance across PID reuse.
     pub process_start_boottime_ns: u64,
     pub comm: [u8; COMM_SIZE],
+    /// Thread ID of the task this header describes. Zero means the record
+    /// has no task context, and `ns` is then not reported.
+    pub tid: u32,
+    /// Namespaces of that task at `timestamp_ns` (tracer contract §2.8.1).
+    pub ns: NsSnapshot,
 }
 
 impl EventHeader {
@@ -1200,8 +1205,8 @@ mod tests {
         // repr(C) layout: kind(1) + _pad(3) + 4 bytes alignment padding
         // + timestamp_ns(8) + auid(4) + sessionid(4)
         // + pid(4) + ppid(4) + process_start_boottime_ns(8)
-        // + comm(16) = 56
-        assert_eq!(EventHeader::SIZE, 56);
+        // + comm(16) + tid(4) + ns(36) = 96
+        assert_eq!(EventHeader::SIZE, 96);
         assert_eq!(EventHeader::SIZE, mem::size_of::<EventHeader>());
     }
 
@@ -1362,3 +1367,87 @@ pub const EXEC_VIEW_FIELDS: [(&str, &str); 14] = [
     ("mount", "mnt"),
     ("mount", "mnt_id"),
 ];
+
+// ── Namespace membership snapshot ────────────────────────────────────────────
+
+/// Header slots, in output order: mnt, net, uts, ipc, cgroup, user, pid.
+pub const NS_SLOTS: usize = 7;
+pub const NS_SLOT_NAMES: [&str; NS_SLOTS] = ["mnt", "net", "uts", "ipc", "cgroup", "user", "pid"];
+/// Support bit for the PID namespace of future children (`setns`/`unshare`).
+pub const NS_PID_FOR_CHILDREN_BIT: u32 = 1 << NS_SLOTS;
+
+pub const NS_STATUS_COMPLETE: u8 = 1;
+pub const NS_STATUS_UNSUPPORTED: u8 = 2;
+pub const NS_STATUS_UNAVAILABLE: u8 = 3;
+
+/// Namespace identities of one task read at one hook moment. `inum[i]` is
+/// meaningful only when `status[i]` is `NS_STATUS_COMPLETE`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NsSnapshot {
+    pub inum: [u32; NS_SLOTS],
+    pub status: [u8; NS_SLOTS],
+    pub _pad: u8,
+}
+
+/// Ordered direct-member offsets for namespace reads. Index `NS_FIELDS.len()`
+/// of the offset table carries `sizeof(struct upid)` instead of an offset.
+pub const NS_FIELDS: [(&str, &str); 21] = [
+    ("task_struct", "nsproxy"),         // 0
+    ("nsproxy", "mnt_ns"),              // 1
+    ("nsproxy", "net_ns"),              // 2
+    ("nsproxy", "uts_ns"),              // 3
+    ("nsproxy", "ipc_ns"),              // 4
+    ("nsproxy", "cgroup_ns"),           // 5
+    ("task_struct", "real_cred"),       // 6
+    ("cred", "user_ns"),                // 7
+    ("task_struct", "thread_pid"),      // 8
+    ("pid", "level"),                   // 9
+    ("pid", "numbers"),                 // 10
+    ("upid", "ns"),                     // 11
+    ("nsproxy", "pid_ns_for_children"), // 12
+    ("ns_common", "inum"),              // 13
+    ("mnt_namespace", "ns"),            // 14
+    ("net", "ns"),                      // 15
+    ("uts_namespace", "ns"),            // 16
+    ("ipc_namespace", "ns"),            // 17
+    ("cgroup_namespace", "ns"),         // 18
+    ("user_namespace", "ns"),           // 19
+    ("pid_namespace", "ns"),            // 20
+];
+pub const NS_OFFSETS_LEN: usize = NS_FIELDS.len() + 1;
+pub const NS_UPID_SIZE_INDEX: usize = NS_FIELDS.len();
+
+/// `NS_FIELDS` indexes each slot needs; bit `i` of the support mask is set
+/// only when every one resolves. The PID slots also need `sizeof(upid)`.
+pub const NS_SLOT_FIELDS: [&[usize]; NS_SLOTS + 1] = [
+    &[0, 1, 14, 13],
+    &[0, 2, 15, 13],
+    &[0, 3, 16, 13],
+    &[0, 4, 17, 13],
+    &[0, 5, 18, 13],
+    &[6, 7, 19, 13],
+    &[8, 9, 10, 11, 20, 13],
+    &[0, 12, 20, 13],
+];
+
+#[cfg(test)]
+mod ns_tests {
+    use super::*;
+
+    #[test]
+    fn header_layout_has_no_implicit_tail_padding() {
+        assert_eq!(core::mem::size_of::<NsSnapshot>(), 36);
+        assert_eq!(EventHeader::SIZE, 96);
+        assert_eq!(core::mem::offset_of!(EventHeader, tid), 56);
+        assert_eq!(core::mem::offset_of!(EventHeader, ns), 60);
+    }
+
+    #[test]
+    fn every_slot_names_resolvable_fields() {
+        for fields in NS_SLOT_FIELDS {
+            assert!(fields.iter().all(|&index| index < NS_FIELDS.len()));
+            assert!(fields.contains(&13), "every slot ends at ns_common.inum");
+        }
+    }
+}

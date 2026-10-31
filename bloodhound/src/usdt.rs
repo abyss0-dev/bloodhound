@@ -329,6 +329,8 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
             ppid: None,
             comm: String::new(),
             process_ref: None,
+            tid: None,
+            ns: None,
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
@@ -524,7 +526,10 @@ pub fn attach_selected(
         Ok(())
     })();
     match attach_result {
-        Ok(()) => Vec::new(),
+        Ok(()) => {
+            crate::loader::record_attached(target.probes.len());
+            Vec::new()
+        }
         Err(error) => {
             // Keep the externally emitted diagnostic bounded and stable, but
             // retain Aya's verifier/attach error in the service journal.  An

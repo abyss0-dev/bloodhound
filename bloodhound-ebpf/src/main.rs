@@ -12,6 +12,7 @@ mod layer3_rich;
 mod lifecycle;
 mod lsm_hooks;
 mod maps;
+mod ns;
 mod packet_tc;
 mod signal;
 mod usdt;
@@ -86,3 +87,10 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub static mut OFF_EXEC_VIEW: [u32;14] = [0;14];
 #[no_mangle]
 pub static mut EXEC_VIEW_SUPPORTED: u32 = 0;
+/// Offsets for NS_FIELDS, then `sizeof(struct upid)`.
+#[no_mangle]
+pub static mut OFF_NS: [u32; bloodhound_common::NS_OFFSETS_LEN] =
+    [0; bloodhound_common::NS_OFFSETS_LEN];
+/// Bit i: namespace slot i is supported; NS_PID_FOR_CHILDREN_BIT likewise.
+#[no_mangle]
+pub static mut NS_SUPPORTED: u32 = 0;

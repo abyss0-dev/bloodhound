@@ -104,6 +104,8 @@ fn deserialize_rejection_diagnostic(total: u64) -> BehaviorEvent {
             ppid: None,
             comm: String::new(),
             process_ref: None,
+            tid: None,
+            ns: None,
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
@@ -147,6 +149,8 @@ mod tests {
                 comm[..4].copy_from_slice(b"test");
                 comm
             },
+            tid: 42,
+            ns: Default::default(),
         };
         let payload = RawSyscallPayload {
             syscall_nr,
@@ -166,6 +170,8 @@ mod tests {
                 ppid: None,
                 comm: String::new(),
                 process_ref: None,
+                tid: None,
+                ns: None,
             },
             event: EventTypeJson {
                 event_type: "DIAGNOSTIC".into(),

@@ -11,6 +11,25 @@ use bloodhound_common::*;
 use crate::btf_offsets;
 use crate::{cli::Cli, deserializer::BehaviorEvent, usdt};
 
+/// Probe attachments that succeeded, reported in `META bloodhound_ready`.
+static PROBES_ATTACHED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn record_attached(count: usize) {
+    PROBES_ATTACHED.fetch_add(count as u32, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn probes_attached() -> u32 {
+    PROBES_ATTACHED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Capacity of the kernel ring buffer as created, in bytes.
+pub fn ring_buffer_size(bpf: &aya::Ebpf) -> Result<u32> {
+    match bpf.map("EVENTS") {
+        Some(aya::maps::Map::RingBuf(data)) => Ok(data.info()?.max_entries()),
+        _ => anyhow::bail!("EVENTS ring buffer not found in BPF object"),
+    }
+}
+
 pub fn load_and_attach(
     args: &Cli,
     usdt_selections: &[usdt::Selection],
@@ -27,6 +46,8 @@ pub fn load_and_attach(
     let mut bpf = EbpfLoader::new()
         .set_global("OFF_EXEC_VIEW", &view_offsets, true)
         .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
+        .set_global("OFF_NS", &offsets.namespaces.offsets, true)
+        .set_global("NS_SUPPORTED", &offsets.namespaces.supported, true)
         .set_global("TARGET_AUID", &args.uid, true)
         .set_global("DAEMON_PID", &std::process::id(), true)
         .set_global("OFF_LOGINUID", &offsets.loginuid, true)
@@ -258,6 +279,7 @@ fn attach_raw_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, name: &str) -> Re
         .try_into()?;
     program.load()?;
     program.attach(name)?;
+    record_attached(1);
     Ok(())
 }
 
@@ -292,6 +314,7 @@ fn attach_tracepoint(
         .try_into()?;
     program.load()?;
     program.attach(category, name)?;
+    record_attached(1);
     Ok(())
 }
 
@@ -313,6 +336,7 @@ fn try_attach_kprobe(bpf: &mut aya::Ebpf, prog_name: &str, fn_name: &str) -> boo
             .try_into()?;
         program.load()?;
         program.attach(fn_name, 0)?;
+        record_attached(1);
         Ok(())
     })();
     match result {
@@ -374,6 +398,7 @@ fn attach_tc_hooks(bpf: &mut aya::Ebpf) -> Result<()> {
             if let Err(e) = ingress.attach(iface, TcAttachType::Ingress) {
                 warn!("TC ingress attach on {}: {}", iface, e);
             } else {
+                record_attached(1);
                 info!("  TC ingress attached on {}", iface);
             }
         }
@@ -391,6 +416,7 @@ fn attach_tc_hooks(bpf: &mut aya::Ebpf) -> Result<()> {
             if let Err(e) = egress.attach(iface, TcAttachType::Egress) {
                 warn!("TC egress attach on {}: {}", iface, e);
             } else {
+                record_attached(1);
                 info!("  TC egress attached on {}", iface);
             }
         }
@@ -406,6 +432,7 @@ fn attach_lsm(bpf: &mut aya::Ebpf, prog_name: &str, hook_name: &str, btf: &Btf) 
         .try_into()?;
     program.load(hook_name, btf)?;
     program.attach()?;
+    record_attached(1);
     Ok(())
 }
 

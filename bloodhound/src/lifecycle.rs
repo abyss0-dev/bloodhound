@@ -157,6 +157,8 @@ fn make_identity_diagnostic(
             ppid: None,
             comm: String::new(),
             process_ref: None,
+            tid: None,
+            ns: None,
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
@@ -187,13 +189,21 @@ fn make_process_start(triggering: &BehaviorEvent, process_ref: ProcessRefJson) -
     }
 }
 
+/// The synthesized record keeps the triggering identity but is not a hook
+/// moment of that task, so it never carries `tid` or a namespace snapshot.
 fn clone_header(header: &EventHeaderJson) -> EventHeaderJson {
-    header.clone()
+    EventHeaderJson {
+        tid: None,
+        ns: None,
+        ..header.clone()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deserializer::NamespaceSnapshotJson;
+    use bloodhound_common::{NsSnapshot, NS_SLOTS, NS_STATUS_COMPLETE};
 
     fn event(pid: u32, start_boottime_ns: u64, event_type: &str, name: &str) -> BehaviorEvent {
         BehaviorEvent {
@@ -208,6 +218,12 @@ mod tests {
                     tgid: pid,
                     start_boottime_ns,
                 }),
+                tid: Some(pid),
+                ns: Some(NamespaceSnapshotJson::from(&NsSnapshot {
+                    inum: [7; NS_SLOTS],
+                    status: [NS_STATUS_COMPLETE; NS_SLOTS],
+                    _pad: 0,
+                })),
             },
             event: EventTypeJson {
                 event_type: event_type.to_string(),
@@ -244,6 +260,9 @@ mod tests {
         assert_eq!(args["process_ref"]["tgid"], 999_999_999);
         assert_eq!(args["process_ref"]["start_boottime_ns"], 123_456);
         assert!(args.get("partial").is_none());
+        // The bootstrap record is synthesized, not a hook moment of the task.
+        assert_eq!(start.header.pid, 999_999_999);
+        assert!(start.header.tid.is_none() && start.header.ns.is_none());
     }
 
     #[test]

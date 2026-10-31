@@ -10,6 +10,7 @@ mod heartbeat;
 mod lifecycle;
 mod loader;
 mod packet_correlator;
+mod ready;
 mod sequencer;
 mod serializer;
 mod shutdown;
@@ -115,6 +116,19 @@ async fn main() -> Result<()> {
         "process_exit", &bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
         exit_map, sequence_tx.clone(), exit_shutdown_rx,
     ));
+
+    // Every probe is attached. Admit bloodhound_ready before the ring-buffer
+    // consumer starts, so it precedes every kernel-captured record and
+    // consumers learn nsfs_dev before the first header namespace snapshot.
+    let ready = ready::ready_event(
+        loader::probes_attached(),
+        loader::ring_buffer_size(&bpf)?,
+        ready::nsfs_dev(),
+    );
+    sequence_tx
+        .send(SequencedInput::Synthesized(Box::new(ready)))
+        .await
+        .context("admitting bloodhound_ready to event sequencer")?;
 
     // Set up ring buffer consumer
     let map = bpf.take_map("EVENTS").unwrap();
