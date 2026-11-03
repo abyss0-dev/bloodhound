@@ -373,8 +373,7 @@ overhead minimal for these high-frequency syscalls.
 ### chdir/fchdir capture
 
 `chdir` captures the target path in `args.filename` (read via per-CPU map,
-same as openat). `fchdir` captures the target fd in `args.fd`; userspace
-resolves the path via `/proc/<pid>/fd/<N>` (best-effort). Both emit
+same as openat). `fchdir` captures the target fd in `args.fd`; no path is resolved. Both emit
 `return_code` from `sys_exit`.
 
 
