@@ -254,33 +254,38 @@ print(*pids, flush=True)
 
 
 def test_task_kill_identifies_target_without_synthesizing_exit(
-    ssh_cmd, bloodhound_events, wait_for_matching_events
+    ssh_cmd, foreground_bloodhound, wait_until, wait_for_matching_events
 ):
-    pid = _pid_from(ssh_cmd("nohup sleep 30 >/dev/null 2>&1 & echo $!"))
-    try:
-        probe = ssh_cmd(f"kill -0 {pid}")
-        assert probe.returncode == 0
-        events = wait_for_matching_events(
-            bloodhound_events,
-            lambda current: any(
-                event.get("event", {}).get("name") == "task_kill"
+    with foreground_bloodhound("--enable-lsm") as daemon:
+        wait_until(lambda: daemon.events(), "opt-in readiness")
+        ready = daemon.events()[0]
+        assert ready["event"]["name"] == "bloodhound_ready"
+        assert ready["args"]["attached"]["lsm.task_kill"] is True
+        pid = _pid_from(ssh_cmd("nohup sleep 30 >/dev/null 2>&1 & echo $!"))
+        try:
+            probe = ssh_cmd(f"kill -0 {pid}")
+            assert probe.returncode == 0
+            events = wait_for_matching_events(
+                daemon.events,
+                lambda current: any(
+                    event.get("event", {}).get("name") == "task_kill"
+                    and event.get("args", {}).get("target_pid") == pid
+                    and event.get("args", {}).get("signal") == 0
+                    for event in current
+                ),
+                f"task_kill signal probe for pid={pid}",
+            )
+            task_kill = next(
+                event for event in events
+                if event.get("event", {}).get("name") == "task_kill"
                 and event.get("args", {}).get("target_pid") == pid
                 and event.get("args", {}).get("signal") == 0
-                for event in current
-            ),
-            f"task_kill signal probe for pid={pid}",
-        )
-        task_kill = next(
-            event for event in events
-            if event.get("event", {}).get("name") == "task_kill"
-            and event.get("args", {}).get("target_pid") == pid
-            and event.get("args", {}).get("signal") == 0
-        )
-        assert task_kill["args"]["target_ref"]["tgid"] == pid
-        assert task_kill["args"]["target_ref"]["start_boottime_ns"] > 0
-        assert _exits(events, pid) == []
-    finally:
-        ssh_cmd(f"kill -TERM {pid}")
+            )
+            assert task_kill["args"]["target_ref"]["tgid"] == pid
+            assert task_kill["args"]["target_ref"]["start_boottime_ns"] > 0
+            assert _exits(events, pid) == []
+        finally:
+            ssh_cmd(f"kill -TERM {pid}")
 
 
 def test_signal_generate_identifies_sender_and_target_without_lsm_authority(
