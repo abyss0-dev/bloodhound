@@ -9,7 +9,7 @@ use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::{emit_event, bpf_memcpy, increment_drop_count};
 use crate::maps::{
-    OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, ASSEMBLY_BUF, RICH_ENTRY_MAP, SCRATCH_BUF, SOCKET_TABLE, SYSCALL_TMP_BUF, SocketInfo,
+    OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, ASSEMBLY_BUF, RICH_ENTRY_MAP, SCRATCH_BUF, SYSCALL_TMP_BUF,
 };
 
 // ── Emit helpers ─────────────────────────────────────────────────────────────
@@ -362,24 +362,8 @@ unsafe fn try_sys_exit_sockaddr(ctx: &TracePointContext) -> Result<u32, i64> {
     };
     emit_fixed(&entry.header, &payload);
 
-    // Populate socket table for packet correlation
-    if ret >= 0 {
-        let socket_info = SocketInfo {
-            pid: entry.header.pid,
-            auid: entry.header.auid,
-            comm: entry.header.comm,
-        };
-        let key = compute_socket_key(ed.family, ed.port, ed.addr_v4);
-        let _ = SOCKET_TABLE.insert(&key, &socket_info, 0);
-    }
-
     let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
     Ok(0)
-}
-
-#[inline(always)]
-fn compute_socket_key(family: u16, port: u16, addr_v4: u32) -> u64 {
-    ((family as u64) << 48) | ((port as u64) << 32) | (addr_v4 as u64)
 }
 
 // ── listen ───────────────────────────────────────────────────────────────────

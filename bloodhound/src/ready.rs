@@ -26,7 +26,40 @@ fn nsfs_dev_of(path: &str) -> Option<u64> {
     file.metadata().ok().map(|metadata| metadata.dev())
 }
 
-pub fn ready_event(probes_attached: u32, ring_buffer_size: u32, nsfs_dev: Option<u64>) -> BehaviorEvent {
+/// Startup facts are collected before any emitting task is started.
+#[derive(Default)]
+pub struct StartupFacts {
+    pub boot_id: String,
+    pub auid: u32,
+    pub daemon_pid: u32,
+    pub heartbeat_interval_ms: u32,
+}
+
+pub fn boot_id() -> anyhow::Result<String> {
+    use anyhow::Context;
+    let value = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .context("reading kernel boot ID")?;
+    let value = value.trim();
+    anyhow::ensure!(
+        value.len() == 36
+            && value.bytes().enumerate().all(|(i, b)| {
+                if [8, 13, 18, 23].contains(&i) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_hexdigit()
+                }
+            }),
+        "invalid kernel boot ID"
+    );
+    Ok(value.to_owned())
+}
+
+pub fn ready_event(
+    report: &crate::loader::AttachReport,
+    ring_buffer_size: u32,
+    nsfs_dev: Option<u64>,
+    facts: &StartupFacts,
+) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {
             timestamp: monotonic_now_ns(),
@@ -46,7 +79,12 @@ pub fn ready_event(probes_attached: u32, ring_buffer_size: u32, nsfs_dev: Option
         },
         proc: None,
         args: Some(json!({
-            "probes_attached": probes_attached,
+            "probes_attached": report.probes,
+            "attached": report.keys,
+            "boot_id": facts.boot_id,
+            "auid": facts.auid,
+            "excluded": [facts.daemon_pid],
+            "heartbeat_interval_ms": facts.heartbeat_interval_ms,
             "ring_buffer_size": ring_buffer_size,
             "nsfs_dev": nsfs_dev,
         })),
@@ -72,12 +110,29 @@ mod tests {
 
     #[test]
     fn ready_event_carries_contract_fields_without_task_context() {
-        let json = serde_json::to_value(ready_event(42, 4 << 20, None)).unwrap();
+        let facts = StartupFacts {
+            boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
+            auid: 1000,
+            daemon_pid: 123,
+            heartbeat_interval_ms: 1,
+        };
+        let mut report = crate::loader::AttachReport {
+            probes: 42,
+            ..Default::default()
+        };
+        report.keys.insert("lifecycle".into(), true);
+        report.keys.insert("tier2.openat".into(), false);
+        let json = serde_json::to_value(ready_event(&report, 4 << 20, None, &facts)).unwrap();
         assert_eq!(json["event"]["type"], "META");
         assert_eq!(json["event"]["name"], "bloodhound_ready");
-        assert_eq!(json["args"], json!({"probes_attached": 42, "ring_buffer_size": 4 << 20, "nsfs_dev": null}));
+        assert_eq!(
+            json["args"],
+            json!({"probes_attached": 42, "ring_buffer_size": 4 << 20, "nsfs_dev": null,
+            "boot_id": facts.boot_id, "auid": 1000, "excluded": [123], "heartbeat_interval_ms": 1,
+            "attached": {"lifecycle": true, "tier2.openat": false}})
+        );
         assert!(json["header"].get("tid").is_none() && json["header"].get("ns").is_none());
-        let json = serde_json::to_value(ready_event(1, 1, Some(4))).unwrap();
+        let json = serde_json::to_value(ready_event(&report, 1, Some(4), &facts)).unwrap();
         assert_eq!(json["args"]["nsfs_dev"], 4);
     }
 }

@@ -6,18 +6,16 @@ Userspace daemon that loads eBPF programs, consumes events from the ring buffer,
 
 ```mermaid
 graph LR
-    Loader["loader.rs<br/>Load & attach<br/>eBPF programs"]
+    Loader["loader.rs<br/>Load & attach BPF<br/>& AttachReport"]
     Consumer["consumer.rs<br/>Ring buffer<br/>polling"]
     Sequencer["sequencer.rs<br/>Bounded admission<br/>+ one writer"]
     Synth["Heartbeat +<br/>diagnostics"]
     Deser["deserializer.rs<br/>Raw bytes →<br/>typed events"]
-    Enricher["enricher.rs<br/>/proc enrichment"]
-    PktCorr["packet_correlator.rs<br/>5-tuple join"]
     Serializer["serializer.rs<br/>→ NDJSON"]
 
-    Loader --> Consumer --> Sequencer --> Deser --> Enricher --> Serializer
+    Loader --> Consumer --> Sequencer
     Synth --> Sequencer
-    Deser --> PktCorr --> Serializer
+    Sequencer --> Deser --> Serializer
 ```
 
 ## Modules
@@ -25,14 +23,13 @@ graph LR
 | Module | Description |
 |--------|-------------|
 | `main.rs` | Entry point, tokio runtime, signal handling |
-| `cli.rs` | Command-line argument parsing (`--uid`, `--exclude-ports`) |
-| `loader.rs` | Loads eBPF bytecode via Aya, attaches tracepoints/kprobes/TC/LSM |
+| `cli.rs` | Command-line argument parsing (`--uid`, `--enable-lsm`, `--heartbeat-interval`, etc.) |
+| `loader.rs` | Loads eBPF bytecode via Aya, attaches tracepoints/kprobes/LSM/USDT, produces `AttachReport` |
+| `ready.rs` | Startup facts validation (`boot_id`, `auid`, `excluded`, cadence) and `bloodhound_ready` emission |
 | `consumer.rs` | Polls the BPF ring buffer for raw events |
 | `sequencer.rs` | Defines bounded cross-producer admission order and the single fallible NDJSON path |
 | `clock.rs` | Reads VM `CLOCK_MONOTONIC` nanoseconds for userspace-synthesized events |
-| `deserializer.rs` | Deserializes raw byte buffers into typed event structs |
-| `enricher.rs` | Enriches events with `/proc` data (cwd, exe path, fd info) |
-| `packet_correlator.rs` | Correlates PACKET events with socket syscalls via 5-tuple |
+| `deserializer.rs` | Deserializes raw byte buffers into typed event structs (historical decode for packets) |
 | `serializer.rs` | Serializes events to NDJSON (`BehaviorEvent` schema) |
 | `drop_counter.rs` | Polls the BPF drop counter and reports to stderr |
 | `shutdown.rs` | Graceful shutdown coordination |
@@ -52,6 +49,6 @@ The eBPF bytecode is compiled by `build.rs` via `aya_build::build_ebpf()` and em
 ## Usage
 
 ```bash
-bloodhound --uid 1000                     # trace user with UID 1000
-bloodhound --uid 1000 --exclude-ports 22  # exclude SSH traffic
+bloodhound --uid 1000                     # trace user with UID 1000 (default non-enforcing)
+bloodhound --uid 1000 --enable-lsm        # opt-in LSM hooks (task_kill/ptrace enforcement, bpf observe)
 ```

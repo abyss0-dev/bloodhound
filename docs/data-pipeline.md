@@ -7,7 +7,7 @@ graph TD
     POLL["Userspace Poll Loop"]
     SYNTH["Userspace Producers<br/>(heartbeat + diagnostics)"]
     SEQ["Bounded Sequencer"]
-    PROCESS["Raw decode + enrichment<br/>Synthesized pass-through"]
+    PROCESS["Raw decode + lifecycle<br/>Synthesized pass-through"]
     OUT["stdout (NDJSON)"]
 
     BPF -->|"fixed-size + var-len events"| RB
@@ -51,16 +51,11 @@ Each BPF event from Layer 1-3 and LSM hooks carries at minimum:
 - comm ([u8; 16])
 - Hook-specific payload (variable length)
 
-**Exception: PACKET events (TC hooks)** do not have process context.
-TC programs cannot access `task_struct`, so PACKET events carry only:
-
-- Event discriminant (u8)
-- Timestamp (u64)
-- Full raw packet data (L2 and above, up to MTU)
-
-Userspace populates `header.pid`, `header.ppid`, `header.auid`,
-`header.sessionid`, and `header.comm` by joining against the socket
-tracking table. See [tracing.md](tracing.md) Packet Capture section.
+**Historical note: PACKET events (TC hooks)** were retired in Phase 2. Event kinds
+100 and 101 remain permanently reserved for historical offline decoding only.
+Historical PACKET events carried only the discriminant, timestamp, and raw payload bytes,
+which were joined against socket state in userspace. Active tracing now captures
+network activity via Layer 3 socket syscalls.
 
 
 ## Timestamp Strategy
@@ -79,7 +74,7 @@ does not establish total kernel causality or cross-boot comparability.
 Raw ring-buffer records and userspace-synthesized records enter one bounded
 MPSC sequencer. Each producer retains FIFO order. Across producers, successful
 channel admission defines order. The one receiver performs deserialization,
-enrichment, lifecycle completion, and NDJSON serialization; line position is
+lifecycle completion, and NDJSON serialization; line position is
 therefore the canonical Bloodhound emission order.
 
 Bounded pressure propagates through userspace to the ring-buffer consumer.

@@ -13,7 +13,7 @@ expression: to_json(& event)
   },
   "header": {
     "auid": 1000,
-    "comm": "bpftool",
+    "comm": "python3",
     "ns": {
       "cgroup": {
         "inode": 4026531835,
@@ -44,14 +44,14 @@ expression: to_json(& event)
         "status": "complete"
       }
     },
-    "pid": 6407,
+    "pid": 41663,
     "process_ref": {
-      "start_boottime_ns": 624136620432,
-      "tgid": 6407
+      "start_boottime_ns": 3726489570035,
+      "tgid": 41663
     },
-    "sessionid": 473,
-    "tid": 6407,
-    "timestamp": 624157189747
+    "sessionid": 2053,
+    "tid": 41663,
+    "timestamp": 3726526176611
   },
-  "return_code": -1
+  "return_code": 0
 }

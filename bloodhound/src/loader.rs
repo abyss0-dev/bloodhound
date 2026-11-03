@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use aya::{
     maps::Array,
-    programs::{KProbe, Lsm, RawTracePoint, SchedClassifier, TcAttachType, TracePoint},
+    programs::{KProbe, Lsm, RawTracePoint, TracePoint},
     Btf, EbpfLoader,
 };
 use log::{info, warn};
@@ -11,15 +11,19 @@ use bloodhound_common::*;
 use crate::btf_offsets;
 use crate::{cli::Cli, deserializer::BehaviorEvent, usdt};
 
-/// Probe attachments that succeeded, reported in `META bloodhound_ready`.
-static PROBES_ATTACHED: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-
-pub fn record_attached(count: usize) {
-    PROBES_ATTACHED.fetch_add(count as u32, std::sync::atomic::Ordering::Relaxed);
+/// Loader-owned outcomes, not inferred from program presence or bitmap state.
+#[derive(Debug, Default)]
+pub struct AttachReport {
+    pub probes: u32,
+    pub keys: std::collections::BTreeMap<String, bool>,
 }
 
-pub fn probes_attached() -> u32 {
-    PROBES_ATTACHED.load(std::sync::atomic::Ordering::Relaxed)
+impl AttachReport {
+    fn pair(&mut self, key: &str, enter: bool, exit: bool) -> bool {
+        let complete = enter && exit;
+        self.keys.insert(key.into(), complete);
+        complete
+    }
 }
 
 /// Capacity of the kernel ring buffer as created, in bytes.
@@ -33,7 +37,14 @@ pub fn ring_buffer_size(bpf: &aya::Ebpf) -> Result<u32> {
 pub fn load_and_attach(
     args: &Cli,
     usdt_selections: &[usdt::Selection],
-) -> Result<(aya::Ebpf, Vec<BehaviorEvent>, usdt::AttachmentLinks)> {
+) -> Result<(
+    aya::Ebpf,
+    Vec<BehaviorEvent>,
+    usdt::AttachmentLinks,
+    AttachReport,
+)> {
+    usdt::validate_selections(usdt_selections)?;
+    let mut report = AttachReport::default();
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets
     // silently breaks tracing on any kernel build but the one the eBPF
@@ -83,40 +94,67 @@ pub fn load_and_attach(
     // Populate exclusion bitmap
     populate_exclusion_bitmap(&mut bpf)?;
 
-    // Populate port exclusion map
-    populate_excluded_ports(&mut bpf, &args.exclude_ports)?;
-
     // Lifecycle identity is authoritative for every behavior event. Attach it
     // first so startup cannot enqueue clone/exec observations before the
     // corresponding process_fork edge is observable.
     info!("Attaching kernel process lifecycle hooks...");
     // Cleanup must be installed before any exit claim can be created.
-    attach_raw_tracepoint(&mut bpf, "sched_process_free", "sched_process_free")?;
-    attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork")?;
-    attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit")?;
+    required(&mut report, "lifecycle", |report| {
+        attach_raw_tracepoint(&mut bpf, "sched_process_free", "sched_process_free", report)?;
+        attach_raw_tracepoint(&mut bpf, "sched_process_fork", "sched_process_fork", report)?;
+        attach_raw_tracepoint(&mut bpf, "sched_process_exit", "sched_process_exit", report)
+    })?;
 
     info!("Attaching non-enforcing signal observation...");
-    attach_raw_tracepoint(&mut bpf, "signal_generate", "signal_generate")?;
+    required(&mut report, "signal", |report| {
+        attach_raw_tracepoint(&mut bpf, "signal_generate", "signal_generate", report)
+    })?;
 
     info!("Attaching Layer 2: execve tracepoints...");
-    attach_tracepoint(&mut bpf, "sys_enter_execve", "syscalls", "sys_enter_execve")?;
-    attach_tracepoint(&mut bpf, "sys_exit_execve", "syscalls", "sys_exit_execve")?;
-    try_attach_tracepoint(
+    required(&mut report, "exec.execve", |report| {
+        attach_tracepoint(
+            &mut bpf,
+            "sys_enter_execve",
+            "syscalls",
+            "sys_enter_execve",
+            report,
+        )?;
+        attach_tracepoint(
+            &mut bpf,
+            "sys_exit_execve",
+            "syscalls",
+            "sys_exit_execve",
+            report,
+        )
+    })?;
+    let execveat_enter = try_attach_tracepoint(
         &mut bpf,
         "sys_enter_execveat",
         "syscalls",
         "sys_enter_execveat",
+        &mut report,
     );
-    try_attach_tracepoint(
+    let execveat_exit = try_attach_tracepoint(
         &mut bpf,
         "sys_exit_execveat",
         "syscalls",
         "sys_exit_execveat",
+        &mut report,
     );
 
+    report.pair("exec.execveat", execveat_enter, execveat_exit);
+
     info!("Attaching Layer 3 Tier 1: raw syscalls...");
-    attach_tracepoint(&mut bpf, "raw_sys_enter", "raw_syscalls", "sys_enter")?;
-    attach_tracepoint(&mut bpf, "raw_sys_exit", "raw_syscalls", "sys_exit")?;
+    required(&mut report, "raw_syscalls", |report| {
+        attach_tracepoint(
+            &mut bpf,
+            "raw_sys_enter",
+            "raw_syscalls",
+            "sys_enter",
+            report,
+        )?;
+        attach_tracepoint(&mut bpf, "raw_sys_exit", "raw_syscalls", "sys_exit", report)
+    })?;
 
     info!("Attaching Layer 3 Tier 2: rich syscalls...");
     let tier2_syscalls: &[(&str, u64)] = &[
@@ -172,10 +210,12 @@ pub fn load_and_attach(
         let enter_tp = format!("sys_enter_{}", name);
         let exit_tp = format!("sys_exit_{}", name);
 
-        let enter_ok = try_attach_tracepoint(&mut bpf, &enter_prog, "syscalls", &enter_tp);
-        let exit_ok = try_attach_tracepoint(&mut bpf, &exit_prog, "syscalls", &exit_tp);
+        let enter_ok =
+            try_attach_tracepoint(&mut bpf, &enter_prog, "syscalls", &enter_tp, &mut report);
+        let exit_ok =
+            try_attach_tracepoint(&mut bpf, &exit_prog, "syscalls", &exit_tp, &mut report);
 
-        if enter_ok && exit_ok {
+        if report.pair(&format!("tier2.{name}"), enter_ok, exit_ok) {
             if (*nr as u32) < BITMAP_SIZE as u32 {
                 successful_syscalls.push(*nr as u32);
             }
@@ -186,37 +226,62 @@ pub fn load_and_attach(
     // fcntl rich extraction is conditional on cmd ∈ {F_DUPFD, F_DUPFD_CLOEXEC};
     // attach the tracepoints, but DO NOT register fcntl in TIER2_BITMAP, so
     // non-DUPFD fcntl commands remain visible via Tier 1 raw capture.
-    let _ = try_attach_tracepoint(&mut bpf, "sys_enter_fcntl", "syscalls", "sys_enter_fcntl");
-    let _ = try_attach_tracepoint(&mut bpf, "sys_exit_fcntl", "syscalls", "sys_exit_fcntl");
+    let fcntl_enter = try_attach_tracepoint(
+        &mut bpf,
+        "sys_enter_fcntl",
+        "syscalls",
+        "sys_enter_fcntl",
+        &mut report,
+    );
+    let fcntl_exit = try_attach_tracepoint(
+        &mut bpf,
+        "sys_exit_fcntl",
+        "syscalls",
+        "sys_exit_fcntl",
+        &mut report,
+    );
+
+    report.pair("tier2.fcntl", fcntl_enter, fcntl_exit);
 
     // sendfile / splice rich extraction is opt-in (issue #9). When enabled,
     // attach both tracepoint pairs and register the syscall numbers in
     // TIER2_BITMAP so Tier 1 deduplicates. When disabled, the BPF programs
     // remain compiled in but unattached, and Tier 1 raw capture continues.
     if args.enable_rich_sendfile {
-        let sf_ok = try_attach_tracepoint(
+        let sf_enter = try_attach_tracepoint(
             &mut bpf,
             "sys_enter_sendfile",
             "syscalls",
             "sys_enter_sendfile",
-        ) && try_attach_tracepoint(
-            &mut bpf,
-            "sys_exit_sendfile",
-            "syscalls",
-            "sys_exit_sendfile",
+            &mut report,
         );
+        let sf_exit = try_attach_tracepoint(
+            &mut bpf,
+            "sys_exit_sendfile",
+            "syscalls",
+            "sys_exit_sendfile",
+            &mut report,
+        );
+        let sf_ok = report.pair("tier2.sendfile", sf_enter, sf_exit);
         if sf_ok && (NR_SENDFILE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SENDFILE as u32);
             info!("  Attached: sendfile (opt-in via --enable-rich-sendfile)");
         }
-        let sp_ok =
-            try_attach_tracepoint(&mut bpf, "sys_enter_splice", "syscalls", "sys_enter_splice")
-                && try_attach_tracepoint(
-                    &mut bpf,
-                    "sys_exit_splice",
-                    "syscalls",
-                    "sys_exit_splice",
-                );
+        let sp_enter = try_attach_tracepoint(
+            &mut bpf,
+            "sys_enter_splice",
+            "syscalls",
+            "sys_enter_splice",
+            &mut report,
+        );
+        let sp_exit = try_attach_tracepoint(
+            &mut bpf,
+            "sys_exit_splice",
+            "syscalls",
+            "sys_exit_splice",
+            &mut report,
+        );
+        let sp_ok = report.pair("tier2.splice", sp_enter, sp_exit);
         if sp_ok && (NR_SPLICE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SPLICE as u32);
             info!("  Attached: splice (opt-in via --enable-rich-sendfile)");
@@ -238,56 +303,80 @@ pub fn load_and_attach(
     //   which is what SSH sessions use. For serial consoles, consider
     //   hooking `n_tty_write` instead.
     //   Similarly, `tty_read` → `n_tty_read` for the read path.
-    try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write");
-    try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read");
+    let ok = try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write", &mut report);
+    report.keys.insert("tty.write".into(), ok);
+    let ok = try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read", &mut report);
+    report.keys.insert("tty.read".into(), ok);
     // kretprobe on n_tty_read: captures the bytes that were actually
     // written into the userspace buffer during the call. Without this
     // attach, only metadata (no `data` field) is emitted for tty_read.
     // Aya's KProbe wrapper handles both kprobe and kretprobe via the
     // `kind` discriminator set by the `#[kretprobe]` macro.
-    try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read");
+    let ok = try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read", &mut report);
+    report.keys.insert("tty.read_ret".into(), ok);
 
-    info!("Attaching TC hooks...");
-    if let Err(e) = attach_tc_hooks(&mut bpf) {
-        warn!("Failed to attach TC hooks: {}", e);
-    }
-
-    info!("Attaching LSM hooks...");
-    let btf = Btf::from_sys_fs()?;
-    let lsm_hooks = [
-        ("task_kill", "task_kill"),
-        ("bpf_hook", "bpf"),
-        ("ptrace_access_check", "ptrace_access_check"),
-        ("file_open", "file_open"),
-        ("inode_unlink", "inode_unlink"),
-        ("inode_rename", "inode_rename"),
-        ("task_fix_setuid", "task_fix_setuid"),
-    ];
-    for (prog_name, hook_name) in &lsm_hooks {
-        if let Err(e) = attach_lsm(&mut bpf, prog_name, hook_name, &btf) {
-            warn!("Failed to attach LSM hook {}: {}", hook_name, e);
-        } else {
-            info!("  Attached LSM: {}", hook_name);
+    if args.enable_lsm {
+        info!("Attaching opt-in LSM hooks...");
+        let btf = Btf::from_sys_fs();
+        let lsm_hooks = [
+            ("task_kill", "task_kill"),
+            ("bpf_hook", "bpf"),
+            ("ptrace_access_check", "ptrace_access_check"),
+            ("file_open", "file_open"),
+            ("inode_unlink", "inode_unlink"),
+            ("inode_rename", "inode_rename"),
+            ("task_fix_setuid", "task_fix_setuid"),
+        ];
+        for (prog_name, hook_name) in &lsm_hooks {
+            let result = match &btf {
+                Ok(btf) => attach_lsm(&mut bpf, prog_name, hook_name, btf, &mut report),
+                Err(e) => Err(anyhow::anyhow!("LSM BTF unavailable: {e}")),
+            };
+            report
+                .keys
+                .insert(format!("lsm.{hook_name}"), result.is_ok());
+            if let Err(e) = result {
+                warn!("Failed to attach LSM hook {}: {}", hook_name, e);
+            } else {
+                info!("  Attached LSM: {}", hook_name);
+            }
         }
     }
 
     let mut usdt_links = usdt::AttachmentLinks::default();
     let usdt_diagnostics = usdt_selections
         .iter()
-        .flat_map(|selection| usdt::attach_selected(&mut bpf, selection, &mut usdt_links))
+        .flat_map(|selection| {
+            usdt::attach_selected(&mut bpf, selection, &mut usdt_links, &mut report)
+        })
         .collect();
-    info!("All BPF programs attached successfully");
-    Ok((bpf, usdt_diagnostics, usdt_links))
+    info!("BPF attachment attempts complete");
+    Ok((bpf, usdt_diagnostics, usdt_links, report))
 }
 
-fn attach_raw_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, name: &str) -> Result<()> {
+fn required(
+    report: &mut AttachReport,
+    key: &str,
+    attach: impl FnOnce(&mut AttachReport) -> Result<()>,
+) -> Result<()> {
+    attach(report).with_context(|| format!("required collector {key}"))?;
+    report.keys.insert(key.into(), true);
+    Ok(())
+}
+
+fn attach_raw_tracepoint(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    name: &str,
+    report: &mut AttachReport,
+) -> Result<()> {
     let program: &mut RawTracePoint = bpf
         .program_mut(prog_name)
         .context(format!("program {prog_name} not found"))?
         .try_into()?;
     program.load()?;
     program.attach(name)?;
-    record_attached(1);
+    report.probes += 1;
     Ok(())
 }
 
@@ -301,20 +390,12 @@ fn populate_exclusion_bitmap(bpf: &mut aya::Ebpf) -> Result<()> {
     Ok(())
 }
 
-fn populate_excluded_ports(bpf: &mut aya::Ebpf, ports: &[u16]) -> Result<()> {
-    let mut map: aya::maps::HashMap<_, u16, u8> =
-        aya::maps::HashMap::try_from(bpf.map_mut("EXCLUDED_PORTS").unwrap())?;
-    for port in ports {
-        map.insert(port, &1u8, 0)?;
-    }
-    Ok(())
-}
-
 fn attach_tracepoint(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
     category: &str,
     name: &str,
+    report: &mut AttachReport,
 ) -> Result<()> {
     let program: &mut TracePoint = bpf
         .program_mut(prog_name)
@@ -322,12 +403,18 @@ fn attach_tracepoint(
         .try_into()?;
     program.load()?;
     program.attach(category, name)?;
-    record_attached(1);
+    report.probes += 1;
     Ok(())
 }
 
-fn try_attach_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, category: &str, name: &str) -> bool {
-    match attach_tracepoint(bpf, prog_name, category, name) {
+fn try_attach_tracepoint(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    category: &str,
+    name: &str,
+    report: &mut AttachReport,
+) -> bool {
+    match attach_tracepoint(bpf, prog_name, category, name, report) {
         Ok(()) => true,
         Err(e) => {
             warn!("Failed to attach tracepoint {}/{}: {}", category, name, e);
@@ -336,7 +423,12 @@ fn try_attach_tracepoint(bpf: &mut aya::Ebpf, prog_name: &str, category: &str, n
     }
 }
 
-fn try_attach_kprobe(bpf: &mut aya::Ebpf, prog_name: &str, fn_name: &str) -> bool {
+fn try_attach_kprobe(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    fn_name: &str,
+    report: &mut AttachReport,
+) -> bool {
     let result: Result<()> = (|| {
         let program: &mut KProbe = bpf
             .program_mut(prog_name)
@@ -344,7 +436,7 @@ fn try_attach_kprobe(bpf: &mut aya::Ebpf, prog_name: &str, fn_name: &str) -> boo
             .try_into()?;
         program.load()?;
         program.attach(fn_name, 0)?;
-        record_attached(1);
+        report.probes += 1;
         Ok(())
     })();
     match result {
@@ -359,100 +451,68 @@ fn try_attach_kprobe(bpf: &mut aya::Ebpf, prog_name: &str, fn_name: &str) -> boo
     }
 }
 
-fn attach_tc_hooks(bpf: &mut aya::Ebpf) -> Result<()> {
-    let interfaces = get_network_interfaces()?;
-
-    // Load TC programs ONCE before the interface loop.
-    //
-    // # Why load outside the loop?
-    //
-    // `SchedClassifier::load()` can only be called once per BPF program.
-    // If called inside the loop, the first interface succeeds but subsequent
-    // interfaces fail with "the program is already loaded" and get skipped.
-    // This caused eth0 to miss TC hooks entirely, meaning only loopback
-    // traffic (lo) was captured — no real network PACKET events.
-
-    // Add clsact qdisc to all interfaces first.
-    // aya's qdisc_add_clsact uses netlink which may fail with "No such file
-    // or directory" on some kernel configurations. Fall back to `tc` command.
-    for iface in &interfaces {
-        if let Err(_) = aya::programs::tc::qdisc_add_clsact(iface) {
-            // Fallback: use tc command
-            let status = std::process::Command::new("tc")
-                .args(["qdisc", "add", "dev", iface, "clsact"])
-                .status();
-            match status {
-                Ok(s) if s.success() => info!("  clsact qdisc added on {} (via tc command)", iface),
-                Ok(s) => warn!(
-                    "tc qdisc add clsact on {}: exit code {:?} (may already exist)",
-                    iface,
-                    s.code()
-                ),
-                Err(e) => warn!("tc command failed on {}: {}", iface, e),
-            }
-        }
-    }
-
-    // Ingress: load once, attach to all interfaces.
-    // Scoped block to drop the &mut borrow before borrowing for egress.
-    {
-        let ingress: &mut SchedClassifier = bpf
-            .program_mut("tc_ingress")
-            .context("tc_ingress program not found")?
-            .try_into()?;
-        ingress.load()?;
-
-        for iface in &interfaces {
-            if let Err(e) = ingress.attach(iface, TcAttachType::Ingress) {
-                warn!("TC ingress attach on {}: {}", iface, e);
-            } else {
-                record_attached(1);
-                info!("  TC ingress attached on {}", iface);
-            }
-        }
-    }
-
-    // Egress: load once, attach to all interfaces.
-    {
-        let egress: &mut SchedClassifier = bpf
-            .program_mut("tc_egress")
-            .context("tc_egress program not found")?
-            .try_into()?;
-        egress.load()?;
-
-        for iface in &interfaces {
-            if let Err(e) = egress.attach(iface, TcAttachType::Egress) {
-                warn!("TC egress attach on {}: {}", iface, e);
-            } else {
-                record_attached(1);
-                info!("  TC egress attached on {}", iface);
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn attach_lsm(bpf: &mut aya::Ebpf, prog_name: &str, hook_name: &str, btf: &Btf) -> Result<()> {
+fn attach_lsm(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    hook_name: &str,
+    btf: &Btf,
+    report: &mut AttachReport,
+) -> Result<()> {
     let program: &mut Lsm = bpf
         .program_mut(prog_name)
         .context(format!("LSM program {} not found", prog_name))?
         .try_into()?;
     program.load(hook_name, btf)?;
     program.attach()?;
-    record_attached(1);
+    report.probes += 1;
     Ok(())
 }
 
-fn get_network_interfaces() -> Result<Vec<String>> {
-    let mut interfaces = Vec::new();
-    let entries = std::fs::read_dir("/sys/class/net")?;
-    for entry in entries {
-        if let Ok(entry) = entry {
-            if let Ok(name) = entry.file_name().into_string() {
-                interfaces.push(name);
-            }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pairs_require_both_halves_and_unselected_keys_stay_absent() {
+        let mut report = AttachReport::default();
+        for (enter, exit, complete) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, false),
+            (true, true, true),
+        ] {
+            assert_eq!(report.pair("tier2.openat", enter, exit), complete);
+            assert_eq!(report.keys["tier2.openat"], complete);
+        }
+        for unselected in [
+            "tier2.sendfile",
+            "tier2.splice",
+            "lsm.bpf",
+            "usdt.unselected",
+        ] {
+            assert!(!report.keys.contains_key(unselected));
         }
     }
-    Ok(interfaces)
+
+    #[test]
+    fn required_failure_aborts_without_claiming_availability() {
+        let mut report = AttachReport::default();
+        let startup: Result<()> = (|| {
+            required(&mut report, "exec.execve", |report| {
+                report.probes += 1; // A successful enter does not complete the pair.
+                anyhow::bail!("injected exit attach failure")
+            })?;
+            panic!("failed required collector must abort startup");
+        })();
+        assert!(startup.is_err());
+        assert_eq!(report.probes, 1);
+        assert!(!report.keys.contains_key("exec.execve"));
+        required(&mut report, "signal", |report| {
+            report.probes += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert!(report.keys["signal"]);
+        assert_eq!(report.probes, 2);
+    }
 }

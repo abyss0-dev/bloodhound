@@ -14,13 +14,10 @@ graph TD
     end
     subgraph "Layer 3 — Syscalls"
         RAW["layer3_raw.rs<br/>raw_syscalls: sys_enter/exit"]
-        RICH["layer3_rich.rs<br/>30+ rich syscall extractors"]
-    end
-    subgraph "Packet Capture"
-        TC["packet_tc.rs<br/>TC sched_cls: ingress/egress"]
+        RICH["layer3_rich.rs<br/>40+ rich syscall extractors"]
     end
     subgraph "Tamper Resistance"
-        LSM["lsm_hooks.rs<br/>7 LSM hooks"]
+        LSM["lsm_hooks.rs<br/>7 LSM hooks (opt-in)"]
     end
     subgraph "Shared"
         FILTER["filter.rs<br/>auid filtering"]
@@ -28,7 +25,7 @@ graph TD
         HELPERS["helpers.rs<br/>Event emission"]
     end
 
-    TTY & EXEC & RAW & RICH & TC & LSM --> FILTER
+    TTY & EXEC & RAW & RICH & LSM --> FILTER
     FILTER --> MAPS
     MAPS --> HELPERS
 ```
@@ -40,12 +37,11 @@ graph TD
 | `layer1_tty.rs` | kprobe | `pty_write` / `n_tty_read` — raw terminal I/O capture |
 | `layer2_exec.rs` | tracepoint | `execve` / `execveat` — process execution with argv |
 | `layer3_raw.rs` | tracepoint | `raw_syscalls` — generic syscall number + return code |
-| `layer3_rich.rs` | tracepoint | 30+ syscall-specific extractors (openat, read, write, connect, bind, mkdir, etc.) |
-| `packet_tc.rs` | sched_cls | TC ingress/egress — Ethernet header + first 34 bytes |
-| `lsm_hooks.rs` | LSM | 7 hooks: task_kill, bpf, ptrace, file_open, inode_unlink, inode_rename, task_fix_setuid |
+| `layer3_rich.rs` | tracepoint | 40+ syscall-specific extractors (openat, read, write, connect, bind, mkdir, etc.) |
+| `lsm_hooks.rs` | LSM | 7 hooks (opt-in via `--enable-lsm`): `task_kill` and `ptrace_access_check` enforce daemon protection; `bpf` is observe-only (always returns 0); other hooks retain behavior. Attachment does not imply every hook enforces. |
 | `signal.rs` | raw tracepoint | Non-enforcing `signal_generate` observation with sender and target identity |
 | `filter.rs` | — | `should_trace()` — auid-based event filtering |
-| `maps.rs` | — | BPF map definitions (ring buffer, per-CPU arrays, hash maps) |
+| `maps.rs` | — | BPF map definitions (ring buffer, per-CPU arrays, hash maps; socket table and excluded ports removed) |
 | `helpers.rs` | — | `emit_event()`, `bpf_memcpy()`, drop counter |
 
 ## Kernel Struct Offsets

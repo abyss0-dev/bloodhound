@@ -184,16 +184,18 @@ unsafe fn try_bpf_hook(_ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0); // Allow non-target user BPF operations
     }
 
+    // Observe only. A successful hook decision does not imply that DAC or
+    // another security module will permit the syscall.
     let payload = LsmBpfPayload {
         cmd: 0,
-        return_code: -1,
+        return_code: 0,
     };
     let bytes = core::slice::from_raw_parts(
         &payload as *const _ as *const u8,
         LsmBpfPayload::SIZE,
     );
     emit_lsm_event(EventKind::LsmBpf as u8, bytes);
-    Ok(-1) // -EPERM: block target user BPF operations
+    Ok(0) // Never enforce a blanket BPF denial.
 }
 
 // ── lsm/ptrace_access_check ─────────────────────────────────────────────────

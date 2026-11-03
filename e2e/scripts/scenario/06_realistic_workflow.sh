@@ -7,7 +7,6 @@
 #   - execve             : every command invocation
 #   - openat/read/write  : file I/O
 #   - clone              : subprocess creation
-#   - PACKET             : network traffic
 #
 # Simulates a learner building a simple web server and testing it.
 

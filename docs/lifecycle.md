@@ -3,14 +3,32 @@
 
 ## Startup
 
-1. Parse CLI arguments (`--uid <N>`, `--exclude-ports <ports>`,
-   `--ring-buffer-size <bytes>`, etc.)
-2. Write `TARGET_AUID` to BPF global variable
-3. Load and attach all BPF programs (tracepoints, kprobes, TC, LSM)
-4. Begin polling ring buffer and emitting NDJSON to stdout
-5. BPF programs are active immediately; events before target user login
-   are filtered out by the auid check (auid will be AUDIT_UID_UNSET
-   = 4294967295 for non-logged-in processes)
+1. Parse CLI arguments (`--uid <N>`, `--ring-buffer-size <bytes>`,
+   `--heartbeat-interval <seconds>`, `--enable-lsm`, `--enable-rich-sendfile`,
+   `--usdt-config <path>`, etc.).
+2. Validate system page size, ring buffer size, and heartbeat cadence early:
+   quantize cadence once to u32 milliseconds; reject non-finite, negative,
+   sub-0.5ms, or overflowing cadence.
+3. Read and validate kernel boot ID from `/proc/sys/kernel/random/boot_id`
+   (startup fails immediately if read fails or format is invalid).
+4. Initialize the single bounded admission sequencer before any producer can emit.
+5. Ingest trusted USDT configuration selections (invalid configuration files emit a
+   startup diagnostic on stdout before non-zero termination; validation failures in
+   loader startup such as duplicate collector selections abort immediately without
+   emitting a stdout diagnostic; in neither failure case is ready emitted).
+6. Resolve running kernel BTF offsets and set global BPF variables (`TARGET_AUID`,
+   `DAEMON_PID`, task_struct offsets, namespace offsets, exec_view offsets).
+7. Load eBPF programs, attach required tracepoints (`lifecycle`, `signal`,
+   `exec.execve`, `raw_syscalls`), optional tracepoints (`exec.execveat`, Tier 2
+   syscalls, sendfile/splice), TTY kprobes, opt-in LSM hooks (`--enable-lsm`),
+   and selected USDT probes, generating an explicit `AttachReport`. Rejects duplicate
+   USDT selections across config files before attachment.
+8. Read back actual kernel ring buffer size and verify nsfs device number.
+9. Admit `META bloodhound_ready` to the sequencer as the strictly first record
+   of a successful run, ahead of starting or admitting any emitting tasks (collection
+   health monitors, heartbeat emitter, ring-buffer consumer, or USDT diagnostics).
+10. Start background drop counter bridge, collection health monitors, heartbeat task,
+    and ring buffer consumer.
 
 
 ## Shutdown
@@ -49,8 +67,8 @@ observable behavior.
 
 Bloodhound is responsible for:
 - Loading and managing BPF programs
-- Filtering events by auid
-- Enriching events with proc metadata
+- Filtering events by auid with daemon self-exclusion
+- Emitting authoritative kernel-observed lifecycle and execution facts
 - Serializing BehaviorEvents as NDJSON to stdout
 
 Bloodhound is NOT responsible for:
@@ -58,8 +76,8 @@ Bloodhound is NOT responsible for:
 - Scenario task definitions
 - Signaling task completion (virtio-serial)
 - Hint generation
-- Protocol-level packet parsing (DNS, TLS SNI, HTTP, etc.); see
-  `docs/tracing.md` §Protocol semantic extraction is out of scope
+- Live packet capture or TCP/IP packet reconstruction (packet capture is retired;
+  network activity is traced via Layer 3 socket syscalls)
 
 Downstream consumers read Bloodhound's stdout stream. This separation
 keeps Bloodhound focused and testable.

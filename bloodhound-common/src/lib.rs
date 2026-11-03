@@ -92,7 +92,7 @@ pub enum EventKind {
     Sendfile = 63,
     Splice = 64,
 
-    // Packet capture (TC)
+    // Reserved forever: historical offline packet decode only (Phase 2 retirement).
     PacketIngress = 100,
     PacketEgress = 101,
 

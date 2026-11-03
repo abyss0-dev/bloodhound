@@ -182,6 +182,18 @@ pub struct Selection {
     pub enabled: bool,
 }
 
+/// Reject repeated IDs, including enabled/disabled conflicts, before attachment.
+/// Otherwise a later failed attempt could overwrite an already-true availability.
+pub fn validate_selections(selections: &[Selection]) -> Result<()> {
+    let mut ids = std::collections::BTreeSet::new();
+    for selection in selections {
+        if !ids.insert(&selection.collector_id) {
+            bail!("duplicate USDT collector selection {:?}", selection.collector_id);
+        }
+    }
+    Ok(())
+}
+
 /// Read and strictly validate a trusted collector-selection file.
 ///
 /// It is intentionally not a generic TOML decode: rejecting every unknown key
@@ -446,6 +458,7 @@ pub fn attach_selected(
     bpf: &mut aya::Ebpf,
     selection: &Selection,
     links: &mut AttachmentLinks,
+    report: &mut crate::loader::AttachReport,
 ) -> Vec<BehaviorEvent> {
     if !selection.enabled {
         return vec![diagnostic(
@@ -454,6 +467,7 @@ pub fn attach_selected(
             None,
         )];
     }
+    report.keys.insert(format!("usdt.{}", selection.collector_id), false);
     let Some(metadata) = collector(&selection.collector_id) else {
         return vec![diagnostic(
             &selection.collector_id,
@@ -527,7 +541,8 @@ pub fn attach_selected(
     })();
     match attach_result {
         Ok(()) => {
-            crate::loader::record_attached(target.probes.len());
+            report.probes += target.probes.len() as u32;
+            report.keys.insert(format!("usdt.{}", selection.collector_id), true);
             Vec::new()
         }
         Err(error) => {
@@ -1209,6 +1224,37 @@ mod tests {
             assert_eq!(args["reason_code"], ReasonCode::AbiIncompatible.as_str());
             assert_eq!(args.as_object().unwrap().len(), 2);
         }
+    }
+
+    #[test]
+    fn duplicate_selections_cannot_overwrite_availability() {
+        let enabled = Selection {
+            collector_id: TRAINING_SHELL_V3_ID.into(),
+            enabled: true,
+        };
+        let disabled = Selection {
+            enabled: false,
+            ..enabled.clone()
+        };
+        // All duplicate orders are rejected before the loader can attach, so
+        // neither a second attach failure nor a disabled entry can mask success.
+        for selections in [
+            vec![enabled.clone(), enabled.clone()],
+            vec![enabled.clone(), disabled.clone()],
+            vec![disabled, enabled.clone()],
+        ] {
+            let error = validate_selections(&selections).unwrap_err();
+            assert!(error.to_string().contains("duplicate USDT collector selection"));
+        }
+        assert!(validate_selections(&[
+            enabled,
+            Selection {
+                collector_id: TRAINING_PEER_V1_ID.into(),
+                enabled: true,
+            },
+        ])
+        .is_ok());
+        assert!(validate_selections(&[]).is_ok());
     }
 
     #[test]

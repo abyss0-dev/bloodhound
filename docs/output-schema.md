@@ -66,24 +66,33 @@ BehaviorEvent
 | tooling  | TRACEPOINT   | execve, execveat                             |
 | behavior | TRACEPOINT   | openat, read, write, connect, mkdir...       |
 | behavior | SYSCALL      | (Tier 1 raw: syscall NR as name)             |
-| behavior | PACKET       | ingress, egress                              |
+| behavior | PACKET       | ingress, egress (not produced since Phase 2; historical decode only) |
 | behavior | LSM          | file_open, task_kill, bpf, ...               |
 | behavior | LIFECYCLE    | process_start, process_fork, process_exit    |
 | behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
 
+Note: `event.layer` remains emitted legacy producer metadata (`intent`, `tooling`, `behavior`) in the schema, but downstream consumers do not depend on it for event classification.
+
 
 ## Implementation Notes
 
-### proc.main_executable and proc.cwd
+### proc.main_executable, proc.cwd, and proc.tty
 
-These fields cannot be reliably obtained from within tracepoint BPF programs.
-`bpf_d_path()` is only available in LSM and sleepable program types.
+These fields were formerly populated via best-effort userspace `/proc` reads.
+In Phase 2, live `/proc` enrichment has been completely removed from the producer.
+For live processes, no `proc.*` values (`main_executable`, `cwd`, `tty`) are filled,
+and missing `ppid` is never looked up from `/proc`. Synthesized `process_start` events
+never copy `triggering.proc` (it is always `None`).
 
-DECIDED approach: populate `proc` fields in userspace by reading
-`/proc/<pid>/exe` and `/proc/<pid>/cwd` upon event receipt. For short-lived
-processes, this is best-effort (the process may have exited). The `proc`
-section is optional in the schema specifically to accommodate this.
+The `proc` object is retained in the schema for backward compatibility and
+historical trace decoding only. Live processes continue to rely on authoritative
+kernel-level lifecycle facts:
+- Kernel child-start `ppid` and `process_fork` lineage authority remain intact.
+- Executable context at execution entry is authoritatively provided by `exec_view`
+  (root device/inode, mount namespace, root mount ID, and explicit status; see
+  [exec-view.md](development/exec-view.md)), which is captured directly in the kernel
+  without relying on `/proc`.
 
 ### header.timestamp
 
@@ -126,37 +135,106 @@ operation acted on.
 ### event.type META
 
 `event.name = "bloodhound_ready"` is emitted once per run after every probe is
-attached. It is admitted before the ring-buffer consumer starts, so it is the
-first record of a successful run, ahead of every kernel-captured record. The
-header is not attributable to a process (sentinel zeroes, empty `comm`).
-`args` carries:
+attached. It is admitted before starting or admitting any emitting producer task
+(collection monitors, heartbeat, ring-buffer consumer, or USDT diagnostics), so it
+is strictly the first record emitted on stdout for a successful run. (An invalid
+USDT selection on startup may emit a diagnostic before process termination, but
+never emits ready).
 
-- `probes_attached` — successful program attachments: tracepoints, kprobes,
-  LSM hooks, each TC interface attachment and each USDT location
-- `ring_buffer_size` — actual kernel readback of the `EVENTS` ring buffer
+The header is not attributable to a process (sentinel zeroes, empty `comm`, no `tid`,
+no `ns`). `args` carries:
+
+- `probes_attached` (u32) — count of successfully attached eBPF programs (tracepoints,
+  kprobes, LSM hooks, and USDT locations). Excludes TC programs (removed in Phase 2).
+  Counts actual program attachments, not available collectors.
+- `ring_buffer_size` (u32) — actual kernel readback of the `EVENTS` ring buffer
   capacity in bytes, verified against the requested `--ring-buffer-size`
   (default: 4 MiB / 4,194,304 bytes; must be a power of two and at least the
   system page size). Sizing is applied to the map pre-load and confirmed
   against kernel map metadata before probe attachment. (32 MiB recommended
   under sustained load).
-- `nsfs_dev` — device number of nsfs. At startup Bloodhound opens
+- `nsfs_dev` (u64 | null) — device number of nsfs. At startup Bloodhound opens
   `/proc/self/ns/net`, verifies with `fstatfs` that it lives on nsfs, and
   reports its `st_dev`. `null` when the check fails; header inodes are then
   comparable only within this run.
+- `boot_id` (string UUID) — kernel boot ID read from `/proc/sys/kernel/random/boot_id`.
+  Startup fails immediately if the file cannot be read or fails UUID validation.
+- `auid` (u32) — principal AUID from `--uid` argument.
+- `excluded` (array of u32) — exactly `[daemon PID]`; Tier 1 self-exclusion declaration,
+  not consumed by the observer.
+- `attached` (object) — per-collector attach status map with fixed keys and aggregation
+  rules mirroring `loader.rs`:
+  - Required keys: `lifecycle`, `signal`, `exec.execve`, `raw_syscalls`. Always `true`
+    in an emitted ready record (failure aborts startup).
+  - Optional keys:
+    - `exec.execveat`: `true` iff both enter and exit halves attached.
+    - `tier2.<name>`: 42 compiled Tier 2 names (`openat`, `read`, `write`, `connect`,
+      `bind`, `listen`, `socket`, `clone`, `clone3`, `chdir`, `fchdir`, `unlink`,
+      `unlinkat`, `rename`, `renameat2`, `mkdir`, `mkdirat`, `rmdir`, `symlink`,
+      `symlinkat`, `link`, `linkat`, `chmod`, `fchmod`, `fchmodat`, `chown`, `fchown`,
+      `fchownat`, `truncate`, `ftruncate`, `mount`, `umount2`, `sendto`, `recvfrom`,
+      `dup`, `dup2`, `dup3`, `pread64`, `pwrite64`, `readv`, `writev`, `mmap`) plus
+      `tier2.fcntl`. `true` iff both enter and exit halves attached; for the 42 names
+      this equals `TIER2_BITMAP` registration. `fcntl` remains deliberately unregistered
+      in `TIER2_BITMAP` regardless, so non-DUPFD commands retain raw coverage.
+    - `tier2.sendfile`, `tier2.splice`: rich extraction for sendfile and splice; present
+      only when `--enable-rich-sendfile` is passed; `true` iff both enter and exit
+      halves attached.
+    - `tty.write`, `tty.read`, `tty.read_ret`: kprobes (`pty_write`, `n_tty_read`, and
+      `n_tty_read` kretprobe); `true` if attached, `false` if failed.
+    - `lsm.<hook>`: 7 LSM hooks (`task_kill`, `bpf`, `ptrace_access_check`, `file_open`,
+      `inode_unlink`, `inode_rename`, `task_fix_setuid`). Present only when `--enable-lsm`
+      is opted in; `true` if attached, `false` if attempted and failed. Note that the
+      BPF hook key is `lsm.bpf`.
+    - `usdt.<collector_id>`: selected USDT collectors; present only for enabled selections
+      (`true` if attached, `false` if failed).
+  - Aggregation rules:
+    - A pair is `true` only when both halves attached. A half-attached pair is `false`,
+      and for `tier2.*` keys other than `fcntl`, its syscall is not registered in
+      `TIER2_BITMAP` (Tier 1 keeps capturing it).
+    - Both halves of an optional pair are attempted even if one fails.
+    - A key is **absent** when its collector was not selected by configuration (e.g.,
+      `--enable-rich-sendfile` not passed, `--enable-lsm` not passed, or USDT ID not
+      selected). It is **`false`** when the collector was attempted and failed.
+      Downstream consumers never treat absent or `false` as available.
+- `heartbeat_interval_ms` (u32) — configured periodic heartbeat cadence in milliseconds.
+  Configured on the CLI as f64 seconds via `--heartbeat-interval`; Bloodhound quantizes
+  it once via `round(seconds * 1000.0)` as u32, and the internal timer uses
+  `Duration::from_millis(heartbeat_interval_ms)` of exactly that value. Passing `0`
+  (including `-0.0`) disables both periodic and final heartbeats (valid for standalone use;
+  connected observers fail startup on `0`). Producer startup rejects non-finite input,
+  negative values, positive values rounding to zero (<0.5 ms), and values exceeding `u32::MAX`.
 
-`bloodhound_shutdown`, `session_start` and `session_end` are not emitted yet.
+`bloodhound_shutdown`, `session_start` and `session_end` are not emitted.
 
 ### event.type PACKET
 
-DECIDED: In scope. Raw packet capture via TC hooks. See
-[tracing.md](tracing.md) for design details. PACKET events use
-`event.layer = "behavior"`. `event.name` is `"ingress"` or `"egress"`.
+Not produced since Phase 2; historical decode only.
+
+Raw packet capture via TC hooks has been retired. Event kinds 100 (`packet_ingress`)
+and 101 (`packet_egress`) remain permanently reserved for historical playback and
+offline decoding. No live TC programs are attached, no qdisc changes are made, no
+packet correlation or socket table is maintained, and no `--exclude-ports` flag exists.
+Network observations are captured exclusively via Layer 3 syscall tracepoints
+(`connect`, `bind`, `listen`, `socket`, `sendto`, `recvfrom`).
 
 ### event.type LSM
 
-DECIDED: LSM events use `event.layer = "behavior"`. LSM hooks both block
-operations and emit BehaviorEvents, recording tamper attempts as
-observable events.
+LSM hooks are opt-in and disabled by default (`--enable-lsm`). When enabled, all
+7 hooks are attempted independently, and their readiness is reported in `args.attached`
+(failure to attach an LSM hook reports `false` and does not abort startup).
+
+When opted in:
+- `task_kill` and `ptrace_access_check` retain daemon-protection enforcement: they block
+  unauthorized signals or ptrace operations targeting the daemon PID (returning `-1` / `-EPERM`)
+  and emit an LSM event with `return_code = -1`. Non-daemon signals emit `return_code = 0`.
+- The `bpf` hook (`lsm.bpf`) is observe-only: it always returns 0 and emits `return_code = 0`
+  (no blanket denial).
+- `file_open`, `inode_unlink`, `inode_rename`, and `task_fix_setuid` emit behavior events
+  with `return_code = 0`.
+- An observed hook decision is not a promise that DAC or another LSM permits the syscall.
+  For example, standard Linux DAC checks reject unprivileged kill or ptrace attempts
+  against root before LSM hooks are reached.
 
 `task_kill.args.target_ref` identifies the target process instance. A
 successful `task_kill` event records signal delivery only; it is not evidence
@@ -347,9 +425,8 @@ device values. A complete pair requires both components and a validated target
 kernel layout. Current fixed layouts were measured on x86_64 6.8.0-49-generic.
 
 Actor header and pathname are captured at entry; returned FD and identity at
-exit. Later proc enrichment is not an operation-time snapshot. FD close/reuse
-races and readable but incorrect kernel offsets cannot always be detected.
-See [measurement and limits](development/filesystem-observation.md).
+exit. FD close/reuse races and readable but incorrect kernel offsets cannot
+always be detected. See [measurement and limits](development/filesystem-observation.md).
 
 `DIAGNOSTIC/openat.collection` reports detected pre-ring-buffer loss with
 `reason_code`, `failure_count_delta`, `failure_count_total`, `scope: openat`,

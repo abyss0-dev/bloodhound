@@ -9,23 +9,21 @@ graph LR
         L1[Layer 1: Intent - TTY]
         L2[Layer 2: Tooling - execve]
         L3[Layer 3: Behavior - syscalls]
-        PKT[Packet Capture - TC]
-        LSM[LSM Hooks]
+        LSM[LSM Hooks - opt-in]
     end
 
     subgraph "Userspace (Bloodhound)"
         RB[Ring Buffer Consumer]
-        ENRICH["/proc Enrichment"]
+        SEQ[Bounded Sequencer]
         OUT["stdout (NDJSON)"]
     end
 
     L1 -->|raw bytes| RB
     L2 -->|exec events| RB
     L3 -->|syscall events| RB
-    PKT -->|packet events| RB
-    LSM -->|block + emit| RB
-    RB --> ENRICH
-    ENRICH --> OUT
+    LSM -->|opt-in events| RB
+    RB --> SEQ
+    SEQ --> OUT
 ```
 
 
@@ -224,7 +222,7 @@ beyond raw integer values:
 | readv/writev         | fd, fd_type, total size, iov_count, iov_truncated |
 | connect              | sockaddr (addr, port, family)                 |
 | chdir                | path (string)                                 |
-| fchdir               | fd (userspace resolves via /proc)             |
+| fchdir               | args.fd (no /proc path resolution)            |
 | bind/listen          | sockaddr (addr, port, family)                 |
 | socket               | domain, type, protocol                        |
 | unlink/unlinkat      | path (string)                                 |
@@ -375,21 +373,34 @@ overhead minimal for these high-frequency syscalls.
 ### chdir/fchdir capture
 
 `chdir` captures the target path in `args.filename` (read via per-CPU map,
-same as openat). `fchdir` captures the target fd in `args.fd`; userspace
-resolves the path via `/proc/<pid>/fd/<N>` (best-effort). Both emit
+same as openat). `fchdir` captures the target fd in `args.fd`; no path is resolved. Both emit
 `return_code` from `sys_exit`.
 
 
-## Packet Capture (TC Hooks)
+## Packet Capture (Historical Implementation Notes — Retired in Phase 2)
 
-- **Objective:** Capture raw network packets for scenarios that require
+> [!NOTE]
+> Live packet capture via TC hooks has been retired since Phase 2. Event kinds
+> 100 (`packet_ingress`) and 101 (`packet_egress`) remain permanently reserved for
+> historical playback and offline decoding, but no TC programs are attached, no
+> `--exclude-ports` flag exists, no packet correlator or socket table runs in userspace,
+> and no live `PACKET` events are produced.
+>
+> Network observations continue exclusively via Layer 3 syscall capture (`connect`,
+> `bind`, `listen`, `socket`, `sendto`, `recvfrom`), which capture socket domains,
+> addresses, and ports without requiring packet interception.
+>
+> The notes below document the pre-Phase-2 design for historical reference and
+> replay decoding.
+
+- **Historical Objective:** Capture raw network packets for scenarios that require
   network-level behavioral analysis.
-- **Hook type:** TC (Traffic Control) classifier on ingress and egress.
-- **Data captured:** Full raw packet data (L2 and above).
-- **event.type:** `PACKET`
+- **Historical Hook type:** TC (Traffic Control) classifier on ingress and egress.
+- **Historical Data captured:** Full raw packet data (L2 and above).
+- **event.type:** `PACKET` (historical decode only)
 - **event.layer:** `behavior`
 
-### Key design challenge: no process context in TC hooks
+### Historical design notes: no process context in TC hooks
 
 TC/XDP programs execute in the network stack context, not in a process
 context. There is no access to `pid`, `auid`, `comm`, or any
@@ -402,11 +413,11 @@ Syscall hooks (Layer 1-3):          TC hooks (Packet):
   auid filtering in BPF              auid filtering NOT possible
 ```
 
-DECIDED approach: full capture with userspace correlation.
+Historical approach: full capture with userspace correlation.
 
-Since this is a single-user VM where virtually all network traffic
-originates from the target user, Bloodhound captures all packets at the TC
-level without BPF-side process filtering. Correlation with a process is
+Since this was designed for a single-user VM where virtually all network traffic
+originated from the target user, Bloodhound historically captured packets at the TC
+level without BPF-side process filtering. Correlation with a process was
 performed in userspace by joining packet 5-tuples (proto, src, dst, sport,
 dport) against socket information from Layer 3 `connect`/`bind` events.
 
@@ -431,56 +442,24 @@ dport) against socket information from Layer 3 `connect`/`bind` events.
               populated from socket map
 ```
 
-For PACKET events where no matching socket is found (e.g., the process
-has already exited), `header.pid` and `header.ppid` are set to 0 and
-`header.comm` is set to an empty string. The `header.auid` is set to
-the target auid since all traffic in the VM is attributed to the target user.
+For historical PACKET events where no matching socket was found (e.g., the process
+had already exited), `header.pid` and `header.ppid` were set to 0 and
+`header.comm` was set to an empty string. The `header.auid` was set to
+the target auid.
 
-### Port exclusion
+### Historical Port exclusion
 
-DECIDED: Configurable port exclusion via `--exclude-ports` CLI flag.
-Default: exclude port 22 (SSH session traffic, encrypted and not useful).
-Exclusion is applied in the TC BPF program for efficiency.
+In the historical implementation, configurable port exclusion was provided via
+the retired `--exclude-ports` CLI flag (defaulting to excluding port 22 for SSH traffic).
+With the retirement of live TC capture in Phase 2, this flag and mechanism have been removed.
 
-### Interface attachment
+### Historical Interface attachment and payload capture
 
-DECIDED: Attach TC hooks to ALL network interfaces, including loopback.
-Loopback captures inter-process communication which may be relevant for
-behavioral analysis.
-
-### Payload capture
-
-DECIDED: Capture full raw packet data (not just headers). No protocol
-parsing in Bloodhound; packets are emitted as raw bytes (Base64 encoded
-in `args.data`). Downstream consumers perform protocol parsing.
-
-Note: Full payload capture increases ring buffer pressure. The default
-ring buffer size (4MB) may need to be increased for network-heavy
-scenarios.
-
-### Socket tracking table
-
-DECIDED: 4096 entries. Sufficient for a single-user VM.
-
-### Protocol semantic extraction is out of scope
-
-DECIDED: Bloodhound emits raw packet bytes (Base64 in `args.data`) and
-does not parse higher-layer protocols. DNS query/answer extraction,
-TLS SNI extraction, HTTP header parsing, and similar are the responsibility
-of downstream consumers.
-
-This boundary is chosen deliberately: BPF-side parsing of variable-length
-protocol fields (compressed DNS labels, TLS record fragmentation,
-chunked HTTP) fights the verifier, while userspace parsers can rely on
-mature protocol libraries. Protocols considered and declined for BPF-side
-extraction:
-
-- DNS (compressed label pointers, variable answer sections)
-- TLS SNI (record fragmentation, ClientHello length variability)
-- HTTP/HTTPS headers (chunked encoding, header continuation, TLS-wrapped)
-
-Downstream pattern matchers that want to match on `domain == "example.com"`
-or `sni == "..."` should layer a parser on top of the PACKET stream.
+TC hooks were attached to network interfaces, capturing full raw packet data up to MTU.
+No protocol semantic extraction (DNS, TLS SNI, HTTP) was done in Bloodhound;
+packets were emitted as raw Base64 bytes in `args.data`. As noted above, live packet
+interception has been retired in Phase 2 in favor of non-intrusive Layer 3 socket
+syscall observation.
 
 
 ## Known Limitations

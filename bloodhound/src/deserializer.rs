@@ -291,7 +291,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
     Ok(BehaviorEvent {
         header: EventHeaderJson {
             timestamp: pkt_header.timestamp_ns,
-            auid: 0,       // Filled by packet correlator
+            auid: 0,       // Historical offline capture; no live correlation.
             sessionid: 0,
             pid: 0,
             ppid: None,
@@ -2297,9 +2297,12 @@ mod golden_tests {
     golden_from_qemu!(golden_rename, "rename", "../testdata/qemu/rename.b64");
     golden_from_qemu!(golden_sendto, "sendto", "../testdata/qemu/sendto.b64");
     golden_from_qemu!(golden_lsm_task_kill, "lsm_task_kill", "../testdata/qemu/lsm_task_kill.b64");
+    // Real opt-in observe-only capture: a capable principal successfully created
+    // a BPF map (cmd=0), and the hook emitted return_code=0.
     golden_from_qemu!(golden_lsm_bpf, "lsm_bpf", "../testdata/qemu/lsm_bpf.b64");
     golden_from_qemu!(golden_lsm_setuid, "lsm_setuid", "../testdata/qemu/lsm_setuid.b64");
     golden_from_qemu!(golden_lsm_ptrace, "lsm_ptrace", "../testdata/qemu/lsm_ptrace.b64");
+    // Historical 2026-08-20 capture: offline compatibility only, not current capture.
     golden_from_qemu!(golden_packet_ingress, "packet_ingress", "../testdata/qemu/packet_ingress.b64");
 
     // ── Alignment-independence regression test ───────────────────────────

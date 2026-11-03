@@ -25,26 +25,37 @@ Some deployment contexts may need capabilities that conflict with
 tamper resistance (e.g., CAP_NET_RAW for network exercises).
 
 
-## BPF LSM Hooks (Defense in Depth)
+## BPF LSM Hooks (Optional Defense in Depth)
 
-Even with CAP restrictions, LSM hooks provide a second layer of protection.
+BPF LSM hooks are optional and disabled by default (`--enable-lsm`). When disabled,
+default Bloodhound collection is strictly non-enforcing.
 
-LSM hooks serve a dual purpose:
-1. **Defense:** Block the operation (return -EPERM).
-2. **Observation:** Emit a BehaviorEvent recording the attempt.
+When opted in via `--enable-lsm`, BPF LSM hooks provide defense in depth and tamper
+observability. Each hook is attempted independently and reported in `args.attached`:
+- **Defense:** Enforcing hooks block the operation (returning -1 / `-EPERM`).
+- **Observation:** Hooks emit BehaviorEvents with `event.type = "LSM"` and `event.layer = "behavior"`.
+  The attempt and outcome are recorded in `args` and `return_code`.
 
-LSM events use `event.type = "LSM"` and `event.layer = "behavior"`, since
-a tamper attempt is an observable side effect of the target user's actions. The
-blocked operation and its denial are captured in `args` and `return_code`.
+> [!NOTE]
+> **DAC vs. LSM Distinction**: In Linux, standard Discretionary Access Control (DAC)
+> checks precede LSM hooks. For example, an unprivileged user attempting to kill or
+> ptrace the root daemon process will be denied by DAC before the request reaches the
+> LSM hook. LSM hooks only execute if DAC allows the operation to proceed (or if the
+> caller has sufficient capabilities, such as `CAP_SYS_PTRACE`). An observed hook
+> decision is not a guarantee that DAC or another security module permits the syscall.
 
-**Hooks:**
-- `lsm/file_open` -- block writes to daemon binary and systemd units
-- `lsm/task_kill` -- block signals (SIGKILL, SIGSTOP, SIGTERM) to daemon PID
-- `lsm/bpf` -- block BPF program load/unload by non-daemon processes
-- `lsm/ptrace_access_check` -- block ptrace on daemon (defense in depth with CAP_SYS_PTRACE drop)
-- `lsm/inode_unlink` -- prevent deletion of daemon binary and systemd units
-- `lsm/inode_rename` -- prevent renaming of daemon binary and systemd units
-- `lsm/task_fix_setuid` -- observe privilege transitions (setuid/setgid changes)
+**Hooks and Semantics:**
+- `lsm/task_kill` (`lsm.task_kill`) — blocks signals (`SIGKILL`, `SIGSTOP`, `SIGTERM`, etc.)
+  targeting the daemon PID (returns -1 / `-EPERM`, emits `return_code = -1`). Non-daemon
+  signals are allowed and emitted with `return_code = 0`.
+- `lsm/ptrace_access_check` (`lsm.ptrace_access_check`) — blocks ptrace attachment
+  targeting the daemon PID (returns -1 / `-EPERM`, emits `return_code = -1`).
+- `lsm/bpf` (`lsm.bpf`) — observe-only: records target user BPF operations with `return_code = 0`
+  and always returns 0 (never enforces a blanket denial).
+- `lsm/file_open` (`lsm.file_open`) — records target user file opens with `return_code = 0` (returns 0).
+- `lsm/inode_unlink` (`lsm.inode_unlink`) — records target user file unlinks with `return_code = 0` (returns 0).
+- `lsm/inode_rename` (`lsm.inode_rename`) — records target user file renames with `return_code = 0` (returns 0).
+- `lsm/task_fix_setuid` (`lsm.task_fix_setuid`) — records target user setuid/setgid transitions with `return_code = 0` (returns 0).
 
 
 ## Daemon Identification Strategy

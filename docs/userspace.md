@@ -13,14 +13,8 @@
 |                                             v             |
 |                                    +--------+---------+   |
 |                                    | Deserialize raw  |   |
-|                                    | + /proc enrich   |   |
+|                                    | (kernel events)  |   |
 |                                    +--------+---------+   |
-|                                             v             |
-|                                    +--------+---------+   |
-|                                    | 5-tuple packet   |   |
-|                                    | correlation      |   |
-|                                    +--------+---------+   |
-|                                             |             |
 |                                             v             |
 |                                    +--------+---------+   |
 |                                    | JSON Serialize   |   |
@@ -39,13 +33,12 @@
 - Event evaluation is NOT performed by Bloodhound -- it emits raw events
   for downstream consumption
 
-### 5-tuple packet correlation
+### 5-tuple packet correlation (Historical Note — Retired in Phase 2)
 
-PACKET events from TC hooks have no process context (no pid, auid, comm).
-Userspace maintains a socket tracking table populated from Layer 3
-`connect`/`bind` events, and joins PACKET events by 5-tuple (protocol,
-src addr, dst addr, src port, dst port) to attribute packets to processes.
-See [tracing.md](tracing.md) for details.
+Live TC packet capture and 5-tuple packet correlation have been retired since Phase 2.
+The deserializer retains decoding logic for historical packet events (kinds 100 and 101),
+but no active socket tracking table or live packet join runs in userspace. Network
+activity is traced via Layer 3 socket syscalls.
 
 ### Drop counter polling
 

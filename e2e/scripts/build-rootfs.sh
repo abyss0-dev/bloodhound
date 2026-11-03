@@ -56,8 +56,6 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStartPre=-/sbin/modprobe sch_ingress
-ExecStartPre=-/bin/sh -c 'for iface in $(ls /sys/class/net); do tc qdisc add dev $iface clsact 2>/dev/null; done'
 ExecStart=/opt/bloodhound/bloodhound --uid 1000 --usdt-config /etc/bloodhound/usdt.d/training-shell-v3.toml --usdt-config /etc/bloodhound/usdt.d/training-peer-v1.toml
 StandardOutput=append:/var/log/bloodhound.ndjson
 StandardError=journal

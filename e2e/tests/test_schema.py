@@ -83,7 +83,7 @@ class TestSchemaValidation:
 
         events = bloodhound_events()
         allowed_types = {
-            "SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM",
+            "SYSCALL", "TTY", "KPROBE", "TRACEPOINT", "LSM", "META",
             # Userspace-synthesised types (see docs/output-schema.md).
             "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC",
         }
@@ -93,11 +93,12 @@ class TestSchemaValidation:
             )
 
     def test_layer_values(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """event.layer must be one of the allowed enum values."""
+        """The producer retains its legacy layer field and allowed values."""
         ssh_cmd("ls /tmp")
         wait_for_events()
 
         events = bloodhound_events()
+        assert events, "No events captured"
         allowed_layers = {"intent", "tooling", "behavior"}
         for ev in events:
             assert ev["event"]["layer"] in allowed_layers, (

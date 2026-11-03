@@ -6,11 +6,12 @@ by Rust test helpers or repaired by hand.
 
 ## Provenance and Environment
 
-The test suite contains 17 golden raw fixtures: 16 process, filesystem,
-network, and LSM fixtures recaptured on 2026-11-03, and 1 network packet fixture
+The test suite contains 17 golden raw fixtures: 15 process, filesystem,
+and network fixtures recaptured on 2026-11-03, 1 opt-in LSM fixture (`lsm_bpf`)
+recaptured on 2026-11-04 (commit `be50640`), and 1 network packet fixture
 retaining its original 2026-08-20 provenance.
 
-### 2026-11-03 Recaptured Fixtures (16 non-packet fixtures)
+### 2026-11-03 Recaptured Fixtures (15 non-packet, non-LSM-BPF fixtures)
 
 - **Source base**: Commit `66f302272ce5da8783b6d128ccb016cb181e8977` (merged PR #61).
 - **Guest kernel**: Linux 6.8.0-49-generic (`Linux 6.8.0-49-generic #49~22.04.1-Ubuntu SMP PREEMPT_DYNAMIC x86_64`, boot image `e2e/vmlinuz`). Note that the `#49~22.04.1-Ubuntu` suffix is the Ubuntu kernel package build identifier and does not represent the guest userland distribution.
@@ -19,10 +20,18 @@ retaining its original 2026-08-20 provenance.
 - **Empty rootfs repair**: The local `e2e/rootfs.ext4` build output had been an empty ext4 filesystem containing only `lost+found`, which caused a "No working init found" kernel panic. It was populated from the pre-existing `bloodhound-e2e` Docker image (containing the Ubuntu 24.04.5 rootfs tree) using `mkfs.ext4 -F -d <tree>` into `e2e/rootfs.ext4` without requiring root or sudo. Configuration was applied matching `e2e/scripts/build-rootfs.sh`: systemd-networkd for virtio DHCP and DNS, and OpenSSH socket activation for root and testuser (UID 1000).
 - **Deployment**: No collector service was installed in the guest rootfs. The collector binary was built inside a Docker container using `Dockerfile.build --target build` (musl target) and copied over SSH to `/tmp/bloodhound-capture` for each run.
 
+### 2026-11-04 Recaptured Fixture (`lsm_bpf`)
+
+- **Provenance**: `lsm_bpf.b64` (and snapshot `bloodhound__deserializer__golden_tests__lsm_bpf.snap`) was recaptured in commit `be50640` to reflect Phase 2 opt-in observe-only semantics (`return_code = 0`). Only `lsm_bpf` was recaptured in this batch; the other 15 non-packet fixtures retain their 2026-11-03 provenance.
+- **Source base**: Clean baseline `bb7cf42` exported to an isolated build tree (`/tmp/w29p2-lsm-capture/export`). No eBPF program source, bytecode, or raw ring-buffer record layouts were modified.
+- **Temporary instrumentation**: `raw-instrumentation.patch` applied to `bloodhound/src/sequencer.rs` logging unmodified raw ring bytes (`BH_RAW <hex>`) in `Sequencer::accept_raw` before deserialization when `BH_CAPTURE_KIND=202` (`EventKind::LsmBpf`).
+- **Trigger**: Root principal set its own `loginuid` to 1000, then executed a valid x86_64 `BPF_MAP_CREATE` syscall (`cmd = 0`, map type hash, key_size 4, value_size 4, max_entries 1, flags 0). The syscall succeeded (`fd >= 0`, `errno = 0`).
+- **Selected record**: 104 bytes, SHA256 `6c0ee2fbf55bd88b40f04625985244606486c61083aa5583f8c7114bb1f9d7cb`, kind 202, timestamp 3726526176611, AUID 1000, PID 41663, `cmd = 0`, `return_code = 0`. Base64 encoded directly into `bloodhound/testdata/qemu/lsm_bpf.b64`.
+
 ### 2026-08-20 Preserved Fixture (`packet_ingress`)
 
 - **Provenance**: `packet_ingress.b64` (and its snapshot `bloodhound__deserializer__golden_tests__packet_ingress.snap`) was not recaptured in this batch. It preserves its original capture from 2026-08-20 under QEMU/KVM Linux 6.8.0-49-generic, using the collector built from commit `20d1a05` plus temporary raw-record logging (removed after capture).
-- **Selection**: The collector was restarted with logging restricted to `EventKind` 50 (`packet_ingress`), a 16-byte UDP datagram was transmitted over loopback, and the 44-byte IPv4 packet record was selected. Both the fixture and snapshot remain byte-identical to base commit `66f3022`; they were last changed in PR #46 (`46ff1db`).
+- **Selection**: The collector was restarted with logging restricted to `EventKind` 100 (`packet_ingress`), a 16-byte UDP datagram was transmitted over loopback, and the 44-byte IPv4 packet record was selected. Both the fixture and snapshot remain byte-identical to base commit `66f3022`; they were last changed in PR #46 (`46ff1db`).
 
 ## Capture and Correlation Method
 
@@ -86,7 +95,7 @@ The recaptured fixtures record genuine eBPF probe output without synthetic adjus
 | `rename` | 33 | `python3 -c 'import os; open("/tmp/bh-golden-old","w").close(); os.rename("/tmp/bh-golden-old","/tmp/bh-golden-new")'` | Retained probe limitation: decoded `oldpath: "!"` / `newpath: ""` |
 | `sendto` | 52 | `python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b"GOLDEN",("127.0.0.1",19090))'` | Sent 6 UDP bytes to `127.0.0.1:19090` |
 | `lsm_task_kill` | 201 | `python3 -c 'import os,time; p=os.fork(); time.sleep(1) if p==0 else (os.kill(p,0),os.waitpid(p,0))'` | Sent signal 0 to child process |
-| `lsm_bpf` | 202 | `bpftool prog show` | Unprivileged command, denied by probe (-1) |
+| `lsm_bpf` | 202 | `python3` (root with `loginuid=1000`) executing valid `BPF_MAP_CREATE` (hash map) | Real opt-in Phase 2 observe-only capture (commit `be50640`). Syscall succeeded (`return_code: 0`, `cmd: 0`), 104-byte raw record (SHA256 `6c0ee2fbf55bd88b40f04625985244606486c61083aa5583f8c7114bb1f9d7cb`). |
 | `lsm_setuid` | 206 | `python3 -c 'import os; os.setuid(os.getuid())'` | Retained probe limitation: kernel hook hardcodes all 4 UID/GID fields to 0 |
 | `lsm_ptrace` | 203 | `python3 -c 'import ctypes; print(ctypes.CDLL(None).ptrace(16,<collector_pid>,0,0))'` | Python with `CAP_SYS_PTRACE` targeting root daemon PID; denied by LSM hook (-1) |
-| `packet_ingress` | 50 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Preserved 2026-08-20 provenance (commit `20d1a05`) |
+| `packet_ingress` | 100 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Historical 2026-08-20 decode-only (commit `20d1a05`), not evidence of active capture (retired in Phase 2) |
