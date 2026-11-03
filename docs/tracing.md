@@ -153,8 +153,22 @@ using BPF LSM. The event header carries the current sender's stable process
 identity, while the target `task_struct` supplies the target identity. Signal,
 group direction, and the kernel `TRACE_SIGNAL_*` result are recorded.
 
+Signal filtering matches across the single configured `TARGET_AUID` boundary:
+an event is observed if either the sender or target task matches `TARGET_AUID`.
+The daemon as sender is excluded before evaluating either branch; the target
+daemon is not blanket excluded.
+
+The event header always records the current task's real `auid` and process
+identity, which may be non-principal when an outside sender signals a monitored
+target. The sender in the header reflects the kernel task context active at
+execution time, not necessarily the true signal originator (e.g., asynchronous
+IRQs or timers fire in the context of whatever task was interrupted, so no
+provenance or causal claim is made). When the daemon itself is the interrupted
+context, daemon self-exclusion may omit the signal.
+
 This hook is observational only. It neither replaces nor enables Bloodhound's
-separate LSM tamper-resistance hooks, and it never synthesizes process exit.
+separate LSM tamper-resistance hooks, and it never synthesizes process exit or
+serves as an authoritative lifecycle seed.
 
 ### Interpreter handling
 

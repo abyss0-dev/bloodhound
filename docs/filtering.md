@@ -38,7 +38,9 @@ The target `auid` value is injected at runtime:
 1. Bloodhound receives the target UID as a startup argument (`--uid <N>`).
 2. The UID value is used directly as the target `auid`.
 3. The value is written to a BPF global variable (`TARGET_AUID`).
-4. Every BPF program reads `TARGET_AUID` and performs early return on mismatch.
+4. BPF programs read `TARGET_AUID` and perform early return on mismatch.
+   Most programs match the current task's `auid`. Signal observation
+   matches if either the sender or target matches `TARGET_AUID`.
 5. `sessionid` is not filtered in BPF -- it is captured and included in
    every event for userspace-level correlation.
 
@@ -59,3 +61,24 @@ The target `auid` value is injected at runtime:
               |  2. Capture sessionid    |
               +--------------------------+
 ```
+
+
+## Signal Observation Scope
+
+Signal generation (`raw_tracepoint:signal_generate`) operates on the single
+configured AUID boundary with dedicated scoping rules:
+
+- **Sender OR Target:** An event is observed if either the sender (`current`)
+  or the target task matches the single configured `TARGET_AUID`.
+- **Daemon sender exclusion:** The daemon sender (`tgid == DAEMON_PID`) is
+  excluded before evaluating either match branch. Target daemon instances are
+  not blanket excluded.
+- **Event header:** The header always records the current task's real `auid`
+  (and real process identity), even when only the target matches and the
+  sender is non-principal. The header is never relabeled.
+- **Task context vs. originator:** The sender header reflects the kernel task
+  context at hook execution time, which is not necessarily the true originator
+  (e.g., asynchronous IRQs, softirqs, or kernel timers execute in the context of
+  whatever task was interrupted, so no provenance or causal claim is made). If
+  the daemon happens to be the interrupted task during an IRQ/timer signal,
+  sender self-exclusion may omit the event.
