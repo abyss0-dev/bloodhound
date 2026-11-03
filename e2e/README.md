@@ -115,9 +115,20 @@ layers. Each script focuses on specific event types to make verification easier.
 | `01_file_exploration.sh` | Reading files and text processing | `execve`, `openat`, `read`, `write` |
 | `02_file_mutation.sh` | Creating, modifying, deleting files | `openat` (write flags), `mkdir`, `rmdir`, `unlink`, `rename` |
 | `03_process_lifecycle.sh` | Forking, pipes, background jobs | `execve`, `clone`/`clone3`, subshells |
-| `04_network_activity.sh` | HTTP requests, DNS lookups | `PACKET` (ingress/egress), `connect` |
-| `05_permission_boundary.sh` | Privilege escalation, access denial | `LSM` (task_kill), `sudo` execve, permission errors |
+| `04_network_activity.sh` | HTTP requests, DNS lookups | socket syscalls (`connect`, `socket`, `sendto`, `recvfrom`) |
+| `05_permission_boundary.sh` | Privilege escalation, access denial | `sudo` execve, DAC permission errors (ordinary testuser kill of root daemon demonstrates DAC, not LSM) |
 | `06_realistic_workflow.sh` | End-to-end learner workflow | All layers combined; tests event correlation |
+
+## Test Suites (Phase 2 Status)
+
+- **`test_packet.py`**: Positive live packet capture tests were removed (not skipped) following TC retirement. Historical packet decoding remains verified via unit tests.
+- **`test_lsm.py`**: Verifies opt-in LSM hook behavior using capable root execution under the principal AUID (`TARGET_AUID`), testing a harmless `SIGCONT` denial to the daemon PID with an actual `task_kill` event (`return_code = -1`), and a valid `BPF_MAP_CREATE` syscall with an actual observe-only `bpf` hook event (`return_code = 0`). Skips explicitly when optional LSM hooks fail to attach.
+- **`test_readiness.py`**: Validates `bloodhound_ready` facts (`boot_id`, `auid`, `excluded`, `probes_attached`, `ring_buffer_size`, `nsfs_dev`, `attached`, `heartbeat_interval_ms`), default startup with no LSM and no qdisc changes, cadence quantization and zero handling, and the complete absence of live `/proc` enrichment.
+
+> [!NOTE]
+> In this producer worktree, these VM test suites are collected and syntax-checked (`pytest --collect-only`),
+> but are **not executed** against a running guest VM. Live VM execution and end-to-end validation are
+> owned by parent integration.
 
 ## Debugging
 

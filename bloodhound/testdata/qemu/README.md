@@ -86,7 +86,7 @@ The recaptured fixtures record genuine eBPF probe output without synthetic adjus
 | `rename` | 33 | `python3 -c 'import os; open("/tmp/bh-golden-old","w").close(); os.rename("/tmp/bh-golden-old","/tmp/bh-golden-new")'` | Retained probe limitation: decoded `oldpath: "!"` / `newpath: ""` |
 | `sendto` | 52 | `python3 -c 'import socket; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.sendto(b"GOLDEN",("127.0.0.1",19090))'` | Sent 6 UDP bytes to `127.0.0.1:19090` |
 | `lsm_task_kill` | 201 | `python3 -c 'import os,time; p=os.fork(); time.sleep(1) if p==0 else (os.kill(p,0),os.waitpid(p,0))'` | Sent signal 0 to child process |
-| `lsm_bpf` | 202 | `bpftool prog show` | Unprivileged command, denied by probe (-1) |
+| `lsm_bpf` | 202 | `bpftool prog show` | Pre-Phase-2 deny-all capture, denied by probe (-1). Fixture bytes and expectations unchanged; current opt-in Phase 2 behavior (observe-only return_code: 0) requires real guest recapture. No VM capture was performed in this worktree. |
 | `lsm_setuid` | 206 | `python3 -c 'import os; os.setuid(os.getuid())'` | Retained probe limitation: kernel hook hardcodes all 4 UID/GID fields to 0 |
 | `lsm_ptrace` | 203 | `python3 -c 'import ctypes; print(ctypes.CDLL(None).ptrace(16,<collector_pid>,0,0))'` | Python with `CAP_SYS_PTRACE` targeting root daemon PID; denied by LSM hook (-1) |
-| `packet_ingress` | 50 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Preserved 2026-08-20 provenance (commit `20d1a05`) |
+| `packet_ingress` | 50 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Historical 2026-08-20 decode-only (commit `20d1a05`), not evidence of active capture (retired in Phase 2) |

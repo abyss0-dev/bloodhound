@@ -4,8 +4,8 @@ eBPF-based behavioral tracing daemon for isolated VMs.
 
 Bloodhound is a resident daemon that traces user behavior inside QEMU/KVM
 guest VMs. It captures every kernel-level event attributable to a target
-user — syscalls, TTY I/O, network packets, and process lifecycle — correlates
-them via `auid` (audit login UID), and emits structured events as NDJSON.
+user — syscalls, TTY I/O, and process lifecycle — correlates them via `auid`
+(audit login UID), and emits structured events as NDJSON.
 
 ```mermaid
 graph TD
@@ -16,25 +16,25 @@ graph TD
             L1["Layer 1<br/>TTY<br/>(kprobe)"]
             L2["Layer 2<br/>Exec<br/>(tracepoint)"]
             L3["Layer 3<br/>Syscalls<br/>(tracepoint)"]
-            TC["TC<br/>Packets<br/>(sched_cls)"]
-            LSM["LSM Hooks<br/>(7 hooks)"]
-            Filter["auid filter<br/>+ port exclusion"]
+            LSM["LSM Hooks<br/>(7 hooks, opt-in)"]
+            Filter["auid filter<br/>+ daemon exclusion"]
             RB["Ring Buffer"]
         end
 
         subgraph Userspace["Bloodhound (userspace)"]
-            PktJoin["5-tuple<br/>packet join"]
-            Enrich["/proc enrichment<br/>+ JSON serialize"]
+            Sequencer["Sequencer<br/>(ordered admission)"]
+            Serializer["Serializer<br/>(NDJSON)"]
         end
 
         Output["stdout (NDJSON)"]
 
-        User --> L1 & L2 & L3 & TC
-        L1 & L2 & L3 & TC --> Filter
+        User --> L1 & L2 & L3
+        L1 & L2 & L3 --> Filter
         Filter --> RB
         LSM --> RB
-        RB --> PktJoin & Enrich
-        PktJoin & Enrich --> Output
+        RB --> Sequencer
+        Sequencer --> Serializer
+        Serializer --> Output
     end
 ```
 
@@ -45,10 +45,11 @@ graph TD
 - **Exec filesystem view**: root device/inode, mount namespace and root mount ID
   captured at exec entry, with explicit acquisition status and exact actor/time
   pairing ([contract](docs/development/exec-view.md))
-- **Layer 3 — Syscall tracing**: raw syscall stream + rich extraction for 30+ syscalls (file, network, process, directory operations)
+- **Layer 3 — Syscall tracing**: raw syscall stream + rich extraction for 40+ syscalls (file, network, process, directory operations)
 - **Signal observation**: non-enforcing `signal_generate` raw tracepoint with immutable sender and target identities
-- **Packet capture**: TC (Traffic Control) hooks on all network interfaces, ingress and egress
-- **Tamper resistance**: 7 LSM hooks protect the daemon from the target user (task_kill, bpf, ptrace, file_open, inode_unlink, inode_rename, task_fix_setuid)
+- **Tamper resistance (opt-in)**: 7 LSM hooks protect the daemon when opted in via `--enable-lsm`
+  (`task_kill`, `bpf`, `ptrace`, `file_open`, `inode_unlink`, `inode_rename`, `task_fix_setuid`);
+  default collection is non-enforcing, and the BPF hook is observe-only
 - **Structured output**: All events emitted as NDJSON with unified `BehaviorEvent` schema
 
 ## Requirements
@@ -68,8 +69,9 @@ graph TD
 > available on macOS. Docker-based builds (`make build-docker`) work on
 > macOS but the E2E test pipeline does not.
 
-BPF LSM is optional and belongs to the separate tamper-resistance boundary.
-The `signal_generate` collector neither enables nor depends on LSM.
+BPF LSM is optional (`--enable-lsm`) and belongs to the separate tamper-resistance boundary.
+The kernel boot parameter `lsm=...,bpf` is required only for optional LSM, not for default
+startup. The `signal_generate` collector neither enables nor depends on LSM.
 
 Application semantic probes use the [trusted USDT contract](docs/usdt-collectors.md).
 Probing arbitrary application-internal functions or fixed binary offsets is not
@@ -106,8 +108,8 @@ cd tests && ../venv/bin/python3 -m pytest --ssh-port=2222 --ssh-host=localhost
 
 ```bash
 # Inside the VM (as root):
-bloodhound --uid 1000           # trace user with UID 1000
-bloodhound --uid 1000 --exclude-ports 22  # exclude SSH traffic
+bloodhound --uid 1000           # trace user with UID 1000 (default non-enforcing)
+bloodhound --uid 1000 --enable-lsm # opt-in LSM hooks
 bloodhound --uid 1000 --ring-buffer-size 8388608  # 8 MiB BPF ring buffer
 bloodhound --uid 1000 --heartbeat-interval 1.0    # periodic & shutdown heartbeat (0 disables)
 ```
@@ -125,6 +127,7 @@ bloodhound --uid 1000 --heartbeat-interval 1.0    # periodic & shutdown heartbea
 
 `--heartbeat-interval` sets the cadence in seconds for synthesized `HEARTBEAT` pulses (default: `1.0`; set to `0` to disable periodic and final heartbeats):
 
+- **Cadence quantization and zero**: `--heartbeat-interval` accepts seconds as an f64 and quantizes once to milliseconds via `round(seconds * 1000.0)` as u32. Positive values rounding to zero (<0.5 ms), negative values, non-finite values, and values exceeding `u32::MAX` are rejected at startup. Passing `0` (including `-0.0`) disables both periodic and final shutdown heartbeats (permitted for standalone use; connected observers require positive cadence).
 - **Zero-based accounting**: Drop and emission deltas start from a zero baseline at daemon start. Deltas advance only on successful admission to the bounded sequencer channel, so periodic and final deltas telescope cleanly: drop deltas sum to cumulative `drop_count_total`, and emission deltas sum to all serialized events preceding the final heartbeat.
 - **Graceful shutdown**: On SIGINT or SIGTERM, the daemon synchronously detaches BPF programs and USDT probes, initiates producer stop under a 5-second asynchronous drain deadline that starts after synchronous detach (synchronous detach is not preemptible by an async timeout), stops the drop bridge, and takes a fresh drop count read.
 - **Final heartbeat**: Following orderly detach, drain, and fresh drop read, an ordinary last `HEARTBEAT` event is emitted through the sequencer before flushing stdout. It carries no new field (no `final: true`, new event type, or extra args).
