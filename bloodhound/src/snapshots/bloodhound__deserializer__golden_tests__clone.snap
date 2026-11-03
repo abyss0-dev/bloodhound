@@ -16,13 +16,44 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "python3",
-    "pid": 3464,
-    "process_ref": {
-      "start_boottime_ns": 819646649297,
-      "tgid": 3464
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 223,
-    "timestamp": 819687648322
+    "pid": 5561,
+    "process_ref": {
+      "start_boottime_ns": 582980758016,
+      "tgid": 5561
+    },
+    "sessionid": 407,
+    "tid": 5561,
+    "timestamp": 582994191052
   },
-  "return_code": 3465
+  "return_code": 5562
 }

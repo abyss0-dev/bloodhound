@@ -4,15 +4,21 @@ expression: to_json(& event)
 ---
 {
   "args": {
-    "file_identity_status": "unknown",
+    "capture_version": 1,
+    "dev": 265289728,
+    "dev_major": 253,
+    "dev_minor": 0,
+    "dirfd": -100,
+    "file_identity_status": "complete",
     "filename": "/tmp/bh-golden-openat",
-    "filename_status": "unknown",
+    "filename_status": "complete",
     "flags": [
       "O_WRONLY",
       "O_CREAT",
       "O_TRUNC",
       "O_CLOEXEC"
     ],
+    "ino": 22773,
     "mode": 438
   },
   "event": {
@@ -23,13 +29,44 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "python3",
-    "pid": 2740,
-    "process_ref": {
-      "start_boottime_ns": 760775710992,
-      "tgid": 2740
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 171,
-    "timestamp": 760793230096
+    "pid": 4909,
+    "process_ref": {
+      "start_boottime_ns": 552131107607,
+      "tgid": 4909
+    },
+    "sessionid": 356,
+    "tid": 4909,
+    "timestamp": 552152927973
   },
   "return_code": 3
 }

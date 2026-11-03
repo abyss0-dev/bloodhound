@@ -4,7 +4,7 @@ expression: to_json(& event)
 ---
 {
   "args": {
-    "target_pid": 4860
+    "target_pid": 6640
   },
   "event": {
     "layer": "behavior",
@@ -14,13 +14,44 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "python3",
-    "pid": 4989,
-    "process_ref": {
-      "start_boottime_ns": 958675461500,
-      "tgid": 4989
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 328,
-    "timestamp": 958727066012
+    "pid": 6742,
+    "process_ref": {
+      "start_boottime_ns": 639202546474,
+      "tgid": 6742
+    },
+    "sessionid": 499,
+    "tid": 6742,
+    "timestamp": 639222296668
   },
   "return_code": -1
 }

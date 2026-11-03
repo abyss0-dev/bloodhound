@@ -20,6 +20,14 @@ jobs:
       - name: Build binary via Docker
         run: make build-docker
 
+      - name: Build the workspace test image
+        run: docker build --target build -t bloodhound-workspace-test -f Dockerfile.build .
+
+      - name: Run workspace unit and replay tests
+        run: >-
+          docker run --rm bloodhound-workspace-test
+          cargo test --workspace --locked --target x86_64-unknown-linux-musl
+
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
