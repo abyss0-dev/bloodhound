@@ -22,7 +22,7 @@ retaining its original 2026-08-20 provenance.
 ### 2026-08-20 Preserved Fixture (`packet_ingress`)
 
 - **Provenance**: `packet_ingress.b64` (and its snapshot `bloodhound__deserializer__golden_tests__packet_ingress.snap`) was not recaptured in this batch. It preserves its original capture from 2026-08-20 under QEMU/KVM Linux 6.8.0-49-generic, using the collector built from commit `20d1a05` plus temporary raw-record logging (removed after capture).
-- **Selection**: The collector was restarted with logging restricted to `EventKind` 50 (`packet_ingress`), a 16-byte UDP datagram was transmitted over loopback, and the 44-byte IPv4 packet record was selected. Both the fixture and snapshot remain byte-identical to base commit `66f3022`; they were last changed in PR #46 (`46ff1db`).
+- **Selection**: The collector was restarted with logging restricted to `EventKind` 100 (`packet_ingress`), a 16-byte UDP datagram was transmitted over loopback, and the 44-byte IPv4 packet record was selected. Both the fixture and snapshot remain byte-identical to base commit `66f3022`; they were last changed in PR #46 (`46ff1db`).
 
 ## Capture and Correlation Method
 
@@ -89,4 +89,4 @@ The recaptured fixtures record genuine eBPF probe output without synthetic adjus
 | `lsm_bpf` | 202 | `bpftool prog show` | Pre-Phase-2 deny-all capture, denied by probe (-1). Fixture bytes and expectations unchanged; current opt-in Phase 2 behavior (observe-only return_code: 0) requires real guest recapture. No VM capture was performed in this worktree. |
 | `lsm_setuid` | 206 | `python3 -c 'import os; os.setuid(os.getuid())'` | Retained probe limitation: kernel hook hardcodes all 4 UID/GID fields to 0 |
 | `lsm_ptrace` | 203 | `python3 -c 'import ctypes; print(ctypes.CDLL(None).ptrace(16,<collector_pid>,0,0))'` | Python with `CAP_SYS_PTRACE` targeting root daemon PID; denied by LSM hook (-1) |
-| `packet_ingress` | 50 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Historical 2026-08-20 decode-only (commit `20d1a05`), not evidence of active capture (retired in Phase 2) |
+| `packet_ingress` | 100 | Sent 16-byte UDP datagram over loopback; selected 44-byte IPv4 packet | Historical 2026-08-20 decode-only (commit `20d1a05`), not evidence of active capture (retired in Phase 2) |

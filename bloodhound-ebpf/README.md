@@ -14,7 +14,7 @@ graph TD
     end
     subgraph "Layer 3 — Syscalls"
         RAW["layer3_raw.rs<br/>raw_syscalls: sys_enter/exit"]
-        RICH["layer3_rich.rs<br/>30+ rich syscall extractors"]
+        RICH["layer3_rich.rs<br/>40+ rich syscall extractors"]
     end
     subgraph "Tamper Resistance"
         LSM["lsm_hooks.rs<br/>7 LSM hooks (opt-in)"]
@@ -37,7 +37,7 @@ graph TD
 | `layer1_tty.rs` | kprobe | `pty_write` / `n_tty_read` — raw terminal I/O capture |
 | `layer2_exec.rs` | tracepoint | `execve` / `execveat` — process execution with argv |
 | `layer3_raw.rs` | tracepoint | `raw_syscalls` — generic syscall number + return code |
-| `layer3_rich.rs` | tracepoint | 30+ syscall-specific extractors (openat, read, write, connect, bind, mkdir, etc.) |
+| `layer3_rich.rs` | tracepoint | 40+ syscall-specific extractors (openat, read, write, connect, bind, mkdir, etc.) |
 | `lsm_hooks.rs` | LSM | 7 hooks (opt-in via `--enable-lsm`): `task_kill` and `ptrace_access_check` enforce daemon protection; `bpf` is observe-only (always returns 0); other hooks retain behavior. Attachment does not imply every hook enforces. |
 | `signal.rs` | raw tracepoint | Non-enforcing `signal_generate` observation with sender and target identity |
 | `filter.rs` | — | `should_trace()` — auid-based event filtering |

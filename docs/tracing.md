@@ -207,7 +207,7 @@ beyond raw integer values:
 | readv/writev         | fd, fd_type, total size, iov_count, iov_truncated |
 | connect              | sockaddr (addr, port, family)                 |
 | chdir                | path (string)                                 |
-| fchdir               | fd                                            |
+| fchdir               | args.fd (no /proc path resolution)            |
 | bind/listen          | sockaddr (addr, port, family)                 |
 | socket               | domain, type, protocol                        |
 | unlink/unlinkat      | path (string)                                 |
@@ -367,7 +367,7 @@ resolves the path via `/proc/<pid>/fd/<N>` (best-effort). Both emit
 
 > [!NOTE]
 > Live packet capture via TC hooks has been retired since Phase 2. Event kinds
-> 100 (`packet_egress`) and 101 (`packet_ingress`) remain permanently reserved for
+> 100 (`packet_ingress`) and 101 (`packet_egress`) remain permanently reserved for
 > historical playback and offline decoding, but no TC programs are attached, no
 > `--exclude-ports` flag exists, no packet correlator or socket table runs in userspace,
 > and no live `PACKET` events are produced.

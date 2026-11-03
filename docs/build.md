@@ -43,14 +43,6 @@ The VM boots with `e2e/vmlinuz` (kernel `6.8.0-49-generic` from Ubuntu 22.04 HWE
 
 The Ubuntu 24.04 native modules (`6.8.0-49.49`) have different modversions CRCs → `modprobe` fails with "Invalid argument".
 
-### TC Hooks (sch_ingress)
-
-TC hooks require `sch_ingress` kernel module for `clsact` qdisc. The systemd service includes:
-```
-ExecStartPre=-/sbin/modprobe sch_ingress
-ExecStartPre=-/bin/sh -c 'for iface in $(ls /sys/class/net); do tc qdisc add dev $iface clsact 2>/dev/null; done'
-```
-
 ## BPF Verifier Gotchas
 
 ### `bpf_skb_load_bytes` zero-size read

@@ -31,8 +31,6 @@ The actor header and pathname are captured at syscall entry. A thread-keyed map
 owns the pathname until exit, independent of scratch-buffer reuse and CPU
 migration. Task exit removes interrupted invocations before thread-group exit
 filtering. The returned FD and its identity are sampled at syscall exit.
-Post-receipt `/proc` enrichment is best-effort later information, not part of an
-operation-time snapshot.
 
 The FD traversal does not pin the returned file. Concurrent close/reuse can
 produce a readable but different file and is not necessarily detectable.

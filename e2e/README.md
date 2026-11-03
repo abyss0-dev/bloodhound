@@ -123,7 +123,7 @@ layers. Each script focuses on specific event types to make verification easier.
 
 - **`test_packet.py`**: Positive live packet capture tests were removed (not skipped) following TC retirement. Historical packet decoding remains verified via unit tests.
 - **`test_lsm.py`**: Verifies opt-in LSM hook behavior using capable root execution under the principal AUID (`TARGET_AUID`), testing a harmless `SIGCONT` denial to the daemon PID with an actual `task_kill` event (`return_code = -1`), and a valid `BPF_MAP_CREATE` syscall with an actual observe-only `bpf` hook event (`return_code = 0`). Skips explicitly when optional LSM hooks fail to attach.
-- **`test_readiness.py`**: Validates `bloodhound_ready` facts (`boot_id`, `auid`, `excluded`, `probes_attached`, `ring_buffer_size`, `nsfs_dev`, `attached`, `heartbeat_interval_ms`), default startup with no LSM and no qdisc changes, cadence quantization and zero handling, and the complete absence of live `/proc` enrichment.
+- **`test_readiness.py`**: Validates `bloodhound_ready` facts (`boot_id`, `auid`, `excluded`, `probes_attached`, `ring_buffer_size`, `nsfs_dev`, `attached`, `heartbeat_interval_ms`), default startup with no LSM and no qdisc or TC filter changes, cadence quantization and zero handling, and the complete absence of live `/proc` enrichment.
 
 > [!NOTE]
 > In this producer worktree, these VM test suites are collected and syntax-checked (`pytest --collect-only`),

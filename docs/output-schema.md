@@ -72,7 +72,7 @@ BehaviorEvent
 | behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
 
-Note: `event.layer` remains emitted legacy metadata (`intent`, `tooling`, `behavior`) in the schema, but is no longer an e2e consumer assertion.
+Note: `event.layer` remains emitted legacy producer metadata (`intent`, `tooling`, `behavior`) in the schema, but downstream consumers do not depend on it for event classification.
 
 
 ## Implementation Notes
@@ -211,8 +211,8 @@ no `ns`). `args` carries:
 
 Not produced since Phase 2; historical decode only.
 
-Raw packet capture via TC hooks has been retired. Event kinds 100 (`packet_egress`)
-and 101 (`packet_ingress`) remain permanently reserved for historical playback and
+Raw packet capture via TC hooks has been retired. Event kinds 100 (`packet_ingress`)
+and 101 (`packet_egress`) remain permanently reserved for historical playback and
 offline decoding. No live TC programs are attached, no qdisc changes are made, no
 packet correlation or socket table is maintained, and no `--exclude-ports` flag exists.
 Network observations are captured exclusively via Layer 3 syscall tracepoints

@@ -12,14 +12,17 @@
 3. Read and validate kernel boot ID from `/proc/sys/kernel/random/boot_id`
    (startup fails immediately if read fails or format is invalid).
 4. Initialize the single bounded admission sequencer before any producer can emit.
-5. Ingest trusted USDT configuration selections (invalid configurations emit a
-   startup diagnostic before non-zero termination without emitting ready).
+5. Ingest trusted USDT configuration selections (invalid configuration files emit a
+   startup diagnostic on stdout before non-zero termination; validation failures in
+   loader startup such as duplicate collector selections abort immediately without
+   emitting a stdout diagnostic; in neither failure case is ready emitted).
 6. Resolve running kernel BTF offsets and set global BPF variables (`TARGET_AUID`,
    `DAEMON_PID`, task_struct offsets, namespace offsets, exec_view offsets).
 7. Load eBPF programs, attach required tracepoints (`lifecycle`, `signal`,
    `exec.execve`, `raw_syscalls`), optional tracepoints (`exec.execveat`, Tier 2
    syscalls, sendfile/splice), TTY kprobes, opt-in LSM hooks (`--enable-lsm`),
-   and selected USDT probes, generating an explicit `AttachReport`.
+   and selected USDT probes, generating an explicit `AttachReport`. Rejects duplicate
+   USDT selections across config files before attachment.
 8. Read back actual kernel ring buffer size and verify nsfs device number.
 9. Admit `META bloodhound_ready` to the sequencer as the strictly first record
    of a successful run, ahead of starting or admitting any emitting tasks (collection

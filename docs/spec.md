@@ -13,10 +13,9 @@ overhead is acceptable; completeness of observation is the top priority.
 ## Overview
 
 Bloodhound is a resident daemon that traces user behavior inside isolated
-VMs (QEMU/KVM). It captures every kernel-level event attributable to
-the target user -- syscalls, TTY I/O, network packets, and process
-lifecycle -- correlates them via `auid`, and emits structured events as
-NDJSON to stdout.
+VMs (QEMU/KVM). It captures kernel-level events attributable to
+the target user -- syscalls, TTY I/O, and process lifecycle -- correlates
+them via `auid`, and emits structured events as NDJSON to stdout.
 
 ```
 +---------------------------------------------------------------+
@@ -24,24 +23,23 @@ NDJSON to stdout.
 |                                                               |
 |  +------------+     +--------------------------------------+  |
 |  | Target user|---->|            Kernel (eBPF)             |  |
-|  | (fixed UID)|     |  +-------+ +------+ +------+ +----+ |  |
-|  +------------+     |  |Layer 1| |Layer2| |Layer3| | TC | |  |
-|                     |  | (TTY) | |(exec)| |(sys) | |(pkt)| |  |
-|                     |  +---+---+ +--+---+ +--+---+ +--+-+ |  |
-|                     |      |        |        |        |    |  |
-|                     |  [auid filter: early return]  [port] |  |
-|                     |      |        |        |      [excl] |  |
-|                     |      +--------+--------+--------+    |  |
+|  | (fixed UID)|     |  +-------+ +------+ +------+         |  |
+|  +------------+     |  |Layer 1| |Layer2| |Layer3|         |  |
+|                     |  | (TTY) | |(exec)| |(sys) |         |  |
+|                     |  +---+---+ +--+---+ +--+---+         |  |
+|                     |      |        |        |             |  |
+|                     |  [auid filter + daemon excl]         |  |
+|                     |      |        |        |             |  |
+|                     |      +--------+--------+             |  |
 |                     |               |                      |  |
-|                     |         ring buffer   LSM hooks      |  |
-|                     +---------------|---+-----------+       |  |
-|                                     |                       |  |
+|                     |         ring buffer   LSM (opt-in)   |  |
+|                     +---------------|---+-----------+      |  |
+|                                     |                      |  |
 |                     +---------------v-----------------------+  |
 |                     |       Bloodhound (userspace)          |  |
-|                     |  +----------+  +--------------------+ |  |
-|                     |  | 5-tuple  |  | /proc enrichment   | |  |
-|                     |  | pkt join |  | + JSON serialize   | |  |
-|                     |  +----------+  +--------------------+ |  |
+|                     |  +----------------------------------+ |  |
+|                     |  | Bounded Sequencer + Serializer   | |  |
+|                     |  +----------------------------------+ |  |
 |                     |  drop counter poll -> stderr          |  |
 |                     |               |                       |  |
 |                     +---------------v-----------------------+  |
@@ -60,7 +58,7 @@ NDJSON to stdout.
 | OS                  | DECIDED | Ubuntu (LTS)                                    |
 | Kernel version      | DECIDED | 6.8 (Ubuntu 24.04 LTS); pinned per VM image     |
 | BTF support         | DECIDED | Required (CONFIG_DEBUG_INFO_BTF=y)              |
-| BPF LSM support     | DECIDED | Required (boot param: lsm=...,bpf)             |
+| BPF LSM support     | DECIDED | Optional (boot param: lsm=...,bpf for --enable-lsm) |
 | Language            | DECIDED | Rust (Aya framework)                            |
 | BPF-to-user pipe    | DECIDED | BPF ring buffer (BPF_MAP_TYPE_RINGBUF)          |
 | Output destination  | DECIDED | stdout (future: virtio-serial)                  |
