@@ -39,21 +39,27 @@ pub fn new_events_emitted_counter() -> EventsEmittedCounter {
     Arc::new(AtomicU64::new(0))
 }
 
-/// Spawn a periodic heartbeat emitter. The task ticks every
-/// `interval`, computes deltas against its last sample, builds a
-/// `HEARTBEAT` `BehaviorEvent`, and sends it on `tx`. When `tx` is
-/// closed the task exits.
-///
-/// An `interval` of zero disables heartbeats — the task returns
-/// immediately so consumers that do not expect them are unaffected.
+/// Samples represented by the last successfully admitted heartbeat.
+/// Zero baselines include counts accumulated before the emitter starts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Cursor {
+    pub drops: u64,
+    pub emitted: u64,
+}
+
+/// Emit periodic heartbeats until stopped or the receiver closes. Stop also
+/// interrupts a backpressured send; only successful admission advances the
+/// returned cursor. A zero interval returns None and disables the final
+/// heartbeat as well.
 pub async fn run_heartbeat(
     interval: Duration,
     drop_counter: DropCounter,
     events_emitted: EventsEmittedCounter,
     tx: mpsc::Sender<SequencedInput>,
-) {
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> Option<Cursor> {
     if interval.is_zero() {
-        return;
+        return None;
     }
 
     let mut ticker = time::interval(interval);
@@ -62,27 +68,29 @@ pub async fn run_heartbeat(
     // counted.
     ticker.tick().await;
 
-    let mut prev_drops: u64 = drop_counter.load(Ordering::Relaxed);
-    let mut prev_emitted: u64 = events_emitted.load(Ordering::Relaxed);
+    let mut cursor = Cursor::default();
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            biased;
+            _ = &mut stop => return Some(cursor),
+            _ = ticker.tick() => {}
+        }
 
         let now_drops = drop_counter.load(Ordering::Relaxed);
         let now_emitted = events_emitted.load(Ordering::Relaxed);
-        let drops_delta = now_drops.saturating_sub(prev_drops);
-        let emitted_delta = now_emitted.saturating_sub(prev_emitted);
-        prev_drops = now_drops;
-        prev_emitted = now_emitted;
-
-        let event = build_heartbeat(drops_delta, now_drops, emitted_delta);
-        if tx
-            .send(SequencedInput::Synthesized(Box::new(event)))
-            .await
-            .is_err()
-        {
-            // Receiver gone — main loop has shut down.
-            return;
+        let event = build_heartbeat(
+            now_drops.saturating_sub(cursor.drops),
+            now_drops,
+            now_emitted.saturating_sub(cursor.emitted),
+        );
+        tokio::select! {
+            biased;
+            _ = &mut stop => return Some(cursor),
+            result = tx.send(SequencedInput::Synthesized(Box::new(event))) => {
+                if result.is_err() { return Some(cursor); }
+                cursor = Cursor { drops: now_drops, emitted: now_emitted };
+            }
         }
     }
 }
@@ -91,7 +99,7 @@ pub async fn run_heartbeat(
 ///
 /// Kept separate from the emission loop so unit tests can exercise
 /// the shape of the event without spinning up tokio.
-fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -> BehaviorEvent {
+pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -> BehaviorEvent {
     let mut args = serde_json::Map::new();
     args.insert("drop_count_delta".into(), json!(drops_delta));
     args.insert("drop_count_total".into(), json!(drops_total));
@@ -190,6 +198,35 @@ mod tests {
         assert!(args.get("run_prefix_incomplete").is_none());
     }
 
+    #[tokio::test]
+    async fn stop_interrupts_full_send_without_advancing_cursor() {
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(SequencedInput::Synthesized(Box::new(build_heartbeat(
+            0, 0, 0,
+        ))))
+        .await
+        .unwrap();
+        let drops = crate::drop_counter::new_counter();
+        drops.store(7, Ordering::Relaxed);
+        let (stop, stopped) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(run_heartbeat(
+            Duration::from_millis(1),
+            drops,
+            new_events_emitted_counter(),
+            tx,
+            stopped,
+        ));
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        stop.send(()).unwrap();
+        let cursor = tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cursor, Some(Cursor::default()));
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_none());
+    }
+
     // ── emitter plumbing ─────────────────────────────────────────────────
 
     /// Zero interval must short-circuit the loop — downstream consumers
@@ -201,7 +238,11 @@ mod tests {
         let (tx, mut rx) = mpsc::channel::<SequencedInput>(8);
 
         // Task should return immediately without sending anything.
-        run_heartbeat(Duration::ZERO, drops, emitted, tx).await;
+        let (_stop, stopped) = tokio::sync::oneshot::channel();
+        assert_eq!(
+            run_heartbeat(Duration::ZERO, drops, emitted, tx, stopped).await,
+            None
+        );
         assert!(rx.try_recv().is_err());
     }
 
@@ -217,11 +258,13 @@ mod tests {
         drops.fetch_add(3, Ordering::Relaxed);
         emitted.fetch_add(10, Ordering::Relaxed);
 
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let handle = tokio::spawn(run_heartbeat(
             Duration::from_millis(50),
             drops.clone(),
             emitted.clone(),
             tx,
+            stopped,
         ));
 
         let input = tokio::time::timeout(Duration::from_millis(500), rx.recv())
@@ -234,12 +277,16 @@ mod tests {
 
         assert_eq!(ev.event.event_type, "HEARTBEAT");
         let args = ev.args.unwrap();
-        // The first sample taken inside `run_heartbeat` happens after
-        // the initial tick is consumed. By the time the first *emitted*
-        // heartbeat fires, the baseline has already observed the
-        // pre-spawn increments, so delta is 0 but total carries them.
         assert_eq!(args["drop_count_total"], 3);
-
-        handle.abort();
+        assert_eq!(args["drop_count_delta"], 3);
+        assert_eq!(args["events_emitted_delta"], 10);
+        stop.send(()).unwrap();
+        assert_eq!(
+            handle.await.unwrap(),
+            Some(Cursor {
+                drops: 3,
+                emitted: 10
+            })
+        );
     }
 }

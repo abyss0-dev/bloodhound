@@ -45,10 +45,7 @@ impl BpfDropCountReader {
 
 impl DropCountReader for BpfDropCountReader {
     fn read_total(&mut self) -> Result<u64> {
-        let values = self
-            .map
-            .get(&0, 0)
-            .context("read DROP_COUNT per-cpu map")?;
+        let values = self.map.get(&0, 0).context("read DROP_COUNT per-cpu map")?;
         Ok(values.iter().sum())
     }
 }
@@ -65,9 +62,10 @@ pub async fn bridge_bpf_drop_counter<R: DropCountReader>(
     mut reader: R,
     counter: DropCounter,
     interval: Duration,
-) {
+    mut stop: tokio::sync::oneshot::Receiver<()>,
+) -> R {
     if interval.is_zero() {
-        return;
+        return reader;
     }
 
     let mut ticker = time::interval(interval);
@@ -76,7 +74,11 @@ pub async fn bridge_bpf_drop_counter<R: DropCountReader>(
     ticker.tick().await;
 
     loop {
-        ticker.tick().await;
+        tokio::select! {
+            biased;
+            _ = &mut stop => return reader,
+            _ = ticker.tick() => {}
+        }
         match reader.read_total() {
             Ok(total) => counter.store(total, Ordering::Relaxed),
             Err(e) => warn!("failed to read BPF drop counter: {e:#}"),
@@ -136,10 +138,12 @@ mod tests {
         let bpf_side = Arc::new(AtomicU64::new(0));
         let counter = new_counter();
 
+        let (stop, stopped) = tokio::sync::oneshot::channel();
         let bridge = tokio::spawn(bridge_bpf_drop_counter(
             FakeReader(bpf_side.clone()),
             counter.clone(),
             Duration::from_millis(20),
+            stopped,
         ));
 
         bpf_side.store(7, Ordering::Relaxed);
@@ -158,7 +162,10 @@ mod tests {
             "bridge must keep polling — not just sample once"
         );
 
-        bridge.abort();
+        stop.send(()).unwrap();
+        let mut reader = bridge.await.unwrap();
+        bpf_side.store(99, Ordering::Relaxed);
+        assert_eq!(reader.read_total().unwrap(), 99, "final sample is fresh");
     }
 
     #[tokio::test]
@@ -166,10 +173,12 @@ mod tests {
         let counter = new_counter();
         counter.store(99, Ordering::Relaxed);
 
+        let (_stop, stopped) = tokio::sync::oneshot::channel();
         let bridge = tokio::spawn(bridge_bpf_drop_counter(
             FailingReader,
             counter.clone(),
             Duration::from_millis(20),
+            stopped,
         ));
 
         tokio::time::sleep(Duration::from_millis(120)).await;
@@ -190,7 +199,8 @@ mod tests {
     async fn zero_interval_disables_bridge() {
         let counter = new_counter();
         let reader = FakeReader(Arc::new(AtomicU64::new(123)));
-        bridge_bpf_drop_counter(reader, counter.clone(), Duration::ZERO).await;
+        let (_stop, stopped) = tokio::sync::oneshot::channel();
+        bridge_bpf_drop_counter(reader, counter.clone(), Duration::ZERO, stopped).await;
         assert_eq!(counter.load(Ordering::Relaxed), 0);
     }
 }
