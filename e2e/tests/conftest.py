@@ -4,7 +4,6 @@ import os
 import shlex
 import subprocess
 import time
-import warnings
 
 import pexpect
 import pytest
@@ -127,6 +126,13 @@ def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_att
                                 continue  # Retry an in-progress final line.
                         return events
 
+                    def signal(self, name="INT"):
+                        assert name in {"INT", "TERM", "STOP", "CONT"}
+                        result = ssh_cmd(
+                            f"kill -{name} $(cat {remote_dir}/pid)", user="root"
+                        )
+                        assert result.returncode == 0, result.stderr
+
                     def wait(self, timeout=15):
                         return process.wait(timeout=timeout)
 
@@ -152,7 +158,7 @@ def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_att
                     )
                     assert cleanup.returncode == 0, cleanup.stderr
                     if "required SIGKILL" in cleanup.stderr:
-                        warnings.warn(cleanup.stderr.strip(), RuntimeWarning)
+                        pytest.fail(cleanup.stderr.strip())
                 if process is not None:
                     process.wait(timeout=10)
             finally:

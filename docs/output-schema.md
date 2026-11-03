@@ -235,28 +235,67 @@ and never imply or synthesize `process_exit`.
 
 ### event.type HEARTBEAT
 
-DECIDED: Periodic userspace-synthesised pulse. `event.layer =
-"behavior"`, `event.name = "heartbeat"`. Emitted every
-`--heartbeat-interval` seconds (default: 1.0; set to 0 to disable).
+Userspace-synthesised pulse. `event.layer = "behavior"`, `event.name = "heartbeat"`.
+Emitted periodically every `--heartbeat-interval` seconds (default: 1.0; set to
+0 to disable both periodic and final heartbeats) and as an ordinary last event
+on orderly daemon shutdown.
 
 The header fields `auid`, `sessionid`, `pid` are sentinel zeroes and
 `comm` is empty — `HEARTBEAT` is not attributable to a process.
 `args` carries:
 
-- `drop_count_delta` — drops observed since the previous heartbeat
-- `drop_count_total` — cumulative drops since daemon startup
+- `drop_count_delta` — ring-buffer drops observed since the previous admitted
+  heartbeat (or since daemon start for the first heartbeat)
+- `drop_count_total` — cumulative ring-buffer drops since daemon startup
 - `reason_code` — `ring_buffer_overflow` once the cumulative drop count is
   nonzero; distinct from `deserialize_rejected` diagnostics
-- `events_emitted_delta` — events serialised to stdout in the interval
+- `events_emitted_delta` — events serialised to stdout since the previous admitted
+  heartbeat (or since daemon start for the first heartbeat)
 - `run_prefix_incomplete` — present and `true` once cumulative ring-buffer
   drops are nonzero for this daemon run
 - `gap_detected` — present and `true` only when
   `drop_count_delta > 0`; omitted otherwise so consumers can
   fast-path on the flag's presence
 
+Accounting deltas start from a zero baseline at daemon start (covering any events
+or drops occurring before heartbeat emitter initialization). An admitted sample
+advances the baseline only after successful acceptance into the bounded sequencer
+channel; backpressured or cancelled sends do not advance accounting. Across a run,
+periodic and final `drop_count_delta` values sum to the final `drop_count_total`,
+and `events_emitted_delta` values sum to all serialized events preceding the last
+heartbeat.
+
 Downstream consumers should treat any interval between two
 `HEARTBEAT` events with `gap_detected = true` as *undecidable* for
 correlation — state accumulated across the gap may be incomplete.
+
+#### Graceful shutdown and final heartbeat
+
+On orderly shutdown (SIGINT or SIGTERM), Bloodhound synchronously detaches BPF
+and USDT probes, drains the sequencer admission channel while joining producers
+under a 5-second asynchronous deadline starting after synchronous detach, stops
+the drop counter bridge, and performs a fresh read of the kernel BPF drop counter.
+When enabled, an ordinary final `HEARTBEAT` is submitted as the last event before
+stdout flush.
+
+- **No new fields**: The final heartbeat uses the exact same schema; there is no
+  `final: true` field, no separate event type, args field, or reason code.
+- **Interval 0**: Passing `--heartbeat-interval 0` disables both periodic and
+  shutdown heartbeats. The final BPF map drop read is still performed on shutdown
+  to detect and report read errors.
+- **Aborted shutdown**: If a producer task panics or errors, the drain deadline
+  expires, or the final BPF drop count read fails, shutdown terminates with an
+  error and no final heartbeat is emitted.
+- **Exit status non-equivalence**: The appearance of a final `HEARTBEAT` line
+  is not an if-and-only-if marker of process exit success (`0`); writing or
+  flushing the output stream may fail after the heartbeat line has been written.
+- **Observation limits**: The 5-second asynchronous deadline begins after
+  synchronous detach (which is not preemptible by an async timeout) and does not
+  form a wall-clock guarantee for total shutdown time. Kernel effects in flight
+  during or after probe detachment are not guaranteed to be captured. Periodic
+  per-CPU drop map reads into userspace and periodic stderr warnings remain
+  best-effort operational diagnostics with known polling intervals and do not
+  guarantee immediate or synchronous notification of in-kernel drops.
 
 ### event.type DIAGNOSTIC
 

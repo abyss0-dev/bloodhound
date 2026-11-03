@@ -88,37 +88,51 @@ async fn main() -> Result<()> {
         .context("DROP_COUNT map not found in BPF object")?;
     let drop_count_map: PerCpuArray<_, u64> = PerCpuArray::try_from(drop_count_map)?;
     let bridge_reader = drop_counter::BpfDropCountReader::new(drop_count_map);
-    tokio::spawn(drop_counter::bridge_bpf_drop_counter(
+    let (bridge_stop_tx, bridge_stop_rx) = tokio::sync::oneshot::channel();
+    let bridge_handle = tokio::spawn(drop_counter::bridge_bpf_drop_counter(
         bridge_reader,
         drop_count.clone(),
         Duration::from_secs(1),
+        bridge_stop_rx,
     ));
 
-    let capture_map = bpf.take_map("OPENAT_FAILURES")
+    let capture_map = bpf
+        .take_map("OPENAT_FAILURES")
         .context("OPENAT_FAILURES map not found in BPF object")?;
     let capture_map: PerCpuArray<_, u64> = PerCpuArray::try_from(capture_map)?;
     let (capture_shutdown_tx, capture_shutdown_rx) = tokio::sync::oneshot::channel();
     let capture_handle = tokio::spawn(capture_health::monitor(
-        "openat", &capture_health::OPENAT_REASONS,
-        capture_map, sequence_tx.clone(), capture_shutdown_rx,
+        "openat",
+        &capture_health::OPENAT_REASONS,
+        capture_map,
+        sequence_tx.clone(),
+        capture_shutdown_rx,
     ));
 
-    let exec_map = bpf.take_map("EXEC_FAILURES")
+    let exec_map = bpf
+        .take_map("EXEC_FAILURES")
         .context("EXEC_FAILURES map not found in BPF object")?;
     let exec_map: PerCpuArray<_, u64> = PerCpuArray::try_from(exec_map)?;
     let (exec_shutdown_tx, exec_shutdown_rx) = tokio::sync::oneshot::channel();
     let exec_health_handle = tokio::spawn(capture_health::monitor(
-        "exec", &bloodhound_common::EXEC_FAILURE_REASONS,
-        exec_map, sequence_tx.clone(), exec_shutdown_rx,
+        "exec",
+        &bloodhound_common::EXEC_FAILURE_REASONS,
+        exec_map,
+        sequence_tx.clone(),
+        exec_shutdown_rx,
     ));
 
-    let exit_map = bpf.take_map("EXIT_FAILURES")
+    let exit_map = bpf
+        .take_map("EXIT_FAILURES")
         .context("EXIT_FAILURES map not found in BPF object")?;
     let exit_map: PerCpuArray<_, u64> = PerCpuArray::try_from(exit_map)?;
     let (exit_shutdown_tx, exit_shutdown_rx) = tokio::sync::oneshot::channel();
     let exit_health_handle = tokio::spawn(capture_health::monitor(
-        "process_exit", &bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
-        exit_map, sequence_tx.clone(), exit_shutdown_rx,
+        "process_exit",
+        &bloodhound_common::exit_claim::EXIT_FAILURE_REASONS,
+        exit_map,
+        sequence_tx.clone(),
+        exit_shutdown_rx,
     ));
 
     // Every probe is attached. Admit bloodhound_ready before the ring-buffer
@@ -170,14 +184,16 @@ async fn main() -> Result<()> {
     let heartbeat_drops = drop_count.clone();
     let heartbeat_emitted = events_emitted.clone();
     let heartbeat_interval = Duration::from_secs_f64(args.heartbeat_interval);
+    let (heartbeat_stop_tx, heartbeat_stop_rx) = tokio::sync::oneshot::channel();
     let heartbeat_handle = tokio::spawn(async move {
         heartbeat::run_heartbeat(
             heartbeat_interval,
             heartbeat_drops,
             heartbeat_emitted,
             heartbeat_tx,
+            heartbeat_stop_rx,
         )
-        .await;
+        .await
     });
 
     let drain_timeout = Duration::from_secs(5);
@@ -216,39 +232,348 @@ async fn main() -> Result<()> {
     // order is safe: removing cleanup first retains claims (no re-emission),
     // removing exit first stops new claims. The whole object is then destroyed.
     // Health map FDs remain owned by the monitors for their final sample.
+    let _ = heartbeat_stop_tx.send(());
     drop(bpf);
     drop(usdt_links);
-    heartbeat_handle.abort();
+    // Synchronous detach cannot be preempted by an async timeout.
+    let deadline = tokio::time::Instant::now() + drain_timeout;
     let _ = capture_shutdown_tx.send(());
     let _ = exec_shutdown_tx.send(());
     let _ = exit_shutdown_tx.send(());
     let _ = consumer_shutdown_tx.send(());
 
-    let deadline = tokio::time::Instant::now() + drain_timeout;
-    let mut consumer_done = false;
+    let producers = async {
+        let (_, _, _, _, cursor) = tokio::try_join!(
+            async {
+                consumer_handle
+                    .await
+                    .context("ring buffer consumer task panicked")?
+            },
+            async {
+                capture_handle
+                    .await
+                    .context("openat collection monitor panicked")
+            },
+            async {
+                exec_health_handle
+                    .await
+                    .context("exec collection monitor panicked")
+            },
+            async {
+                exit_health_handle
+                    .await
+                    .context("process exit collection monitor panicked")
+            },
+            async { heartbeat_handle.await.context("heartbeat task panicked") },
+        )?;
+        Ok(cursor)
+    };
+    let cursor = drain_until_closed(&mut sequence_rx, &mut sequencer, producers, deadline).await?;
+    let _ = bridge_stop_tx.send(());
+    let mut reader = tokio::time::timeout_at(deadline, bridge_handle)
+        .await
+        .context("incomplete shutdown: drop bridge timed out")?
+        .context("drop bridge task panicked")?;
+    finish_output(&mut sequencer, &mut reader, cursor, &events_emitted)?;
+    eprintln!("Shutdown complete");
+    Ok(())
+}
+
+/// Channel closure and producer completion are independent: the last sender
+/// may be dropped before its task's JoinHandle becomes ready.
+async fn drain_until_closed<W, F, T>(
+    rx: &mut mpsc::Receiver<SequencedInput>,
+    sequencer: &mut Sequencer<W>,
+    producers: F,
+    deadline: tokio::time::Instant,
+) -> Result<T>
+where
+    W: std::io::Write,
+    F: std::future::Future<Output = Result<T>>,
+{
+    tokio::pin!(producers);
+    let mut closed = false;
+    let mut joined = None;
     loop {
+        if closed && joined.is_some() {
+            return Ok(joined.unwrap());
+        }
         tokio::select! {
-            input = sequence_rx.recv() => {
-                match input {
-                    Some(input) => sequencer.accept(input)?,
-                    None if consumer_done => break,
-                    None => bail!("bounded event sequencer closed before consumer shutdown"),
-                }
-            }
-            result = &mut consumer_handle, if !consumer_done => {
-                result.context("ring buffer consumer task panicked during shutdown")??;
-                consumer_done = true;
-            }
+            input = rx.recv(), if !closed => match input {
+                Some(input) => sequencer.accept(input)?,
+                None => closed = true,
+            },
+            result = &mut producers, if joined.is_none() => joined = Some(result?),
             _ = tokio::time::sleep_until(deadline) => {
                 bail!("incomplete shutdown: bounded event sequencer did not drain within 5 seconds");
             }
         }
     }
+}
 
-    capture_handle.await.context("openat collection monitor panicked")?;
-    exec_health_handle.await.context("exec collection monitor panicked")?;
-    exit_health_handle.await.context("process exit collection monitor panicked")?;
-    sequencer.flush()?;
-    eprintln!("Shutdown complete");
-    Ok(())
+fn finish_output<W: std::io::Write, R: drop_counter::DropCountReader>(
+    sequencer: &mut Sequencer<W>,
+    reader: &mut R,
+    cursor: Option<heartbeat::Cursor>,
+    emitted: &heartbeat::EventsEmittedCounter,
+) -> Result<()> {
+    use std::sync::atomic::Ordering;
+    // Read even when heartbeats are disabled: shutdown must not silently
+    // succeed if its final accounting sample failed.
+    let total = reader
+        .read_total()
+        .context("reading final BPF drop count")?;
+    if let Some(cursor) = cursor {
+        let event = heartbeat::build_heartbeat(
+            total.saturating_sub(cursor.drops),
+            total,
+            emitted
+                .load(Ordering::Relaxed)
+                .saturating_sub(cursor.emitted),
+        );
+        sequencer.accept(SequencedInput::Synthesized(Box::new(event)))?;
+    }
+    sequencer.flush()
+}
+
+#[cfg(test)]
+mod final_tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn sequencer() -> Sequencer<Vec<u8>> {
+        Sequencer::new(
+            1000,
+            Serializer::with_writer(Vec::new()),
+            heartbeat::new_events_emitted_counter(),
+        )
+    }
+
+    fn deadline() -> tokio::time::Instant {
+        tokio::time::Instant::now() + Duration::from_secs(1)
+    }
+
+    #[tokio::test]
+    async fn sender_close_join_race_1000_iterations() {
+        for _ in 0..1000 {
+            let (tx, mut rx) = mpsc::channel(1);
+            let task = tokio::spawn(async move {
+                drop(tx);
+                tokio::task::yield_now().await;
+            });
+            drain_until_closed(
+                &mut rx,
+                &mut sequencer(),
+                async {
+                    task.await?;
+                    Ok(())
+                },
+                deadline(),
+            )
+            .await
+            .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn closed_channel_waits_for_delayed_join() {
+        let (tx, mut rx) = mpsc::channel(1);
+        drop(tx);
+        let value = drain_until_closed(
+            &mut rx,
+            &mut sequencer(),
+            async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(42)
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(value, 42);
+    }
+
+    #[tokio::test]
+    async fn producer_error_and_panic_fail_shutdown() {
+        for panic in [false, true] {
+            let (tx, mut rx) = mpsc::channel(1);
+            let task = tokio::spawn(async move {
+                drop(tx);
+                if panic {
+                    panic!("producer panic");
+                }
+                bail!("producer error")
+            });
+            let result = drain_until_closed(
+                &mut rx,
+                &mut sequencer(),
+                async {
+                    let result: Result<()> = task.await?;
+                    result
+                },
+                deadline(),
+            )
+            .await;
+            assert!(result.is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn leaked_sender_times_out_after_producers_join() {
+        let (_tx, mut rx) = mpsc::channel(1);
+        assert!(drain_until_closed(
+            &mut rx,
+            &mut sequencer(),
+            async { Ok(()) },
+            tokio::time::Instant::now() + Duration::from_millis(20)
+        )
+        .await
+        .is_err());
+    }
+
+    #[tokio::test]
+    async fn capacity_one_drains_while_joining() {
+        let (tx, mut rx) = mpsc::channel(1);
+        let task = tokio::spawn(async move {
+            for _ in 0..100 {
+                tx.send(SequencedInput::Synthesized(Box::new(
+                    heartbeat::build_heartbeat(0, 0, 0),
+                )))
+                .await
+                .unwrap();
+            }
+        });
+        drain_until_closed(
+            &mut rx,
+            &mut sequencer(),
+            async {
+                task.await?;
+                Ok(())
+            },
+            deadline(),
+        )
+        .await
+        .unwrap();
+    }
+
+    struct Reader(Result<u64>);
+    impl drop_counter::DropCountReader for Reader {
+        fn read_total(&mut self) -> Result<u64> {
+            self.0.as_ref().copied().map_err(|e| anyhow::anyhow!("{e}"))
+        }
+    }
+
+    #[test]
+    fn final_read_failure_emits_nothing_and_disabled_emits_nothing() {
+        let emitted = heartbeat::new_events_emitted_counter();
+        let mut seq = Sequencer::new(1000, Serializer::with_writer(Vec::new()), emitted.clone());
+        assert!(finish_output(
+            &mut seq,
+            &mut Reader(Err(anyhow::anyhow!("read failed"))),
+            Some(heartbeat::Cursor::default()),
+            &emitted
+        )
+        .is_err());
+        assert_eq!(emitted.load(Ordering::Relaxed), 0);
+        finish_output(&mut seq, &mut Reader(Ok(3)), None, &emitted).unwrap();
+        assert_eq!(emitted.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn final_heartbeat_is_last_and_deltas_cover_pre_spawn_events() {
+        let emitted = heartbeat::new_events_emitted_counter();
+        let mut bytes = Vec::new();
+        {
+            let mut seq =
+                Sequencer::new(1000, Serializer::with_writer(&mut bytes), emitted.clone());
+            seq.accept(SequencedInput::Synthesized(Box::new(ready::ready_event(
+                1,
+                4096,
+                Some(4),
+            ))))
+            .unwrap();
+            seq.accept(SequencedInput::Synthesized(Box::new(
+                heartbeat::build_heartbeat(2, 2, 1),
+            )))
+            .unwrap();
+            seq.accept(SequencedInput::Synthesized(Box::new(ready::ready_event(
+                1,
+                4096,
+                Some(4),
+            ))))
+            .unwrap();
+            finish_output(
+                &mut seq,
+                &mut Reader(Ok(5)),
+                Some(heartbeat::Cursor {
+                    drops: 2,
+                    emitted: 1,
+                }),
+                &emitted,
+            )
+            .unwrap();
+        }
+        let events: Vec<serde_json::Value> = std::str::from_utf8(&bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let last = events.last().unwrap();
+        assert_eq!(last["event"]["type"], "HEARTBEAT");
+        assert_eq!(last["args"]["drop_count_total"], 5);
+        assert_eq!(last["args"]["drop_count_delta"], 3);
+        assert_eq!(last["args"]["gap_detected"], true);
+        assert_eq!(last["args"]["run_prefix_incomplete"], true);
+        let heartbeats: Vec<_> = events
+            .iter()
+            .filter(|e| e["event"]["type"] == "HEARTBEAT")
+            .collect();
+        assert_eq!(
+            heartbeats
+                .iter()
+                .map(|e| e["args"]["drop_count_delta"].as_u64().unwrap())
+                .sum::<u64>(),
+            5
+        );
+        assert_eq!(
+            heartbeats
+                .iter()
+                .map(|e| e["args"]["events_emitted_delta"].as_u64().unwrap())
+                .sum::<u64>(),
+            (events.len() - 1) as u64
+        );
+    }
+
+    struct FailedWriter(bool);
+    impl std::io::Write for FailedWriter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if self.0 {
+                Err(std::io::Error::other("write failed"))
+            } else {
+                Ok(bytes.len())
+            }
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("flush failed"))
+        }
+    }
+
+    #[test]
+    fn final_write_and_flush_failures_propagate() {
+        for fail_write in [true, false] {
+            let emitted = heartbeat::new_events_emitted_counter();
+            let mut seq = Sequencer::new(
+                1000,
+                Serializer::with_writer(FailedWriter(fail_write)),
+                emitted.clone(),
+            );
+            assert!(finish_output(
+                &mut seq,
+                &mut Reader(Ok(3)),
+                Some(heartbeat::Cursor::default()),
+                &emitted
+            )
+            .is_err());
+        }
+    }
 }

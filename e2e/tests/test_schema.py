@@ -126,18 +126,36 @@ class TestShutdown:
     """Test graceful shutdown."""
 
     def test_sigterm_produces_clean_exit(
-        self, ssh_cmd, bloodhound_events, wait_for_events
+        self, ssh_cmd, bloodhound_events, wait_for_events,
+        wait_for_bloodhound_attachment,
     ):
-        """Sending SIGTERM should result in a clean exit with flushed events."""
-        # Generate some activity first
+        """Check the stopped invocation, not a restarted daemon or old journal."""
+        wait_for_bloodhound_attachment()
+        invocation = ssh_cmd(
+            "systemctl show --property=InvocationID --value bloodhound", user="root"
+        ).stdout.strip()
+        assert invocation
         ssh_cmd("echo shutdown_test")
         wait_for_events()
-
-        # Send SIGTERM to bloodhound
-        ssh_cmd("sudo kill -TERM $(pgrep bloodhound)", user="root")
-        wait_for_events(seconds=3)
-
-        # Retrieve events (should have been flushed before exit)
-        events = bloodhound_events()
-        # The output file should end with a complete JSON line (no truncation)
-        assert len(events) > 0, "No events found after shutdown"
+        try:
+            # systemctl stop sends SIGTERM and suppresses Restart=always.
+            stopped = ssh_cmd("systemctl stop bloodhound", user="root")
+            assert stopped.returncode == 0, stopped.stderr
+            status = ssh_cmd(
+                "systemctl show -p Result -p ExecMainStatus bloodhound", user="root"
+            )
+            assert "Result=success" in status.stdout
+            assert "ExecMainStatus=0" in status.stdout
+            journal = ssh_cmd(
+                f"journalctl _SYSTEMD_INVOCATION_ID={invocation} --no-pager -o cat",
+                user="root",
+            )
+            assert "Shutdown complete" in journal.stdout
+            assert "SIGKILL" not in journal.stdout
+            events = bloodhound_events()
+            assert events, "No events found after shutdown"
+            assert events[-1]["event"]["type"] == "HEARTBEAT"
+        finally:
+            restored = ssh_cmd("systemctl start bloodhound", user="root")
+            assert restored.returncode == 0, restored.stderr
+            wait_for_bloodhound_attachment()
