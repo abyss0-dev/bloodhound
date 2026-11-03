@@ -43,6 +43,7 @@ pub fn load_and_attach(
     usdt::AttachmentLinks,
     AttachReport,
 )> {
+    usdt::validate_selections(usdt_selections)?;
     let mut report = AttachReport::default();
     // Resolve task_struct field offsets from the *running* kernel's BTF
     // and inject them as globals before load. Baking compile-time offsets

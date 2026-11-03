@@ -1,5 +1,6 @@
 """Phase 2 startup facts and default observation-only boundary."""
 import json
+import shlex
 import uuid
 
 import pytest
@@ -18,14 +19,40 @@ DEFAULT_KEYS = REQUIRED | {f"tier2.{name}" for name in TIER2} | {
 }
 
 
+def tc_state(ssh_cmd):
+    """Snapshot qdiscs and filters; unsupported inspection is an explicit failure."""
+    def query(command):
+        result = ssh_cmd(command, user="root")
+        assert result.returncode == 0, (
+            f"TC state inspection failed (unsupported is not a passing no-TC check): "
+            f"{command}: {result.stderr}"
+        )
+        return json.loads(result.stdout)
+
+    qdiscs = query("tc -j qdisc show")
+    links = query("ip -j link show")
+    filters = {}
+    for link in links:
+        device = link["ifname"]
+        # clsact ingress/egress plus root and every existing qdisc parent.
+        parents = {"root", "ingress", "egress"}
+        parents.update(
+            f"parent {qdisc['handle']}" for qdisc in qdiscs
+            if qdisc.get("dev") == device and qdisc.get("handle") not in {None, "0:"}
+        )
+        for parent in sorted(parents):
+            command = f"tc -j filter show dev {shlex.quote(device)} {parent}"
+            filters[(device, parent)] = query(command)
+    return qdiscs, filters
+
+
 @pytest.mark.parametrize("seconds,millis", [("0", 0), ("0.0006", 1), ("1", 1000)])
 def test_first_record_is_ready_with_exact_startup_facts(
     ssh_cmd, foreground_bloodhound, wait_until, seconds, millis,
 ):
     boot = ssh_cmd("cat /proc/sys/kernel/random/boot_id", user="root")
     assert boot.returncode == 0, boot.stderr
-    before = ssh_cmd("tc -j qdisc show", user="root")
-    assert before.returncode == 0, before.stderr
+    before_qdiscs, before_filters = tc_state(ssh_cmd)
     with foreground_bloodhound("--heartbeat-interval", seconds) as daemon:
         wait_until(lambda: daemon.events(), "first stdout readiness record")
         event = daemon.events()[0]
@@ -45,9 +72,9 @@ def test_first_record_is_ready_with_exact_startup_facts(
         assert set(args["attached"]) == DEFAULT_KEYS
         assert all(args["attached"][key] is True for key in REQUIRED)
         assert all(isinstance(value, bool) for value in args["attached"].values())
-        after = ssh_cmd("tc -j qdisc show", user="root")
-        assert after.returncode == 0, after.stderr
-        assert json.loads(after.stdout) == json.loads(before.stdout), "startup changed qdiscs"
+        after_qdiscs, after_filters = tc_state(ssh_cmd)
+        assert after_qdiscs == before_qdiscs, "startup changed qdiscs"
+        assert after_filters == before_filters, "startup changed TC filters"
         ssh_cmd("cat /etc/hostname")
         daemon.signal()
         assert daemon.wait() == 0, daemon.stderr()

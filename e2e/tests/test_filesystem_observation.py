@@ -4,25 +4,30 @@ import shlex
 from pathlib import Path
 import subprocess
 
+from test_lsm import opt_in_ready
+
 
 def test_ptrace_hook_still_protects_daemon(
-        ssh_cmd, bloodhound_events, wait_for_events):
-    result = ssh_cmd("systemctl show bloodhound -p MainPID --value", user="root")
-    assert result.returncode == 0
-    daemon = int(result.stdout.strip())
-    assert daemon > 0
-    # Root has CAP_SYS_PTRACE, so DAC alone cannot make this test pass.
-    script = ('import os; from pathlib import Path; '
-              'Path("/proc/self/loginuid").write_text("1000"); '
-              f'os.readlink("/proc/{daemon}/root")')
-    result = ssh_cmd("python3 -c " + shlex.quote(script), user="root")
-    assert result.returncode != 0 and "PermissionError" in result.stderr
-    wait_for_events()
-    matches = [e for e in bloodhound_events() if e["event"]["name"] == "ptrace_access_check"
-               and e.get("args", {}).get("target_pid") == daemon]
-    assert matches and all(e["return_code"] == -1 for e in matches)
-    result = ssh_cmd("systemctl show bloodhound -p MainPID --value", user="root")
-    assert int(result.stdout.strip()) == daemon
+        ssh_cmd, foreground_bloodhound, wait_until):
+    with foreground_bloodhound("--enable-lsm") as collector:
+        ready = opt_in_ready(collector, wait_until, "lsm.ptrace_access_check")
+        daemon = ready["args"]["excluded"][0]
+        assert daemon > 0
+        # Root has CAP_SYS_PTRACE, so DAC alone cannot make this test pass.
+        script = ('import os; from pathlib import Path; '
+                  'Path("/proc/self/loginuid").write_text("1000"); '
+                  f'os.readlink("/proc/{daemon}/root")')
+        result = ssh_cmd("python3 -c " + shlex.quote(script), user="root")
+        assert result.returncode != 0 and "PermissionError" in result.stderr
+
+        def matches():
+            return [e for e in collector.events()
+                    if e["event"]["name"] == "ptrace_access_check"
+                    and e.get("args", {}).get("target_pid") == daemon]
+
+        wait_until(matches, "actual ptrace_access_check denial event")
+        assert matches() and all(e["return_code"] == -1 for e in matches())
+        assert ssh_cmd(f"kill -0 {daemon}", user="root").returncode == 0
 
 
 def test_openat_path_failures_and_relative_dirfd(
