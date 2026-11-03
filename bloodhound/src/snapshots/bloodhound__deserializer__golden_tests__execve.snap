@@ -7,10 +7,10 @@ expression: to_json(& event)
     "argv": [
       "/usr/bin/true"
     ],
-    "argv_status": "unknown",
-    "exec_capture_version": 0,
+    "argv_status": "complete",
+    "exec_capture_version": 1,
     "filename": "/usr/bin/true",
-    "filename_status": "unknown"
+    "filename_status": "complete"
   },
   "event": {
     "layer": "tooling",
@@ -20,13 +20,44 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "bash",
-    "pid": 2378,
-    "process_ref": {
-      "start_boottime_ns": 730454795517,
-      "tgid": 2378
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 145,
-    "timestamp": 730456635700
+    "pid": 4577,
+    "process_ref": {
+      "start_boottime_ns": 535909999627,
+      "tgid": 4577
+    },
+    "sessionid": 330,
+    "tid": 4577,
+    "timestamp": 535915528446
   },
   "return_code": 0
 }

@@ -14,12 +14,43 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "bash",
-    "pid": 5380,
-    "process_ref": {
-      "start_boottime_ns": 1009416440372,
-      "tgid": 5380
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 355,
-    "timestamp": 1009417993850
+    "pid": 4242,
+    "process_ref": {
+      "start_boottime_ns": 519309894905,
+      "tgid": 4242
+    },
+    "sessionid": 303,
+    "tid": 4242,
+    "timestamp": 519312100487
   }
 }

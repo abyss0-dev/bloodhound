@@ -5,10 +5,10 @@ expression: to_json(& event)
 {
   "args": {
     "signal": 0,
-    "target_pid": 5174,
+    "target_pid": 6241,
     "target_ref": {
-      "start_boottime_ns": 976353486964,
-      "tgid": 5174
+      "start_boottime_ns": 615105867471,
+      "tgid": 6241
     }
   },
   "event": {
@@ -19,13 +19,44 @@ expression: to_json(& event)
   "header": {
     "auid": 1000,
     "comm": "python3",
-    "pid": 5173,
-    "process_ref": {
-      "start_boottime_ns": 976329803440,
-      "tgid": 5173
+    "ns": {
+      "cgroup": {
+        "inode": 4026531835,
+        "status": "complete"
+      },
+      "ipc": {
+        "inode": 4026531839,
+        "status": "complete"
+      },
+      "mnt": {
+        "inode": 4026531841,
+        "status": "complete"
+      },
+      "net": {
+        "inode": 4026531840,
+        "status": "complete"
+      },
+      "pid": {
+        "inode": 4026531836,
+        "status": "complete"
+      },
+      "user": {
+        "inode": 4026531837,
+        "status": "complete"
+      },
+      "uts": {
+        "inode": 4026531838,
+        "status": "complete"
+      }
     },
-    "sessionid": 341,
-    "timestamp": 976354112745
+    "pid": 6240,
+    "process_ref": {
+      "start_boottime_ns": 615093524915,
+      "tgid": 6240
+    },
+    "sessionid": 460,
+    "tid": 6240,
+    "timestamp": 615106044084
   },
   "return_code": 0
 }
