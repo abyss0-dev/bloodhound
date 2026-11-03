@@ -108,7 +108,17 @@ cd tests && ../venv/bin/python3 -m pytest --ssh-port=2222 --ssh-host=localhost
 # Inside the VM (as root):
 bloodhound --uid 1000           # trace user with UID 1000
 bloodhound --uid 1000 --exclude-ports 22  # exclude SSH traffic
+bloodhound --uid 1000 --ring-buffer-size 8388608  # 8 MiB BPF ring buffer
 ```
+
+#### Ring Buffer Configuration
+
+`--ring-buffer-size` sets the capacity of the kernel `EVENTS` ring buffer in bytes (default: `4194304`, 4 MiB):
+
+- **Validation**: Must be a power of two and at least the system page size (`sysconf(_SC_PAGESIZE)`). Invalid values are rejected early at startup before output initialization, BTF resolution, or BPF loading.
+- **Pre-load application & verification**: The requested size is applied to the `EVENTS` map before BPF loading (`set_max_entries`) and verified against the actual kernel map size before probe attachment.
+- **Readiness report**: The actual kernel readback is emitted in the initial `META bloodhound_ready` event (`args.ring_buffer_size`), not echoed from the CLI argument.
+- **Recommendation**: For high-volume workloads (such as `--enable-rich-sendfile` or sustained I/O), sizing to 32 MiB (`33554432`) or higher is recommended to avoid drops.
 
 ### View Logs with TUI
 

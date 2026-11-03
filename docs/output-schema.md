@@ -133,7 +133,12 @@ header is not attributable to a process (sentinel zeroes, empty `comm`).
 
 - `probes_attached` — successful program attachments: tracepoints, kprobes,
   LSM hooks, each TC interface attachment and each USDT location
-- `ring_buffer_size` — capacity of the kernel ring buffer in bytes, as created
+- `ring_buffer_size` — actual kernel readback of the `EVENTS` ring buffer
+  capacity in bytes, verified against the requested `--ring-buffer-size`
+  (default: 4 MiB / 4,194,304 bytes; must be a power of two and at least the
+  system page size). Sizing is applied to the map pre-load and confirmed
+  against kernel map metadata before probe attachment. (32 MiB recommended
+  under sustained load).
 - `nsfs_dev` — device number of nsfs. At startup Bloodhound opens
   `/proc/self/ns/net`, verifies with `fstatfs` that it lives on nsfs, and
   reports its `st_dev`. `null` when the check fails; header inodes are then
