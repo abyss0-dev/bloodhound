@@ -123,6 +123,19 @@ pub unsafe fn should_trace() -> bool {
     true
 }
 
+/// Signal observations include either side of the single-AUID boundary.
+/// Daemon exclusion applies to the sender even when only the target matches.
+#[inline(always)]
+pub unsafe fn should_trace_signal(target_task: *const u8) -> bool {
+    let tgid = (bpf_get_current_pid_tgid() >> 32) as u32;
+    let daemon_pid = core::ptr::read_volatile(&raw const DAEMON_PID);
+    if tgid == daemon_pid || target_task.is_null() {
+        return false;
+    }
+    let target = core::ptr::read_volatile(&raw const TARGET_AUID);
+    get_current_auid() == target || task_auid(target_task) == target
+}
+
 /// Populate an EventHeader with current task info.
 #[inline(always)]
 pub unsafe fn get_task_info(kind: u8) -> EventHeader {
