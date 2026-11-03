@@ -63,7 +63,33 @@ def ssh_cmd(ssh_config):
 
 
 @pytest.fixture
-def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path):
+def wait_for_bloodhound_attachment(ssh_cmd, wait_until):
+    """Wait for attachment in the current service invocation, not an old PID."""
+
+    def wait():
+        def attached():
+            result = ssh_cmd(
+                "set -eu; "
+                "pid=$(systemctl show --property=MainPID --value bloodhound); "
+                "invocation=$(systemctl show --property=InvocationID --value bloodhound); "
+                "test \"$pid\" -gt 0; test -n \"$invocation\"; "
+                "systemctl is-active --quiet bloodhound; "
+                "journalctl _PID=\"$pid\" _SYSTEMD_INVOCATION_ID=\"$invocation\" "
+                "--no-pager -o cat | "
+                "grep -Fx 'BPF programs loaded and attached' >/dev/null; "
+                "test \"$pid\" = \"$(systemctl show --property=MainPID --value bloodhound)\"; "
+                "test \"$invocation\" = \"$(systemctl show --property=InvocationID --value bloodhound)\"",
+                user="root",
+            )
+            return result.returncode == 0
+
+        wait_until(attached, "Bloodhound attachment for the current service invocation", timeout=30)
+
+    return wait
+
+
+@pytest.fixture
+def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_attachment):
     """Run a standalone daemon with isolated output; always restore the service."""
 
     @contextmanager
@@ -138,6 +164,7 @@ def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path):
                     user="root",
                 )
                 assert restored.returncode == 0, restored.stderr
+                wait_for_bloodhound_attachment()
 
     return run
 
