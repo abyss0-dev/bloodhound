@@ -109,6 +109,7 @@ cd tests && ../venv/bin/python3 -m pytest --ssh-port=2222 --ssh-host=localhost
 bloodhound --uid 1000           # trace user with UID 1000
 bloodhound --uid 1000 --exclude-ports 22  # exclude SSH traffic
 bloodhound --uid 1000 --ring-buffer-size 8388608  # 8 MiB BPF ring buffer
+bloodhound --uid 1000 --heartbeat-interval 1.0    # periodic & shutdown heartbeat (0 disables)
 ```
 
 #### Ring Buffer Configuration
@@ -118,7 +119,16 @@ bloodhound --uid 1000 --ring-buffer-size 8388608  # 8 MiB BPF ring buffer
 - **Validation**: Must be a power of two and at least the system page size (`sysconf(_SC_PAGESIZE)`). Invalid values are rejected early at startup before output initialization, BTF resolution, or BPF loading.
 - **Pre-load application & verification**: The requested size is applied to the `EVENTS` map before BPF loading (`set_max_entries`) and verified against the actual kernel map size before probe attachment.
 - **Readiness report**: The actual kernel readback is emitted in the initial `META bloodhound_ready` event (`args.ring_buffer_size`), not echoed from the CLI argument.
-- **Recommendation**: For high-volume workloads (such as `--enable-rich-sendfile` or sustained I/O), sizing to 32 MiB (`33554432`) or higher is recommended to avoid drops.
+- **Recommendation**: For high-volume workloads (such as `--enable-rich-sendfile` or sustained I/O), sizing to 32 MiB (`33554432`) or higher is recommended to reduce drops.
+
+#### Heartbeat and Graceful Shutdown
+
+`--heartbeat-interval` sets the cadence in seconds for synthesized `HEARTBEAT` pulses (default: `1.0`; set to `0` to disable periodic and final heartbeats):
+
+- **Zero-based accounting**: Drop and emission deltas start from a zero baseline at daemon start. Deltas advance only on successful admission to the bounded sequencer channel, so periodic and final deltas telescope cleanly: drop deltas sum to cumulative `drop_count_total`, and emission deltas sum to all serialized events preceding the final heartbeat.
+- **Graceful shutdown**: On SIGINT or SIGTERM, the daemon synchronously detaches BPF programs and USDT probes, initiates producer stop under a 5-second asynchronous drain deadline that starts after synchronous detach (synchronous detach is not preemptible by an async timeout), stops the drop bridge, and takes a fresh drop count read.
+- **Final heartbeat**: Following orderly detach, drain, and fresh drop read, an ordinary last `HEARTBEAT` event is emitted through the sequencer before flushing stdout. It carries no new field (no `final: true`, new event type, or extra args).
+- **Failure boundaries**: If any producer errors or panics, drain times out, or the final drop count read fails, shutdown aborts without emitting a final heartbeat. A final heartbeat line does not guarantee zero process exit status because subsequent write or stdout flush errors may still fail the process. Kernel effects in flight during or after probe detach are not guaranteed to be captured.
 
 ### View Logs with TUI
 
