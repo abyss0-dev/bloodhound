@@ -125,10 +125,27 @@ layers. Each script focuses on specific event types to make verification easier.
 - **`test_lsm.py`**: Verifies opt-in LSM hook behavior using capable root execution under the principal AUID (`TARGET_AUID`), testing a harmless `SIGCONT` denial to the daemon PID with an actual `task_kill` event (`return_code = -1`), and a valid `BPF_MAP_CREATE` syscall with an actual observe-only `bpf` hook event (`return_code = 0`). Skips explicitly when optional LSM hooks fail to attach.
 - **`test_readiness.py`**: Validates `bloodhound_ready` facts (`boot_id`, `auid`, `excluded`, `probes_attached`, `ring_buffer_size`, `nsfs_dev`, `attached`, `heartbeat_interval_ms`), default startup with no LSM and no qdisc or TC filter changes, cadence quantization and zero handling, and the complete absence of live `/proc` enrichment.
 
-> [!NOTE]
-> In this producer worktree, these VM test suites are collected and syntax-checked (`pytest --collect-only`),
-> but are **not executed** against a running guest VM. Live VM execution and end-to-end validation are
-> owned by parent integration.
+## Integrated Production Verification Evidence
+
+The full E2E test suite has been executed and verified against a running QEMU guest VM using the production binary:
+
+- **Results**: **95 passed**, 0 failures, 0 errors, 0 skips in **664.26s**.
+- **Binary**: Built directly from committed source (`bb7cf42`) via `Dockerfile.build` (musl target). Host and guest binary SHA256: `738abe494520df493ef7f11f21fa24eb67ba292b7e79a4f4dd73fa7bcb04452a`.
+- **Environment**: QEMU/KVM guest running Linux 6.8.0-49-generic (`boot_id`: `7328e7bf-d6e2-4aed-89f5-588c8c12803b`), Ubuntu 24.04.5 LTS (`noble`) rootfs.
+- **Coverage**: Covers all 4 O-11 integration cases, fixed `task_kill` principal identity tests, opt-in LSM BPF success and ptrace/kill protections, readiness guarantees with no-TC / no-qdisc changes, filesystem observation, schema conformity, heartbeats, daemon lifecycle, and USDT diagnostics.
+
+### Pre-Readiness Injected Counter Diagnostic Ordering
+
+Startup ordering under pre-existing kernel counter state was verified via deterministic fault injection:
+
+- **Injection mechanism**: Gated by `BH_TEST_PREFILL_OPENAT=1` (`startup-injection.patch` applied to an exported build). Immediately after `load_and_attach`, before admitting readiness and before starting monitors, userspace wrote `1` to `OPENAT_FAILURES[0]` on the first CPU (all other CPUs 0) and verified readback sum `1`.
+- **Ordering verification**: Verified that `bloodhound_ready` emits strictly first on stdout, followed deterministically by the `openat.collection` diagnostic:
+  - `name`: `openat.collection`
+  - `failure_count_delta`: 1
+  - `failure_count_total`: 1
+  - `reason_code`: `"entry_capture_failed"`
+  - `run_prefix_incomplete`: `true`
+- **Fault injection distinction**: This test was an intentional, deterministic kernel map fault injection to verify startup ordering guarantees and diagnostic contract invariants, not a naturally occurring pre-start failure or kernel acquisition loss.
 
 ## Debugging
 
