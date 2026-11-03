@@ -10,7 +10,6 @@ use crate::clock::monotonic_now_ns;
 use crate::deserializer::{self, BehaviorEvent, EventHeaderJson, EventTypeJson};
 use crate::enricher;
 use crate::lifecycle::LifecycleSynthesizer;
-use crate::packet_correlator::PacketCorrelator;
 use crate::serializer::Serializer;
 
 /// One item successfully admitted to Bloodhound's bounded output sequencer.
@@ -25,17 +24,15 @@ pub enum SequencedInput {
 
 pub struct Sequencer<W: Write> {
     output: Serializer<W>,
-    correlator: PacketCorrelator,
     lifecycle: LifecycleSynthesizer,
     events_emitted: Arc<AtomicU64>,
     deserialize_rejections: u64,
 }
 
 impl<W: Write> Sequencer<W> {
-    pub fn new(target_auid: u32, output: Serializer<W>, events_emitted: Arc<AtomicU64>) -> Self {
+    pub fn new(_target_auid: u32, output: Serializer<W>, events_emitted: Arc<AtomicU64>) -> Self {
         Self {
             output,
-            correlator: PacketCorrelator::new(target_auid),
             lifecycle: LifecycleSynthesizer::new(),
             events_emitted,
             deserialize_rejections: 0,
@@ -62,12 +59,6 @@ impl<W: Write> Sequencer<W> {
         let mut event = decoded.event;
 
         enricher::enrich(&mut event);
-        if event.event.event_type == "PACKET" {
-            self.correlator.correlate(&mut event);
-        }
-        if event.event.name == "connect" || event.event.name == "bind" {
-            self.correlator.record_socket(&event);
-        }
 
         for precursor in self
             .lifecycle

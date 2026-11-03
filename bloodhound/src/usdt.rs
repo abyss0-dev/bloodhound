@@ -446,6 +446,7 @@ pub fn attach_selected(
     bpf: &mut aya::Ebpf,
     selection: &Selection,
     links: &mut AttachmentLinks,
+    report: &mut crate::loader::AttachReport,
 ) -> Vec<BehaviorEvent> {
     if !selection.enabled {
         return vec![diagnostic(
@@ -527,7 +528,7 @@ pub fn attach_selected(
     })();
     match attach_result {
         Ok(()) => {
-            crate::loader::record_attached(target.probes.len());
+            report.probes += target.probes.len() as u32;
             Vec::new()
         }
         Err(error) => {

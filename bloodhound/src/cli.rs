@@ -9,9 +9,9 @@ pub struct Cli {
     #[arg(long)]
     pub uid: u32,
 
-    /// Ports to exclude from packet capture (comma-separated)
-    #[arg(long, default_value = "22", value_delimiter = ',')]
-    pub exclude_ports: Vec<u16>,
+    /// Attach optional LSM hooks, including daemon-protection enforcement.
+    #[arg(long, default_value_t = false)]
+    pub enable_lsm: bool,
 
     /// Ring buffer size in bytes (power of two, at least the system page size)
     #[arg(long, default_value_t = 4 * 1024 * 1024)]
@@ -51,9 +51,61 @@ pub fn validate_ring_buffer_size(size: u32, page_size: u64) -> anyhow::Result<()
     Ok(())
 }
 
+/// Quantize once; readiness and the timer must use the same cadence.
+pub fn heartbeat_interval_ms(seconds: f64) -> anyhow::Result<u32> {
+    let millis = (seconds * 1000.0).round();
+    anyhow::ensure!(
+        seconds.is_finite() && seconds >= 0.0 && millis <= u32::MAX as f64
+            && (seconds == 0.0 || millis >= 1.0),
+        "invalid --heartbeat-interval: expected zero or a finite nonnegative cadence rounding to 1..=u32::MAX milliseconds"
+    );
+    Ok(millis as u32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cadence_is_validated_and_quantized() {
+        for (seconds, expected) in [
+            (0.0, 0),
+            (0.0005, 1),
+            (0.0006, 1),
+            (1.0, 1000),
+            (u32::MAX as f64 / 1000.0, u32::MAX),
+        ] {
+            assert_eq!(heartbeat_interval_ms(seconds).unwrap(), expected);
+        }
+        for seconds in [
+            0.0004,
+            -0.001,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MAX,
+            (u32::MAX as f64 + 1.0) / 1000.0,
+        ] {
+            assert!(heartbeat_interval_ms(seconds).is_err(), "{seconds}");
+        }
+    }
+
+    #[test]
+    fn lsm_is_opt_in_and_packet_flag_is_retired() {
+        assert!(
+            !Cli::try_parse_from(["bloodhound", "--uid", "1000"])
+                .unwrap()
+                .enable_lsm
+        );
+        assert!(
+            Cli::try_parse_from(["bloodhound", "--uid", "1000", "--enable-lsm"])
+                .unwrap()
+                .enable_lsm
+        );
+        assert!(
+            Cli::try_parse_from(["bloodhound", "--uid", "1000", "--exclude-ports", "22"]).is_err()
+        );
+    }
 
     #[test]
     fn ring_buffer_sizes_on_4k_pages() {

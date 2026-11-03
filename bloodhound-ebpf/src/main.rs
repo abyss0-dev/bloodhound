@@ -13,7 +13,6 @@ mod lifecycle;
 mod lsm_hooks;
 mod maps;
 mod ns;
-mod packet_tc;
 mod signal;
 mod usdt;
 mod vmlinux;

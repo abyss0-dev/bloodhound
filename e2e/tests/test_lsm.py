@@ -1,61 +1,89 @@
-"""LSM hook tests."""
-from helpers import assert_event_exists, filter_events
+"""Opt-in enforcement tests; DAC failure alone is never LSM evidence."""
+import errno
+import json
+import shlex
+
+import pytest
+
+from helpers import filter_events
+
+LSM_KEYS = {
+    "lsm.task_kill", "lsm.bpf", "lsm.ptrace_access_check", "lsm.file_open",
+    "lsm.inode_unlink", "lsm.inode_rename", "lsm.task_fix_setuid",
+}
+
+
+def principal_root(ssh_cmd, code):
+    """Keep root capabilities (DAC permits), but join the observed AUID."""
+    command = (
+        "echo 1000 > /proc/self/loginuid; "
+        "test \"$(cat /proc/self/loginuid)\" = 1000 || exit 97; "
+        f"exec python3 -c {shlex.quote(code)}"
+    )
+    result = ssh_cmd(f"sh -ec {shlex.quote(command)}", user="root")
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
+def opt_in_ready(daemon, wait_until, hook):
+    wait_until(lambda: daemon.events(), "opt-in readiness")
+    ready = daemon.events()[0]
+    assert ready["event"]["name"] == "bloodhound_ready"
+    attached = ready["args"]["attached"]
+    assert {key for key in attached if key.startswith("lsm.")} == LSM_KEYS
+    assert all(isinstance(attached[key], bool) for key in LSM_KEYS)
+    if not attached[hook]:
+        pytest.skip(f"optional hook {hook} failed to attach (reported unavailable)")
+    return ready
 
 
 class TestLsmTaskKill:
-    """Test lsm/task_kill hook."""
-
-    def test_kill_daemon_blocked(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """Attempting to kill the daemon should fail and the daemon should survive.
-
-        The kill is blocked by one of two mechanisms:
-        - Standard Unix DAC: testuser (uid 1000) cannot kill a root process.
-        - LSM task_kill hook: returns -EPERM for target user → daemon kills.
-
-        Note: Linux checks DAC *before* calling the LSM hook, so if DAC
-        already blocks the kill, the LSM hook is never invoked and no
-        task_kill event is emitted.
-        """
-        import time
-        # Wait for daemon to stabilize (may have just restarted from previous test)
-        time.sleep(3)
-
-        # Get daemon PID and verify it's valid
-        result = ssh_cmd("pgrep bloodhound", user="root")
-        if result.returncode != 0:
-            import pytest
-            pytest.skip("Bloodhound daemon not running")
-
-        daemon_pid = result.stdout.strip()
-
-        # Verify the PID is still alive before attempting kill
-        check = ssh_cmd(f"kill -0 {daemon_pid}", user="root")
-        if check.returncode != 0:
-            import pytest
-            pytest.skip(f"Daemon PID {daemon_pid} no longer valid")
-
-        # Attempt to kill (should be blocked by DAC and/or LSM)
-        result = ssh_cmd(f"kill -9 {daemon_pid}")
-        assert result.returncode != 0, "kill -9 should have failed (EPERM)"
-        wait_for_events()
-
-        # Verify daemon is still running with the SAME PID
-        result = ssh_cmd(f"kill -0 {daemon_pid}", user="root")
-        assert result.returncode == 0, (
-            f"Daemon (PID {daemon_pid}) was killed despite protection"
-        )
+    def test_kill_daemon_blocked(self, ssh_cmd, foreground_bloodhound, wait_until):
+        # SIGCONT is harmless if enforcement regresses; unlike SIGKILL it
+        # cannot destroy the daemon before the assertion explains the failure.
+        with foreground_bloodhound("--enable-lsm") as daemon:
+            ready = opt_in_ready(daemon, wait_until, "lsm.task_kill")
+            pid = ready["args"]["excluded"][0]
+            result = principal_root(ssh_cmd, f"""
+import json, os, signal
+try:
+    os.kill({pid}, signal.SIGCONT)
+    error = 0
+except OSError as exc:
+    error = exc.errno
+print(json.dumps({{"errno": error}}))
+""")
+            assert result["errno"] == errno.EPERM
+            wait_until(
+                lambda: any(
+                    event.get("args", {}).get("target_pid") == pid
+                    and event.get("return_code") == -1
+                    for event in filter_events(daemon.events(), event_type="LSM", name="task_kill")
+                ),
+                "actual task_kill denial event (not DAC denial)",
+            )
+            assert ssh_cmd(f"kill -0 {pid}", user="root").returncode == 0
 
 
 class TestLsmBpf:
-    """Test lsm/bpf hook."""
-
-    def test_bpf_load_blocked(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """Non-daemon BPF program load should be blocked."""
-        # Try to load a simple BPF program (should fail)
-        ssh_cmd("bpftool prog load /dev/null /sys/fs/bpf/test 2>/dev/null || true")
-        wait_for_events()
-
-        events = bloodhound_events()
-        bpf_events = filter_events(events, event_type="LSM", name="bpf")
-        # May or may not have events depending on whether bpftool is installed
-        # and whether the user has CAP_BPF. The test is best-effort.
+    def test_bpf_is_observe_only(self, ssh_cmd, foreground_bloodhound, wait_until):
+        with foreground_bloodhound("--enable-lsm") as daemon:
+            opt_in_ready(daemon, wait_until, "lsm.bpf")
+            result = principal_root(ssh_cmd, """
+import ctypes, json, os, struct
+libc = ctypes.CDLL(None, use_errno=True)
+# x86_64 BPF_MAP_CREATE, BPF_MAP_TYPE_HASH; a valid map, not /dev/null.
+attr = ctypes.create_string_buffer(struct.pack("IIIII", 1, 4, 4, 1, 0) + bytes(124))
+fd = libc.syscall(321, 0, ctypes.byref(attr), 144)
+error = ctypes.get_errno() if fd < 0 else 0
+if fd >= 0:
+    os.close(fd)
+print(json.dumps({"fd": fd, "errno": error}))
+""")
+            assert result["fd"] >= 0, f"privileged principal bpf() failed: {result}"
+            wait_until(
+                lambda: filter_events(daemon.events(), event_type="LSM", name="bpf"),
+                "observe-only BPF hook event",
+            )
+            for event in filter_events(daemon.events(), event_type="LSM", name="bpf"):
+                assert event["return_code"] == 0

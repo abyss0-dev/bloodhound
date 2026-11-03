@@ -9,7 +9,6 @@ mod enricher;
 mod heartbeat;
 mod lifecycle;
 mod loader;
-mod packet_correlator;
 mod ready;
 mod sequencer;
 mod serializer;
@@ -36,6 +35,13 @@ async fn main() -> Result<()> {
     let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
     anyhow::ensure!(page_size > 0, "failed to determine system page size");
     cli::validate_ring_buffer_size(args.ring_buffer_size, page_size as u64)?;
+    let heartbeat_interval_ms = cli::heartbeat_interval_ms(args.heartbeat_interval)?;
+    let startup = ready::StartupFacts {
+        boot_id: ready::boot_id()?,
+        auid: args.uid,
+        daemon_pid: std::process::id(),
+        heartbeat_interval_ms,
+    };
     info!("Bloodhound starting: tracing uid={}", args.uid);
     eprintln!("Bloodhound starting: tracing uid={}", args.uid);
 
@@ -69,7 +75,21 @@ async fn main() -> Result<()> {
     }
 
     // Load and attach BPF programs
-    let (mut bpf, usdt_diagnostics, usdt_links) = loader::load_and_attach(&args, &usdt_selections)?;
+    let (mut bpf, usdt_diagnostics, usdt_links, attach_report) =
+        loader::load_and_attach(&args, &usdt_selections)?;
+
+    // Admit readiness before starting any task that can emit, including the
+    // immediately ticking collection monitors when startup counters are nonzero.
+    let ready = ready::ready_event(
+        &attach_report,
+        loader::ring_buffer_size(&bpf)?,
+        ready::nsfs_dev(),
+        &startup,
+    );
+    sequence_tx
+        .send(SequencedInput::Synthesized(Box::new(ready)))
+        .await
+        .context("admitting bloodhound_ready to event sequencer")?;
 
     // Set up shutdown handler
     let shutdown_tx = shutdown::shutdown_signal();
@@ -135,19 +155,6 @@ async fn main() -> Result<()> {
         exit_shutdown_rx,
     ));
 
-    // Every probe is attached. Admit bloodhound_ready before the ring-buffer
-    // consumer starts, so it precedes every kernel-captured record and
-    // consumers learn nsfs_dev before the first header namespace snapshot.
-    let ready = ready::ready_event(
-        loader::probes_attached(),
-        loader::ring_buffer_size(&bpf)?,
-        ready::nsfs_dev(),
-    );
-    sequence_tx
-        .send(SequencedInput::Synthesized(Box::new(ready)))
-        .await
-        .context("admitting bloodhound_ready to event sequencer")?;
-
     // Set up ring buffer consumer
     let map = bpf.take_map("EVENTS").unwrap();
     let ring_buf = RingBuf::try_from(map)?;
@@ -183,7 +190,7 @@ async fn main() -> Result<()> {
     let heartbeat_tx = sequence_tx.clone();
     let heartbeat_drops = drop_count.clone();
     let heartbeat_emitted = events_emitted.clone();
-    let heartbeat_interval = Duration::from_secs_f64(args.heartbeat_interval);
+    let heartbeat_interval = Duration::from_millis(u64::from(heartbeat_interval_ms));
     let (heartbeat_stop_tx, heartbeat_stop_rx) = tokio::sync::oneshot::channel();
     let heartbeat_handle = tokio::spawn(async move {
         heartbeat::run_heartbeat(
@@ -486,10 +493,16 @@ mod final_tests {
         {
             let mut seq =
                 Sequencer::new(1000, Serializer::with_writer(&mut bytes), emitted.clone());
+            let report = loader::AttachReport {
+                probes: 1,
+                ..Default::default()
+            };
+            let startup = ready::StartupFacts::default();
             seq.accept(SequencedInput::Synthesized(Box::new(ready::ready_event(
-                1,
+                &report,
                 4096,
                 Some(4),
+                &startup,
             ))))
             .unwrap();
             seq.accept(SequencedInput::Synthesized(Box::new(
@@ -497,9 +510,10 @@ mod final_tests {
             )))
             .unwrap();
             seq.accept(SequencedInput::Synthesized(Box::new(ready::ready_event(
-                1,
+                &report,
                 4096,
                 Some(4),
+                &startup,
             ))))
             .unwrap();
             finish_output(

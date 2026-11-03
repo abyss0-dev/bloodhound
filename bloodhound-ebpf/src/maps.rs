@@ -131,27 +131,6 @@ pub static EXCLUSION_BITMAP: Array<u32> = Array::with_max_entries(BITMAP_SIZE as
 #[map]
 pub static TIER2_BITMAP: Array<u32> = Array::with_max_entries(BITMAP_SIZE as u32, 0);
 
-// ── TC Port Exclusion ────────────────────────────────────────────────────────
-
-/// Port exclusion map: port → 1 means excluded from packet capture
-#[map]
-pub static EXCLUDED_PORTS: HashMap<u16, u8> = HashMap::with_max_entries(64, 0);
-
-// ── Socket Table (BPF side, for secondary lookup) ────────────────────────────
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct SocketInfo {
-    pub pid: u32,
-    pub auid: u32,
-    pub comm: [u8; COMM_SIZE],
-}
-
-/// Keyed by a hash of the 5-tuple. Populated by connect/bind handlers.
-#[map]
-pub static SOCKET_TABLE: HashMap<u64, SocketInfo> =
-    HashMap::with_max_entries(SOCKET_TABLE_SIZE, 0);
-
 // ── Daemon Path (for LSM hooks) ─────────────────────────────────────────────
 
 #[repr(C)]

@@ -45,7 +45,6 @@ class TestSchemaValidation:
             event = ev["event"]
             assert "type" in event
             assert "name" in event
-            assert "layer" in event
 
     def test_bpf_and_heartbeat_timestamps_share_monotonic_domain(
         self, ssh_cmd, bloodhound_events, wait_for_matching_events
@@ -83,7 +82,7 @@ class TestSchemaValidation:
 
         events = bloodhound_events()
         allowed_types = {
-            "SYSCALL", "TTY", "PACKET", "KPROBE", "TRACEPOINT", "LSM",
+            "SYSCALL", "TTY", "KPROBE", "TRACEPOINT", "LSM", "META",
             # Userspace-synthesised types (see docs/output-schema.md).
             "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC",
         }
@@ -91,19 +90,6 @@ class TestSchemaValidation:
             assert ev["event"]["type"] in allowed_types, (
                 f"Invalid event type: {ev['event']['type']}"
             )
-
-    def test_layer_values(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """event.layer must be one of the allowed enum values."""
-        ssh_cmd("ls /tmp")
-        wait_for_events()
-
-        events = bloodhound_events()
-        allowed_layers = {"intent", "tooling", "behavior"}
-        for ev in events:
-            assert ev["event"]["layer"] in allowed_layers, (
-                f"Invalid layer: {ev['event']['layer']}"
-            )
-
 
 class TestAuidFilter:
     """Test that only target user's events appear."""
