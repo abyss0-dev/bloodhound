@@ -59,6 +59,28 @@ def test_first_record_is_ready_with_exact_startup_facts(
             assert events[-1]["event"]["type"] == "HEARTBEAT"
 
 
+def test_live_process_records_are_not_procfs_enriched(ssh_cmd, foreground_bloodhound, wait_until):
+    with foreground_bloodhound() as daemon:
+        wait_until(lambda: daemon.events(), "readiness before alive-process test")
+        started = ssh_cmd("nohup sleep 20 >/dev/null 2>&1 & echo $!")
+        assert started.returncode == 0, started.stderr
+        pid = int(started.stdout.strip())
+        try:
+            assert ssh_cmd(f"test -e /proc/{pid}/exe", user="root").returncode == 0
+            wait_until(
+                lambda: any(event["header"]["pid"] == pid for event in daemon.events()),
+                "records for a process that is still alive",
+            )
+            records = [event for event in daemon.events() if event["header"]["pid"] == pid]
+            assert records
+            for event in records:
+                assert "proc" not in event
+                if event["event"]["name"] != "process_start":
+                    assert "ppid" not in event["header"]
+        finally:
+            ssh_cmd(f"kill {pid} 2>/dev/null || true", user="root")
+
+
 def test_selected_rich_pairs_have_readiness_keys(foreground_bloodhound, wait_until):
     with foreground_bloodhound("--enable-rich-sendfile") as daemon:
         wait_until(lambda: daemon.events(), "readiness with selected rich pairs")

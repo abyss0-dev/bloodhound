@@ -8,7 +8,6 @@ use std::sync::Arc;
 
 use crate::clock::monotonic_now_ns;
 use crate::deserializer::{self, BehaviorEvent, EventHeaderJson, EventTypeJson};
-use crate::enricher;
 use crate::lifecycle::LifecycleSynthesizer;
 use crate::serializer::Serializer;
 
@@ -56,9 +55,7 @@ impl<W: Write> Sequencer<W> {
                 return self.write(&diagnostic);
             }
         };
-        let mut event = decoded.event;
-
-        enricher::enrich(&mut event);
+        let event = decoded.event;
 
         for precursor in self
             .lifecycle
@@ -126,14 +123,18 @@ mod tests {
     }
 
     fn raw_syscall(timestamp: u64, syscall_nr: u64) -> Vec<u8> {
+        raw_syscall_for_process(timestamp, syscall_nr, 42, 1)
+    }
+
+    fn raw_syscall_for_process(timestamp: u64, syscall_nr: u64, pid: u32, ppid: u32) -> Vec<u8> {
         let header = EventHeader {
             kind: EventKind::RawSyscall as u8,
             _pad: [0; 3],
             timestamp_ns: timestamp,
             auid: 1000,
             sessionid: 7,
-            pid: 42,
-            ppid: 1,
+            pid,
+            ppid,
             process_start_boottime_ns: 99,
             comm: {
                 let mut comm = [0; 16];
@@ -149,6 +150,89 @@ mod tests {
             return_code: 0,
         };
         [as_bytes(&header), as_bytes(&payload)].concat()
+    }
+
+    fn process_events(pid: u32, ppid: u32, repeat: bool) -> Vec<serde_json::Value> {
+        let mut bytes = Vec::new();
+        {
+            let mut sequencer = Sequencer::new(
+                1000,
+                Serializer::with_writer(&mut bytes),
+                Arc::new(AtomicU64::new(0)),
+            );
+            sequencer
+                .accept(SequencedInput::Raw(raw_syscall_for_process(
+                    1, 999, pid, ppid,
+                )))
+                .unwrap();
+            if repeat {
+                sequencer
+                    .accept(SequencedInput::Raw(raw_syscall_for_process(
+                        2, 999, pid, ppid,
+                    )))
+                    .unwrap();
+            }
+            sequencer.flush().unwrap();
+        }
+        String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    // These replace the retired enricher's six tests at the live output boundary.
+    #[test]
+    fn pid_zero_is_not_enriched() {
+        for event in process_events(0, 0, false) {
+            assert!(event.get("proc").is_none());
+        }
+    }
+
+    #[test]
+    fn nonexistent_pid_does_not_panic() {
+        for event in process_events(999_999_999, 0, false) {
+            assert!(event.get("proc").is_none());
+        }
+    }
+
+    #[test]
+    fn own_process_is_not_enriched() {
+        assert!(std::fs::read_link("/proc/self/exe").is_ok());
+        assert!(std::fs::read_link("/proc/self/cwd").is_ok());
+        for event in process_events(std::process::id(), 0, false) {
+            assert!(event.get("proc").is_none());
+        }
+    }
+
+    #[test]
+    fn ppid_is_not_filled_from_proc() {
+        for event in process_events(std::process::id(), 0, false) {
+            assert!(event["header"].get("ppid").is_none());
+        }
+    }
+
+    #[test]
+    fn existing_kernel_ppid_is_preserved() {
+        for event in process_events(std::process::id(), 12345, false) {
+            assert_eq!(event["header"]["ppid"], 12345);
+        }
+    }
+
+    #[test]
+    fn repeated_observations_stay_unenriched() {
+        let events = process_events(std::process::id(), 0, true);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event["event"]["name"] == "process_start")
+                .count(),
+            1
+        );
+        for event in events {
+            assert!(event.get("proc").is_none());
+            assert!(event["header"].get("ppid").is_none());
+        }
     }
 
     fn synthesized(name: &str, timestamp: u64) -> BehaviorEvent {
@@ -195,7 +279,9 @@ mod tests {
             .await
             .unwrap();
         synthesized_tx
-            .send(SequencedInput::Synthesized(Box::new(synthesized("last", 5))))
+            .send(SequencedInput::Synthesized(Box::new(synthesized(
+                "last", 5,
+            ))))
             .await
             .unwrap();
         drop(synthesized_tx);
@@ -259,8 +345,7 @@ mod tests {
             let mut bytes = Vec::new();
             {
                 let serializer = Serializer::with_writer(&mut bytes);
-                let mut sequencer =
-                    Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
+                let mut sequencer = Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
                 sequencer.accept(SequencedInput::Raw(vec![])).unwrap();
                 sequencer.flush().unwrap();
             }
@@ -293,7 +378,9 @@ mod tests {
         let serializer = Serializer::with_writer(FailingWriter);
         let mut sequencer = Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
         let error = sequencer
-            .accept(SequencedInput::Synthesized(Box::new(synthesized("event", 1))))
+            .accept(SequencedInput::Synthesized(Box::new(synthesized(
+                "event", 1,
+            ))))
             .unwrap_err();
         assert!(error.to_string().contains("downstream closed"));
     }
@@ -301,10 +388,14 @@ mod tests {
     #[tokio::test]
     async fn bounded_channel_applies_userspace_backpressure() {
         let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        tx.try_send(SequencedInput::Synthesized(Box::new(synthesized("first", 1))))
-            .unwrap();
+        tx.try_send(SequencedInput::Synthesized(Box::new(synthesized(
+            "first", 1,
+        ))))
+        .unwrap();
         let error = tx
-            .try_send(SequencedInput::Synthesized(Box::new(synthesized("second", 2))))
+            .try_send(SequencedInput::Synthesized(Box::new(synthesized(
+                "second", 2,
+            ))))
             .unwrap_err();
         assert!(matches!(
             error,

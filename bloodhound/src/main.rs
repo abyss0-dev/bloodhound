@@ -5,7 +5,6 @@ mod clock;
 mod consumer;
 mod deserializer;
 mod drop_counter;
-mod enricher;
 mod heartbeat;
 mod lifecycle;
 mod loader;

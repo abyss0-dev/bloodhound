@@ -183,7 +183,7 @@ fn make_process_start(triggering: &BehaviorEvent, process_ref: ProcessRefJson) -
             name: "process_start".into(),
             layer: "behavior".into(),
         },
-        proc: triggering.proc.clone(),
+        proc: None,
         args: Some(json!({ "process_ref": process_ref })),
         return_code: None,
     }
@@ -234,6 +234,21 @@ mod tests {
             args: None,
             return_code: None,
         }
+    }
+
+    #[test]
+    fn synthesized_start_never_copies_proc_enrichment() {
+        let mut triggering = event(std::process::id(), 100, "TRACEPOINT", "openat");
+        triggering.proc = Some(crate::deserializer::ProcInfo {
+            main_executable: Some("/untrusted/exe".into()),
+            cwd: Some("/untrusted/cwd".into()),
+            tty: Some("/dev/pts/42".into()),
+        });
+        let mut life = LifecycleSynthesizer::new();
+        let start = life.before(&triggering).remove(0);
+        assert!(start.proc.is_none());
+        assert_eq!(start.header.process_ref, triggering.header.process_ref);
+        assert!(start.header.tid.is_none() && start.header.ns.is_none());
     }
 
     #[test]
