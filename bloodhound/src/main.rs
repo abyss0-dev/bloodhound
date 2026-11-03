@@ -32,6 +32,10 @@ async fn main() -> Result<()> {
     env_logger::init();
 
     let args = Cli::parse();
+    // SAFETY: sysconf takes a constant selector and no pointers.
+    let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    anyhow::ensure!(page_size > 0, "failed to determine system page size");
+    cli::validate_ring_buffer_size(args.ring_buffer_size, page_size as u64)?;
     info!("Bloodhound starting: tracing uid={}", args.uid);
     eprintln!("Bloodhound starting: tracing uid={}", args.uid);
 

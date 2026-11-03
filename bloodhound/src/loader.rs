@@ -44,6 +44,7 @@ pub fn load_and_attach(
     let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
     let view_supported = u32::from(offsets.exec_view.is_some());
     let mut bpf = EbpfLoader::new()
+        .set_max_entries("EVENTS", args.ring_buffer_size)
         .set_global("OFF_EXEC_VIEW", &view_offsets, true)
         .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
         .set_global("OFF_NS", &offsets.namespaces.offsets, true)
@@ -69,6 +70,13 @@ pub fn load_and_attach(
             env!("OUT_DIR"),
             "/bloodhound-ebpf/bpfel-unknown-none/release/bloodhound-ebpf"
         )))?;
+
+    let actual_size = ring_buffer_size(&bpf)?;
+    anyhow::ensure!(
+        actual_size == args.ring_buffer_size,
+        "EVENTS ring buffer size mismatch: configured {} bytes, kernel created {actual_size} bytes",
+        args.ring_buffer_size
+    );
 
     info!("BPF object loaded, setting up maps...");
 

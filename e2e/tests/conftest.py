@@ -1,8 +1,10 @@
+from contextlib import contextmanager
 import json
 import os
 import shlex
 import subprocess
 import time
+import warnings
 
 import pexpect
 import pytest
@@ -56,6 +58,113 @@ def ssh_cmd(ssh_config):
             full_cmd, capture_output=True, text=True, timeout=30
         )
         return result
+
+    return run
+
+
+@pytest.fixture
+def wait_for_bloodhound_attachment(ssh_cmd, wait_until):
+    """Wait for attachment in the current service invocation, not an old PID."""
+
+    def wait():
+        def attached():
+            result = ssh_cmd(
+                "set -eu; "
+                "pid=$(systemctl show --property=MainPID --value bloodhound); "
+                "invocation=$(systemctl show --property=InvocationID --value bloodhound); "
+                "test \"$pid\" -gt 0; test -n \"$invocation\"; "
+                "systemctl is-active --quiet bloodhound; "
+                "journalctl _PID=\"$pid\" _SYSTEMD_INVOCATION_ID=\"$invocation\" "
+                "--no-pager -o cat | "
+                "grep -Fx 'BPF programs loaded and attached' >/dev/null; "
+                "test \"$pid\" = \"$(systemctl show --property=MainPID --value bloodhound)\"; "
+                "test \"$invocation\" = \"$(systemctl show --property=InvocationID --value bloodhound)\"",
+                user="root",
+            )
+            return result.returncode == 0
+
+        wait_until(attached, "Bloodhound attachment for the current service invocation", timeout=30)
+
+    return wait
+
+
+@pytest.fixture
+def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_attachment):
+    """Run a standalone daemon with isolated output; always restore the service."""
+
+    @contextmanager
+    def run(*args):
+        process = None
+        remote_dir = None
+        stdout_path = tmp_path / "foreground.ndjson"
+        stderr_path = tmp_path / "foreground.stderr"
+        try:
+            stopped = ssh_cmd("systemctl stop bloodhound", user="root")
+            assert stopped.returncode == 0, stopped.stderr
+            created = ssh_cmd("mktemp -d /tmp/bloodhound-foreground.XXXXXX", user="root")
+            assert created.returncode == 0, created.stderr
+            remote_dir = shlex.quote(created.stdout.strip())
+            command = shlex.join(["/opt/bloodhound/bloodhound", "--uid", "1000", *args])
+            with stdout_path.open("w") as stdout, stderr_path.open("w") as stderr:
+                process = subprocess.Popen(
+                    [
+                        "sshpass", "-p", "root", "ssh",
+                        "-o", "StrictHostKeyChecking=no",
+                        "-p", ssh_config["port"],
+                        f"root@{ssh_config['host']}",
+                        f"echo $$ > {remote_dir}/pid; exec {command}",
+                    ],
+                    stdout=stdout, stderr=stderr, text=True,
+                )
+
+                class Foreground:
+                    def events(self):
+                        events = []
+                        for line in stdout_path.read_text().splitlines():
+                            try:
+                                events.append(json.loads(line))
+                            except json.JSONDecodeError:
+                                continue  # Retry an in-progress final line.
+                        return events
+
+                    def wait(self, timeout=15):
+                        return process.wait(timeout=timeout)
+
+                    def stderr(self):
+                        return stderr_path.read_text()
+
+                yield Foreground()
+        finally:
+            try:
+                if remote_dir is not None:
+                    cleanup = ssh_cmd(
+                        f"if test -f {remote_dir}/pid; then "
+                        f"pid=$(cat {remote_dir}/pid); "
+                        "if kill -0 \"$pid\" 2>/dev/null; then "
+                        "kill -INT \"$pid\"; "
+                        "for i in $(seq 1 50); do "
+                        "kill -0 \"$pid\" 2>/dev/null || break; sleep 0.1; done; "
+                        "if kill -0 \"$pid\" 2>/dev/null; then "
+                        "echo 'foreground Bloodhound required SIGKILL' >&2; "
+                        "kill -KILL \"$pid\"; fi; fi; fi; "
+                        f"rm -rf -- {remote_dir}",
+                        user="root",
+                    )
+                    assert cleanup.returncode == 0, cleanup.stderr
+                    if "required SIGKILL" in cleanup.stderr:
+                        warnings.warn(cleanup.stderr.strip(), RuntimeWarning)
+                if process is not None:
+                    process.wait(timeout=10)
+            finally:
+                if process is not None and process.poll() is None:
+                    process.kill()
+                    process.wait(timeout=5)
+                restored = ssh_cmd(
+                    "systemctl start bloodhound && systemctl is-active --quiet bloodhound",
+                    user="root",
+                )
+                assert restored.returncode == 0, restored.stderr
+                wait_for_bloodhound_attachment()
 
     return run
 
