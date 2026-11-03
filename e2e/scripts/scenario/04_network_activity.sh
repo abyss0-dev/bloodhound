@@ -2,9 +2,8 @@
 # Scenario 04: Network communication
 # ────────────────────────────────────
 # Key events to verify:
-#   - PACKET (ingress/egress) : TC hook packet capture
 #   - execve    : curl, python3, ss, etc.
-#   - connect   : socket connection (source for 5-tuple correlation)
+#   - connect   : socket connection syscall
 #   - openat    : DNS resolver config reads
 
 # ── Self-contained TCP server/client ──────────────────────
@@ -13,10 +12,10 @@
 python3 -m http.server 9090 &
 sleep 2
 
-# HTTP GET to the local server (generates connect + PACKET events)
+# HTTP GET to the local server (generates connect/sendto syscall events)
 curl -s http://localhost:9090/ -o /dev/null && echo "HTTP request succeeded" || echo "HTTP request failed"
 
-# Multiple requests (for 5-tuple correlation verification)
+# Multiple requests exercise repeated network syscalls
 curl -s http://localhost:9090/ -o /dev/null
 curl -s http://localhost:9090/ -o /dev/null
 

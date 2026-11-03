@@ -455,6 +455,7 @@ pub fn attach_selected(
             None,
         )];
     }
+    report.keys.insert(format!("usdt.{}", selection.collector_id), false);
     let Some(metadata) = collector(&selection.collector_id) else {
         return vec![diagnostic(
             &selection.collector_id,
@@ -529,6 +530,7 @@ pub fn attach_selected(
     match attach_result {
         Ok(()) => {
             report.probes += target.probes.len() as u32;
+            report.keys.insert(format!("usdt.{}", selection.collector_id), true);
             Vec::new()
         }
         Err(error) => {

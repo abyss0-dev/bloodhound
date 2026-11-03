@@ -2297,6 +2297,8 @@ mod golden_tests {
     golden_from_qemu!(golden_rename, "rename", "../testdata/qemu/rename.b64");
     golden_from_qemu!(golden_sendto, "sendto", "../testdata/qemu/sendto.b64");
     golden_from_qemu!(golden_lsm_task_kill, "lsm_task_kill", "../testdata/qemu/lsm_task_kill.b64");
+    // Pre-Phase-2 deny-all capture retained verbatim; current opt-in return_code=0
+    // requires a real guest recapture, not an edited fixture or expectation.
     golden_from_qemu!(golden_lsm_bpf, "lsm_bpf", "../testdata/qemu/lsm_bpf.b64");
     golden_from_qemu!(golden_lsm_setuid, "lsm_setuid", "../testdata/qemu/lsm_setuid.b64");
     golden_from_qemu!(golden_lsm_ptrace, "lsm_ptrace", "../testdata/qemu/lsm_ptrace.b64");

@@ -346,16 +346,7 @@ pub fn load_and_attach(
     let usdt_diagnostics = usdt_selections
         .iter()
         .flat_map(|selection| {
-            let before = report.probes;
-            let diagnostics =
-                usdt::attach_selected(&mut bpf, selection, &mut usdt_links, &mut report);
-            if selection.enabled {
-                report.keys.insert(
-                    format!("usdt.{}", selection.collector_id),
-                    report.probes > before,
-                );
-            }
-            diagnostics
+            usdt::attach_selected(&mut bpf, selection, &mut usdt_links, &mut report)
         })
         .collect();
     info!("BPF attachment attempts complete");
