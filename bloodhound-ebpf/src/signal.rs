@@ -11,7 +11,7 @@ use aya_ebpf::{
 };
 use bloodhound_common::{EventKind, SignalGeneratePayload};
 
-use crate::filter::{get_task_info, process_ref_from_task, should_trace};
+use crate::filter::{get_task_info, process_ref_from_task, should_trace_signal};
 use crate::helpers::{emit_fixed, raw_tracepoint_arg};
 use crate::OFF_TGID;
 
@@ -23,15 +23,11 @@ pub fn signal_generate(ctx: RawTracePointContext) -> u32 {
 }
 
 unsafe fn try_signal_generate(ctx: &RawTracePointContext) -> Result<(), i64> {
-    if !should_trace() {
-        return Ok(());
-    }
-
     // Kernel callback prototype:
     // (int sig, kernel_siginfo *info, task_struct *task, int group, int result)
     let signal = raw_tracepoint_arg(ctx, 0) as u32;
     let target_task = raw_tracepoint_arg(ctx, 2) as *const u8;
-    if target_task.is_null() {
+    if !should_trace_signal(target_task) {
         return Ok(());
     }
     let group = raw_tracepoint_arg(ctx, 3) as u32;
