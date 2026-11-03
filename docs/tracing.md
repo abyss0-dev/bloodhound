@@ -158,13 +158,14 @@ an event is observed if either the sender or target task matches `TARGET_AUID`.
 The daemon as sender is excluded before evaluating either branch; the target
 daemon is not blanket excluded.
 
-The event header always records the current task's real `auid` and process
+The event header always records the current task's own `auid` (`loginuid`) and process
 identity, which may be non-principal when an outside sender signals a monitored
 target. The sender in the header reflects the kernel task context active at
-execution time, not necessarily the true signal originator (e.g., asynchronous
-IRQs or timers fire in the context of whatever task was interrupted, so no
-provenance or causal claim is made). When the daemon itself is the interrupted
-context, daemon self-exclusion may omit the signal.
+execution time, not necessarily the true signal originator (signals raised from
+hard IRQs, softirqs, or kernel timers run in whatever task context is current —
+the interrupted task or a kernel thread such as ksoftirqd — so no provenance or
+causal claim is made). When the daemon itself is the interrupted context, daemon
+self-exclusion may omit the signal.
 
 This hook is observational only. It neither replaces nor enables Bloodhound's
 separate LSM tamper-resistance hooks, and it never synthesizes process exit or

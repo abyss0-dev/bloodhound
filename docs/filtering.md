@@ -73,12 +73,13 @@ configured AUID boundary with dedicated scoping rules:
 - **Daemon sender exclusion:** The daemon sender (`tgid == DAEMON_PID`) is
   excluded before evaluating either match branch. Target daemon instances are
   not blanket excluded.
-- **Event header:** The header always records the current task's real `auid`
-  (and real process identity), even when only the target matches and the
+- **Event header:** The header always records the current task's own `auid`
+  (`loginuid`) (and real process identity), even when only the target matches and the
   sender is non-principal. The header is never relabeled.
 - **Task context vs. originator:** The sender header reflects the kernel task
   context at hook execution time, which is not necessarily the true originator
-  (e.g., asynchronous IRQs, softirqs, or kernel timers execute in the context of
-  whatever task was interrupted, so no provenance or causal claim is made). If
-  the daemon happens to be the interrupted task during an IRQ/timer signal,
-  sender self-exclusion may omit the event.
+  (signals raised from hard IRQs, softirqs, or kernel timers run in whatever
+  task context is current — the interrupted task or a kernel thread such as
+  ksoftirqd — so no provenance or causal claim is made). If the daemon happens
+  to be the interrupted task during an IRQ/timer signal, sender self-exclusion
+  may omit the event.

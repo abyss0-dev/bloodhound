@@ -172,15 +172,16 @@ modify a signal.
 Observation applies across the single configured AUID: an event is emitted if
 either the sender or the target matches that AUID. Daemon senders are excluded
 before evaluating either branch, but target daemons are not blanket excluded.
-The event header always records the current task's real `auid` and process
+The event header always records the current task's own `auid` (`loginuid`) and process
 identity, which may be non-principal when an unmonitored sender targets a
 monitored process; the header is never relabeled.
 
 The sender recorded in the header reflects the task context executing the hook,
-which is not necessarily the true originator (e.g., asynchronous IRQs, softirqs,
-or kernel timers execute in the context of whatever task was interrupted, so no
-provenance or causal claim is made). If the daemon was the currently running
-task when an IRQ/timer signal occurred, daemon self-exclusion may omit the event.
+which is not necessarily the true originator (signals raised from hard IRQs,
+softirqs, or kernel timers run in whatever task context is current — the
+interrupted task or a kernel thread such as ksoftirqd — so no provenance or
+causal claim is made). If the daemon was the currently running task when an
+IRQ/timer signal occurred, daemon self-exclusion may omit the event.
 Signals are non-authoritative seeds and never synthesize a lifecycle `process_start`.
 
 The event header identifies the process context that generated the signal.
