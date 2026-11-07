@@ -36,7 +36,7 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
 
     let mut header = EventHeader {
         kind,
-        _pad: [0; 3],
+        capture: HeaderCapture::default(),
         timestamp_ns,
         auid,
         sessionid,

@@ -186,8 +186,8 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             crate::usdt::decode_payload(kind, payload)?
         }
         EventKind::ExecView => parse_exec_view(payload)?,
-        EventKind::Execve => parse_execve(payload, "execve", header._pad)?,
-        EventKind::Execveat => parse_execve(payload, "execveat", header._pad)?,
+        EventKind::Execve => parse_execve(payload, "execve", header.capture)?,
+        EventKind::Execveat => parse_execve(payload, "execveat", header.capture)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
         EventKind::Openat => parse_openat(payload)?,
         EventKind::Read => parse_read_write(payload, "read")?,
@@ -330,7 +330,7 @@ fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Opti
 }
 
 
-fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_execve(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < ExecvePayload::SIZE {
         bail!("Execve payload too short");
     }
@@ -347,14 +347,17 @@ fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String,
 
     let mut argv_status = "unknown";
     let mut filename_status = "unknown";
-    if capture[0] == 1 {
+    if capture.version == 1 {
         if execve.filename_len as usize + execve.argv_len as usize != var_data.len() {
             bail!("Exec capture lengths do not match record");
         }
-        let status = |code| match code { 1 => Some("complete"), 2 => Some("truncated"),
-                                       3 => Some("read_error"), _ => None };
-        argv_status = status(capture[1]).context("invalid argv capture status")?;
-        filename_status = status(capture[2]).context("invalid filename capture status")?;
+        let status = |code| CaptureStatus::try_from(code).ok().map(|status| match status {
+            CaptureStatus::Complete => "complete",
+            CaptureStatus::Truncated => "truncated",
+            CaptureStatus::ReadError => "read_error",
+        });
+        argv_status = status(capture.primary).context("invalid argv capture status")?;
+        filename_status = status(capture.secondary).context("invalid filename capture status")?;
         if argv_len > 0 && argv_data.last() != Some(&0) {
             bail!("Exec argv lacks final separator");
         }
@@ -367,7 +370,7 @@ fn parse_execve(payload: &[u8], name: &str, capture: [u8; 3]) -> Result<(String,
     }
     let args = serde_json::json!({
         "filename": filename, "argv": argv,
-        "exec_capture_version": capture[0],
+        "exec_capture_version": capture.version,
         "argv_status": argv_status, "filename_status": filename_status,
     });
 
@@ -471,9 +474,11 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
     });
     let obj = args.as_object_mut().expect("openat args is an object");
     if openat.capture_version == 1 {
-        let valid = openat.capture_flags & 3;
-        let path = openat.capture_flags & 12;
-        if openat.capture_flags & !15 != 0 || path == 12
+        let identity_mask = DEV_VALID | INO_VALID;
+        let path_mask = PATH_COMPLETE | PATH_READ_FAILED;
+        let valid = openat.capture_flags & identity_mask;
+        let path = openat.capture_flags & path_mask;
+        if openat.capture_flags & !(identity_mask | path_mask) != 0 || path == path_mask
             || (openat.return_code < 0 && valid != 0)
             || openat.filename_len as usize > var_data.len()
         {
@@ -482,20 +487,22 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
         obj.insert("capture_version".into(), serde_json::json!(1));
         obj.insert("dirfd".into(), serde_json::json!(openat.dirfd));
         let filename_status = match path {
-            4 if std::str::from_utf8(&var_data[..filename_len]).is_err() => "invalid_encoding",
-            4 => "complete", 8 => "read_error", _ => "truncated",
+            PATH_COMPLETE if std::str::from_utf8(&var_data[..filename_len]).is_err() => "invalid_encoding",
+            PATH_COMPLETE => "complete", PATH_READ_FAILED => "read_error", _ => "truncated",
         };
         obj.insert("filename_status".into(), serde_json::json!(filename_status));
         obj.insert("file_identity_status".into(), serde_json::json!(
             if openat.return_code < 0 { "not_attempted" }
-            else { match valid { 3 => "complete", 0 => "unavailable", _ => "partial" } }
+            else if valid == identity_mask { "complete" }
+            else if valid == 0 { "unavailable" }
+            else { "partial" }
         ));
-        if valid & 1 != 0 {
+        if valid & DEV_VALID != 0 {
             obj.insert("dev".into(), serde_json::json!(openat.dev));
             obj.insert("dev_major".into(), serde_json::json!(openat.dev >> 20));
             obj.insert("dev_minor".into(), serde_json::json!(openat.dev & ((1 << 20) - 1)));
         }
-        if valid & 2 != 0 {
+        if valid & INO_VALID != 0 {
             obj.insert("ino".into(), serde_json::json!(openat.ino));
         }
     } else if openat.dev != 0 || openat.ino != 0 {
@@ -1230,7 +1237,7 @@ mod tests {
         comm[..4].copy_from_slice(b"test");
         EventHeader {
             kind: kind as u8,
-            _pad: [0; 3],
+            capture: HeaderCapture::default(),
             timestamp_ns: 1_500_000_000, // 1.5 seconds
             auid: 1000,
             sessionid: 42,

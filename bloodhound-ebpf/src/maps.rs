@@ -84,7 +84,8 @@ pub static OPENAT_TMP_BUF: PerCpuArray<OpenatEntry> = PerCpuArray::with_max_entr
 /// Detected loss before ring-buffer emission, distinct from DROP_COUNT.
 /// Slots: entry capture, entry map update, exit capture, interrupted invocation.
 #[map]
-pub static OPENAT_FAILURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+pub static OPENAT_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(OPENAT_FAILURE_REASONS.len() as u32, 0);
 
 #[inline(always)]
 pub unsafe fn openat_failure(reason: u32) {
@@ -172,7 +173,8 @@ pub static EXIT_CLAIMS: HashMap<exit_claim::ExitClaimKey, u8> =
     HashMap::with_max_entries(exit_claim::EXIT_CLAIM_CAPACITY, 0);
 
 #[map]
-pub static EXIT_FAILURES: PerCpuArray<u64> = PerCpuArray::with_max_entries(4, 0);
+pub static EXIT_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(exit_claim::EXIT_FAILURE_REASONS.len() as u32, 0);
 
 pub unsafe fn exit_failure(reason: u32) {
     if let Some(counter) = EXIT_FAILURES.get_ptr_mut(reason) {

@@ -9,10 +9,6 @@ use crate::clock::monotonic_now_ns;
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 use crate::sequencer::SequencedInput;
 
-pub const OPENAT_REASONS: [&str; 4] = [
-    "entry_capture_failed", "entry_save_failed", "exit_capture_failed", "invocation_interrupted",
-];
-
 fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {

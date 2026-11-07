@@ -78,12 +78,12 @@ unsafe fn try_sys_exit_execve(ctx: &TracePointContext) -> Result<u32, i64> {
         let ptr = buf.as_mut_ptr();
         if filename_len > 0 && !copy_checked(ptr.add(fixed), entry.filename_buf.as_ptr(), filename_len as u32) {
             filename_len = 0;
-            header._pad[2] = 3;
+            header.capture.secondary = CaptureStatus::ReadError as u8;
         }
         let argv_offset = fixed + filename_len;
         if argv_len > 0 && !copy_checked(ptr.add(argv_offset), entry.argv_buf.as_ptr(), argv_len as u32) {
             argv_len = 0;
-            header._pad[1] = 3;
+            header.capture.primary = CaptureStatus::ReadError as u8;
         }
         let payload = ExecvePayload {
             filename_len: filename_len as u16, argv_len: argv_len as u16,
@@ -170,7 +170,9 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
     fill_task_info(kind as u8, &mut entry.header);
     let (filename_len, filename_status) = read_filename(filename_ptr as *const u8);
     let (argv_len, argv_status) = read_argv(argv_ptr as *const *const u8);
-    entry.header._pad = [1, argv_status, filename_status];
+    entry.header.capture = HeaderCapture {
+        version: 1, primary: argv_status as u8, secondary: filename_status as u8,
+    };
     entry.filename_len = filename_len;
     entry.argv_len = argv_len;
     if filename_len > 0 {
@@ -179,7 +181,7 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
                                     filename_len.min((MAX_PATH_SIZE - 1) as u16) as u32),
             None => false,
         };
-        if !copied { entry.filename_len = 0; entry.header._pad[2] = 3; }
+        if !copied { entry.filename_len = 0; entry.header.capture.secondary = CaptureStatus::ReadError as u8; }
     }
     if argv_len > 0 {
         let copied = match SCRATCH_BUF.get_ptr(1) {
@@ -187,7 +189,7 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
                                     argv_len.min((MAX_ARGV_SIZE - 1) as u16) as u32),
             None => false,
         };
-        if !copied { entry.argv_len = 0; entry.header._pad[1] = 3; }
+        if !copied { entry.argv_len = 0; entry.header.capture.primary = CaptureStatus::ReadError as u8; }
     }
     crate::exec_view::emit(&entry.header);
     if EXECVE_ENTRY_MAP.insert(&(bpf_get_current_task() as u64), entry, 0).is_err() {
@@ -196,27 +198,27 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
     Ok(0)
 }
 
-// Status: 1 complete, 2 truncated, 3 read error. Only a witnessed argv NULL
-// terminator certifies completion; hitting a bound never does.
 #[inline(always)]
-unsafe fn read_filename(filename_ptr: *const u8) -> (u16, u8) {
+unsafe fn read_filename(filename_ptr: *const u8) -> (u16, CaptureStatus) {
     let buf = match SCRATCH_BUF.get_ptr_mut(0) {
-        Some(b) => &mut (*b).buf, None => return (0, 3),
+        Some(b) => &mut (*b).buf, None => return (0, CaptureStatus::ReadError),
     };
     match bpf_probe_read_user_str_bytes(filename_ptr, buf) {
-        Ok(s) => (s.len() as u16, if s.len() < MAX_PATH_SIZE - 1 { 1 } else { 2 }),
-        Err(_) => (0, 3),
+        Ok(s) => (s.len() as u16, if s.len() < MAX_PATH_SIZE - 1 { CaptureStatus::Complete } else { CaptureStatus::Truncated }),
+        Err(_) => (0, CaptureStatus::ReadError),
     }
 }
 
 #[inline(always)]
-unsafe fn read_argv(argv_ptr: *const *const u8) -> (u16, u8) {
-    if argv_ptr.is_null() { return (0, 1); }
+// Only a witnessed argv NULL terminator certifies completion; hitting a bound never does.
+unsafe fn read_argv(argv_ptr: *const *const u8) -> (u16, CaptureStatus) {
+    use CaptureStatus::{Complete, ReadError, Truncated};
+    if argv_ptr.is_null() { return (0, Complete); }
     let buf = match SCRATCH_BUF.get_ptr_mut(1) {
-        Some(b) => &mut (*b).buf, None => return (0, 3),
+        Some(b) => &mut (*b).buf, None => return (0, ReadError),
     };
     let tmp = match SCRATCH_BUF.get_ptr_mut(3) {
-        Some(b) => &mut (*b).buf, None => return (0, 3),
+        Some(b) => &mut (*b).buf, None => return (0, ReadError),
     };
     const MASK: usize = MAX_ARGV_SIZE - 1;
     const MAX_SINGLE_ARG: usize = 256;
@@ -225,20 +227,20 @@ unsafe fn read_argv(argv_ptr: *const *const u8) -> (u16, u8) {
     let mut offset = 0usize;
     for i in 0..MAX_ARGS {
         let arg = match bpf_probe_read_user(argv_ptr.add(i)) {
-            Ok(p) => p, Err(_) => return (offset as u16, 3),
+            Ok(p) => p, Err(_) => return (offset as u16, ReadError),
         };
-        if arg.is_null() { return (offset as u16, 1); }
+        if arg.is_null() { return (offset as u16, Complete); }
         let safe_offset = offset & MASK;
-        if safe_offset > OFFSET_LIMIT { return (offset as u16, 2); }
+        if safe_offset > OFFSET_LIMIT { return (offset as u16, Truncated); }
         let arg_len = match bpf_probe_read_user_str_bytes(arg, tmp) {
-            Ok(s) => s.len(), Err(_) => return (offset as u16, 3),
+            Ok(s) => s.len(), Err(_) => return (offset as u16, ReadError),
         };
         if !copy_checked(buf.as_mut_ptr().add(safe_offset), tmp.as_ptr(), MAX_SINGLE_ARG as u32) {
-            return (offset as u16, 3);
+            return (offset as u16, ReadError);
         }
         if arg_len > MAX_SINGLE_ARG - 1 {
             buf[(safe_offset + MAX_SINGLE_ARG - 1) & MASK] = 0;
-            return ((safe_offset + MAX_SINGLE_ARG) as u16, 2);
+            return ((safe_offset + MAX_SINGLE_ARG) as u16, Truncated);
         }
         let len = arg_len & (MAX_SINGLE_ARG - 1);
         let separator = (safe_offset + len) & MASK;
@@ -246,8 +248,8 @@ unsafe fn read_argv(argv_ptr: *const *const u8) -> (u16, u8) {
         offset = separator + 1;
     }
     match bpf_probe_read_user(argv_ptr.add(MAX_ARGS)) {
-        Ok(p) if p.is_null() => (offset as u16, 1),
-        Ok(_) => (offset as u16, 2),
-        Err(_) => (offset as u16, 3),
+        Ok(p) if p.is_null() => (offset as u16, Complete),
+        Ok(_) => (offset as u16, Truncated),
+        Err(_) => (offset as u16, ReadError),
     }
 }
