@@ -143,6 +143,81 @@ mod tests {
         [as_bytes(&header), as_bytes(&payload)].concat()
     }
 
+    #[test]
+    fn raw_lifecycle_and_identity_diagnostic_bytes() {
+        use bloodhound_common::{
+            LsmTaskKillPayload, ProcessExitPayload, ProcessForkPayload, SignalGeneratePayload,
+        };
+
+        // Reuse the synthetic wire header, not decoded BehaviorEvent fixtures.
+        let wire = |kind: EventKind, timestamp, pid, payload: &[u8]| {
+            let mut bytes = raw_syscall_for_process(timestamp, 999, pid, 1);
+            bytes.truncate(std::mem::size_of::<EventHeader>());
+            bytes[0] = kind as u8;
+            bytes.extend_from_slice(payload);
+            bytes
+        };
+        let fork = ProcessForkPayload {
+            parent_tgid: 777, // The diagnostic must use header.pid, not this field.
+            child_tgid: 43,
+            parent_start_boottime_ns: 0,
+            child_start_boottime_ns: 100,
+            clone_flags: 0,
+        };
+        let records = [
+            wire(EventKind::ProcessStart, 1, 42, &[]),
+            raw_syscall(2, 999),
+            wire(EventKind::ProcessExit, 3, 42, as_bytes(&ProcessExitPayload {
+                raw_status: 0, _pad: 0,
+            })),
+            raw_syscall(4, 999),
+            wire(EventKind::ProcessFork, 5, 42, as_bytes(&fork)),
+            wire(EventKind::ProcessFork, 6, 42, as_bytes(&fork)),
+            wire(EventKind::LsmTaskKill, 7, 42, as_bytes(&LsmTaskKillPayload {
+                target_pid: 44, signal: 15, target_start_boottime_ns: 0,
+                return_code: 0, _pad: 0,
+            })),
+            // A fresh subject makes accidental authoritative seeding visible.
+            wire(EventKind::SignalGenerate, 8, 45, as_bytes(&SignalGeneratePayload {
+                target_tgid: 46, signal: 15, target_start_boottime_ns: 0,
+                group: 1, result: bloodhound_common::SIGNAL_RESULT_DELIVERED,
+            })),
+        ];
+        let mut output = Vec::new();
+        let emitted = Arc::new(AtomicU64::new(0));
+        {
+            let mut sequencer = Sequencer::new(
+                1000, Serializer::with_writer(&mut output), emitted.clone(),
+            );
+            for record in records {
+                sequencer.accept(SequencedInput::Raw(record)).unwrap();
+            }
+            sequencer.flush().unwrap();
+        }
+        assert_eq!(output.last(), Some(&b'\n'));
+        let encoded = String::from_utf8(output).unwrap();
+        let events: Vec<serde_json::Value> = encoded.lines()
+            .map(|line| serde_json::from_str(line).unwrap()).collect();
+        assert_eq!(emitted.load(Ordering::Relaxed) as usize, events.len());
+        let starts: Vec<_> = events.iter()
+            .filter(|event| event["event"]["name"] == "process_start").collect();
+        // One raw start and one synthesized after exit; neither syscall after
+        // the raw start nor the non-authoritative signal adds another start.
+        assert_eq!(starts.len(), 2);
+        assert!(starts.iter().all(|event| event["header"]["pid"] == 42));
+        let diagnostics: Vec<_> = events.iter()
+            .filter(|event| event["event"]["name"] == "process.identity").collect();
+        assert_eq!(diagnostics.len(), 3);
+        assert_eq!(diagnostics[0]["args"]["source"], "process_fork.parent_ref");
+        assert_eq!(diagnostics[1]["args"]["source"], "task_kill.target_ref");
+        assert_eq!(diagnostics[2]["args"]["source"], "signal_generate.target_ref");
+        assert_eq!(diagnostics[0]["args"]["observed_tgid"], 42);
+        assert_eq!(diagnostics[1]["args"]["observed_tgid"], 44);
+        assert_eq!(diagnostics[2]["args"]["observed_tgid"], 46);
+        // Snapshot the serializer's exact bytes, retaining field order and LF.
+        insta::assert_snapshot!("raw_lifecycle_and_identity_diagnostic_bytes", encoded);
+    }
+
     fn process_events(pid: u32, ppid: u32, repeat: bool) -> Vec<serde_json::Value> {
         let mut bytes = Vec::new();
         {
