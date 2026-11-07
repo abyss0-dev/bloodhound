@@ -14,6 +14,8 @@ use crate::maps::{
     RICH_ENTRY_MAP, SYSCALL_TMP_BUF,
 };
 
+// Path exit lengths use masks rather than min() so LLVM spills/reloads do not
+// hide their bounds from the BPF verifier, including single-path and openat.
 const _: () = assert!(MAX_PATH_SIZE.is_power_of_two());
 
 // ── Emit helpers ─────────────────────────────────────────────────────────────

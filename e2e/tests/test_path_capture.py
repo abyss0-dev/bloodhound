@@ -73,14 +73,15 @@ with tempfile.TemporaryDirectory(prefix="bh-{name}-") as root:
 ])
 def test_path_capture_status(two, first, second, expected, ssh_cmd,
                              bloodhound_events, wait_for_matching_events):
-    name = "rename" if two else "chdir"
+    name = "rename" if two else "mkdir"
     script = f'''
 import ctypes, json, os
 libc = ctypes.CDLL(None, use_errno=True)
 normal = ctypes.c_char_p(b"/tmp")
 long = ctypes.c_char_p(b"/" + b"x" * 8192)
 paths = dict(normal=normal, long=long, bad=ctypes.c_void_p(1), null=ctypes.c_void_p(0))
-ret = libc.syscall({82 if two else 80}, paths[{first!r}], paths[{second!r}])
+second_arg = paths[{second!r}] if {two!r} else ctypes.c_uint(0o700)
+ret = libc.syscall({82 if two else 83}, paths[{first!r}], second_arg)
 print(json.dumps(dict(pid=os.getpid(), ret=ret)))
 '''
     result = ssh_cmd("python3 -c " + shlex.quote(script))
