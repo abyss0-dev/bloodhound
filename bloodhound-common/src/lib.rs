@@ -8,6 +8,8 @@ pub mod syscall_collection;
 pub const MAX_ARGV_SIZE: usize = 4096;
 pub const MAX_PATH_SIZE: usize = 4096;
 pub const MAX_TTY_DATA: usize = 4096;
+/// Training-shell USDT command-name capture buffer size, including the NUL terminator.
+pub const TRAINING_SHELL_COMMAND_NAME_LIMIT: usize = 64;
 pub const RING_BUFFER_DEFAULT: u32 = 4 * 1024 * 1024; // 4 MB
 pub const COMM_SIZE: usize = 16;
 pub const SYSCALL_ENTRY_MAP_SIZE: u32 = 10240;
