@@ -582,6 +582,41 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fd_and_tty_offsets_resolve_drift_and_fail_closed_independently() {
+        use bloodhound_common::{EXEC_VIEW_FIELDS, FD_CHAIN_FIELDS, TTY_FIELDS};
+        let fields: Vec<_> = FD_CHAIN_FIELDS.iter().chain(&EXEC_VIEW_FIELDS[6..9])
+            .chain(&TTY_FIELDS).copied().collect();
+        for shift in [0, 128] {
+            for missing in std::iter::once(None).chain(fields.iter().copied().map(Some)) {
+                let mut b = BtfBuilder::new();
+                let mut structs = std::collections::BTreeMap::<&str, Vec<(&str, u32)>>::new();
+                let mut expected = Vec::new();
+                for (i, &(owner, member)) in fields.iter().enumerate() {
+                    // Offset zero is valid, not an unresolved sentinel.
+                    let offset = shift + i as u32 * 8;
+                    expected.push(offset);
+                    if missing != Some((owner, member)) {
+                        structs.entry(owner).or_default().push((member, offset));
+                    }
+                }
+                let extra = structs.remove("task_struct").unwrap_or_default();
+                add_lifecycle_structs(&mut b, &lifecycle_task_with(&extra));
+                for (owner, members) in structs {
+                    b.add_struct(owner, &members, false);
+                }
+                let result = parse_task_offsets(&b.build()).unwrap();
+                assert_eq!(result.fd_ident, if missing.is_none() || TTY_FIELDS.contains(&missing.unwrap()) {
+                    Some(expected[..8].try_into().unwrap())
+                } else { None }, "missing={missing:?}, shift={shift}");
+                assert_eq!(result.tty, if missing.is_none() || !TTY_FIELDS.contains(&missing.unwrap()) {
+                    Some(expected[8..].try_into().unwrap())
+                } else { None }, "missing={missing:?}, shift={shift}");
+                assert_eq!(result.exec_view, None, "fd identity must not require exec-view-only fields");
+            }
+        }
+    }
+
     fn add_namespace_structs(b: &mut BtfBuilder, skip: Option<(&str, &str)>) {
         let mut structs = std::collections::BTreeMap::<&str, Vec<(&str, u32)>>::new();
         for (i, &(owner, member)) in NS_FIELDS.iter().enumerate() {
