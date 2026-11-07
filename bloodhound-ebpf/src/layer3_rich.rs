@@ -9,7 +9,8 @@ use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::{emit_event, bpf_memcpy, increment_drop_count};
 use crate::maps::{
-    OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, ASSEMBLY_BUF, RICH_ENTRY_MAP, SCRATCH_BUF, SYSCALL_TMP_BUF,
+    ASSEMBLY_BUF, OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, PATH_ENTRY_MAP, PATH_TMP_BUF,
+    RICH_ENTRY_MAP, SYSCALL_TMP_BUF,
 };
 
 // ── Emit helpers ─────────────────────────────────────────────────────────────
@@ -535,75 +536,44 @@ unsafe fn try_exit_clone(ctx: &TracePointContext) -> Result<u32, i64> {
 
 // ── Generic path-based enter/exit ────────────────────────────────────────────
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PathData { path_len: u16 }
-
 unsafe fn try_enter_path(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
-    if !should_trace() { return Ok(0); }
-    // First arg after syscall_nr is the path pointer (offset 16 or 24 for *at)
-    let pathname: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let header = get_task_info(kind);
-    let path_len = if pathname != 0 {
-        let buf = match SCRATCH_BUF.get_ptr_mut(0) { Some(b) => &mut (*b).buf, None => return Ok(0) };
-        match bpf_probe_read_user_str_bytes(pathname as *const u8, buf) { Ok(s) => s.len() as u16, Err(_) => 0 }
-    } else { 0 };
-    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => p,
-        None => return Ok(0),
-    };
-    let entry = unsafe { &mut *entry_ptr };
-    entry.data_len = 0;
-    entry.header = header;
-    let ed = PathData { path_len };
-    core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<PathData>());
-    entry.data_len = core::mem::size_of::<PathData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
-    Ok(0)
+    enter_path_arg(ctx, kind, 0)
 }
 
 unsafe fn try_enter_at_path(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
+    enter_path_arg(ctx, kind, 1)
+}
+
+unsafe fn enter_path_arg(ctx: &TracePointContext, kind: u8, path_arg: usize) -> Result<u32, i64> {
     if !should_trace() { return Ok(0); }
-    // *at variants: offset 16=dirfd, 24=pathname
-    let pathname: u64 = ctx.read_at(24).map_err(|_| -1i64)?;
+    let pathname: u64 = ctx.read_at(16 + 8 * path_arg).map_err(|_| -1i64)?;
     let pid_tgid = bpf_get_current_pid_tgid();
-    let header = get_task_info(kind);
-    let path_len = if pathname != 0 {
-        let buf = match SCRATCH_BUF.get_ptr_mut(0) { Some(b) => &mut (*b).buf, None => return Ok(0) };
-        match bpf_probe_read_user_str_bytes(pathname as *const u8, buf) { Ok(s) => s.len() as u16, Err(_) => 0 }
-    } else { 0 };
-    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => p,
-        None => return Ok(0),
-    };
-    let entry = unsafe { &mut *entry_ptr };
-    entry.data_len = 0;
-    entry.header = header;
-    let ed = PathData { path_len };
-    core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<PathData>());
-    entry.data_len = core::mem::size_of::<PathData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Ok(0) };
+    entry.header = get_task_info(kind);
+    entry.path1_len = read_path(pathname, &mut entry.path1);
+    entry.path2_len = 0;
+    let _ = PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0);
     Ok(0)
+}
+
+#[inline(always)]
+unsafe fn read_path(pathname: u64, buf: &mut [u8; MAX_PATH_SIZE]) -> u16 {
+    if pathname == 0 { return 0; }
+    match bpf_probe_read_user_str_bytes(pathname as *const u8, buf) {
+        Ok(s) => s.len() as u16,
+        Err(_) => 0,
+    }
 }
 
 unsafe fn try_exit_path(ctx: &TracePointContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
-    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) { Some(e) => *e, None => return Ok(0) };
+    // Borrow map memory: copying an entry would exceed the BPF stack limit.
+    let entry = match PATH_ENTRY_MAP.get(&pid_tgid) { Some(e) => e, None => return Ok(0) };
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let ed: PathData = core::ptr::read_unaligned(entry.data.as_ptr() as *const PathData);
-    let path_len = (ed.path_len as usize).min(MAX_PATH_SIZE - 1);
-    let payload = PathPayload { path_len: ed.path_len, _pad: [0; 2], return_code: ret as i32 };
-    if path_len > 0 {
-        if let Some(scratch) = SCRATCH_BUF.get_ptr(0) {
-            emit_varlen(&entry.header, &payload, &(&(*scratch).buf)[..path_len]);
-        } else {
-            emit_fixed(&entry.header, &payload);
-        }
-    } else {
-        emit_fixed(&entry.header, &payload);
-    }
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    let path_len = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
+    let payload = PathPayload { path_len: path_len as u16, _pad: [0; 2], return_code: ret as i32 };
+    emit_varlen(&entry.header, &payload, &entry.path1[..path_len]);
+    let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
     Ok(0)
 }
 
@@ -645,70 +615,51 @@ unsafe fn try_exit_fd(ctx: &TracePointContext) -> Result<u32, i64> {
 
 // ── Generic two-path enter/exit ──────────────────────────────────────────────
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct TwoPathData { path1_len: u16, path2_len: u16 }
+fn two_path_args(kind: EventKind) -> Option<(usize, usize)> {
+    match kind {
+        EventKind::Rename | EventKind::Link | EventKind::Symlink | EventKind::Mount => Some((0, 1)),
+        EventKind::Renameat2 | EventKind::Linkat => Some((1, 3)),
+        EventKind::Symlinkat => Some((0, 2)),
+        _ => None,
+    }
+}
 
-unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
+unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: EventKind) -> Result<u32, i64> {
     if !should_trace() { return Ok(0); }
-    let path1_ptr: u64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let path2_ptr: u64 = ctx.read_at(24).unwrap_or(0);
+    let (path1_arg, path2_arg) = match two_path_args(kind) { Some(args) => args, None => return Ok(0) };
+    let path1_ptr: u64 = ctx.read_at(16 + 8 * path1_arg).map_err(|_| -1i64)?;
+    let path2_ptr: u64 = ctx.read_at(16 + 8 * path2_arg).map_err(|_| -1i64)?;
     let pid_tgid = bpf_get_current_pid_tgid();
-    let header = get_task_info(kind);
-    let path1_len = if path1_ptr != 0 {
-        let buf = match SCRATCH_BUF.get_ptr_mut(0) { Some(b) => &mut (*b).buf, None => return Ok(0) };
-        match bpf_probe_read_user_str_bytes(path1_ptr as *const u8, buf) { Ok(s) => s.len() as u16, Err(_) => 0 }
-    } else { 0 };
-    let path2_len = if path2_ptr != 0 {
-        let buf = match SCRATCH_BUF.get_ptr_mut(1) { Some(b) => &mut (*b).buf, None => return Ok(0) };
-        match bpf_probe_read_user_str_bytes(path2_ptr as *const u8, buf) { Ok(s) => s.len() as u16, Err(_) => 0 }
-    } else { 0 };
-    let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
-        Some(p) => p,
-        None => return Ok(0),
-    };
-    let entry = unsafe { &mut *entry_ptr };
-    entry.data_len = 0;
-    entry.header = header;
-    let ed = TwoPathData { path1_len, path2_len };
-    core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<TwoPathData>());
-    entry.data_len = core::mem::size_of::<TwoPathData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Ok(0) };
+    entry.header = get_task_info(kind as u8);
+    entry.path1_len = read_path(path1_ptr, &mut entry.path1);
+    entry.path2_len = read_path(path2_ptr, &mut entry.path2);
+    let _ = PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0);
     Ok(0)
 }
 
 unsafe fn try_exit_two_path(ctx: &TracePointContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
-    let entry = match RICH_ENTRY_MAP.get(&pid_tgid) { Some(e) => *e, None => return Ok(0) };
+    let entry = match PATH_ENTRY_MAP.get(&pid_tgid) { Some(e) => e, None => return Ok(0) };
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let ed: TwoPathData = core::ptr::read_unaligned(entry.data.as_ptr() as *const TwoPathData);
-    let payload = TwoPathPayload { path1_len: ed.path1_len, path2_len: ed.path2_len, return_code: ret as i32 };
-    let p1 = (ed.path1_len as usize).min(MAX_PATH_SIZE - 1);
-    let p2 = (ed.path2_len as usize).min(MAX_PATH_SIZE - 1);
-    if p1 + p2 == 0 {
-        emit_fixed(&entry.header, &payload);
-    } else {
-        // Assemble var data in assembly buffer
-        let asm = match ASSEMBLY_BUF.get_ptr_mut(0) { Some(s) => s, None => { emit_fixed(&entry.header, &payload); let _ = RICH_ENTRY_MAP.remove(&pid_tgid); return Ok(0); } };
-        let dst = &mut (*asm).buf;
-        let mut offset = 0;
-        if p1 > 0 {
-            if let Some(s0) = SCRATCH_BUF.get_ptr(0) {
-                // ⚠️  BPF verifier constraint: bpf_memcpy required (p1 up to 4095 bytes)
-                bpf_memcpy(dst.as_mut_ptr().add(offset), (*s0).buf.as_ptr(), p1 as u32);
-                offset += p1;
-            }
-        }
-        if p2 > 0 {
-            if let Some(s1) = SCRATCH_BUF.get_ptr(1) {
-                // ⚠️  BPF verifier constraint: bpf_memcpy required (p2 up to 4095 bytes)
-                bpf_memcpy(dst.as_mut_ptr().add(offset), (*s1).buf.as_ptr(), p2 as u32);
-                offset += p2;
-            }
-        }
-        emit_varlen(&entry.header, &payload, &dst[..offset]);
-    }
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    let p1 = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
+    let p2 = (entry.path2_len as usize).min(MAX_PATH_SIZE - 1);
+    let payload = TwoPathPayload { path1_len: p1 as u16, path2_len: p2 as u16, return_code: ret as i32 };
+    let asm = match ASSEMBLY_BUF.get_ptr_mut(0) { Some(s) => s, None => {
+        let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
+        return Ok(0);
+    } };
+    let dst = &mut (*asm).buf;
+    let fixed = EventHeader::SIZE + core::mem::size_of::<TwoPathPayload>();
+    core::ptr::copy_nonoverlapping(&entry.header as *const EventHeader as *const u8,
+        dst.as_mut_ptr(), EventHeader::SIZE);
+    core::ptr::copy_nonoverlapping(&payload as *const TwoPathPayload as *const u8,
+        dst.as_mut_ptr().add(EventHeader::SIZE), core::mem::size_of::<TwoPathPayload>());
+    // Assemble directly at final offsets: emit_varlen would overwrite its own input.
+    bpf_memcpy(dst.as_mut_ptr().add(fixed), entry.path1.as_ptr(), p1 as u32);
+    bpf_memcpy(dst.as_mut_ptr().add(fixed + p1), entry.path2.as_ptr(), p2 as u32);
+    emit_event(&dst[..fixed + p1 + p2]);
+    let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
     Ok(0)
 }
 
@@ -781,17 +732,17 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
 #[tracepoint] pub fn sys_exit_mkdir(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Mkdirat as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlink as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlink) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_symlink(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlinkat as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlinkat) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Link as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Link) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_link(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Linkat as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Linkat) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_linkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Rename as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Rename) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_rename(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Renameat2 as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Renameat2) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_renameat2(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_chmod(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Chmod as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_chmod(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
@@ -809,7 +760,7 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
 #[tracepoint] pub fn sys_exit_truncate(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Ftruncate as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Mount as u8) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Mount) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_mount(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_umount2(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Umount2 as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_umount2(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }

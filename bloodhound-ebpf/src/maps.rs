@@ -50,6 +50,24 @@ pub struct OpenatEntry {
     pub filename: [u8; MAX_PATH_SIZE],
 }
 
+// Entry-owned bytes survive both CPU migration and reuse of per-CPU scratch.
+#[repr(C)]
+pub struct PathEntry {
+    pub header: EventHeader,
+    pub path1_len: u16,
+    pub path2_len: u16,
+    pub path1: [u8; MAX_PATH_SIZE],
+    pub path2: [u8; MAX_PATH_SIZE],
+}
+
+#[map]
+pub static PATH_ENTRY_MAP: HashMap<u64, PathEntry> =
+    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
+
+// Construct in map memory to stay below the 512-byte BPF stack limit.
+#[map]
+pub static PATH_TMP_BUF: PerCpuArray<PathEntry> = PerCpuArray::with_max_entries(1, 0);
+
 #[map]
 pub static OPENAT_ENTRY_MAP: HashMap<u64, OpenatEntry> =
     HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
