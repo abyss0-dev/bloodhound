@@ -44,8 +44,15 @@ sshpass -p root scp ${SSH_OPTS} -P "${SSH_PORT}" \
 
 # ── 3. Restart ──────────────────────────────────────────────────────
 echo "🚀 Starting daemon..."
+# Explicit E2E starts must not consume the production crash-loop budget.
 sshpass -p root ssh ${SSH_OPTS} -p "${SSH_PORT}" "root@${SSH_HOST}" \
-    "systemctl start bloodhound"
+    "{ systemctl reset-failed bloodhound &&
+        systemctl start bloodhound && systemctl is-active --quiet bloodhound;
+    } || {
+        systemctl status bloodhound --no-pager;
+        journalctl -u bloodhound -n 200 --no-pager;
+        exit 1;
+    }"
 
 sleep 3
 
@@ -61,6 +68,6 @@ if [[ "$STATUS" == "active" ]]; then
 else
     echo "❌ Daemon status: ${STATUS}"
     sshpass -p root ssh ${SSH_OPTS} -p "${SSH_PORT}" "root@${SSH_HOST}" \
-        "journalctl -u bloodhound --no-pager -n 10" 2>/dev/null || true
+        "systemctl status bloodhound --no-pager; journalctl -u bloodhound -n 200 --no-pager" || true
     exit 1
 fi

@@ -19,6 +19,21 @@ def python_command(script: str, *, sudo: bool = False) -> str:
     return f"{prefix}python3 -c {shlex.quote(script)}"
 
 
+def assert_service_command_succeeded(ssh_cmd, result):
+    """Include systemd state and recent journal when a service command fails."""
+    if result.returncode != 0:
+        status = ssh_cmd("systemctl status bloodhound --no-pager", user="root")
+        journal = ssh_cmd(
+            "journalctl -u bloodhound -n 200 --no-pager", user="root"
+        )
+        raise AssertionError(
+            f"Service command failed ({result.returncode}):\n{result.stdout}\n{result.stderr}\n"
+            f"systemctl status bloodhound:\n{status.stdout}\n{status.stderr}\n"
+            f"journalctl -u bloodhound -n 200 --no-pager:\n"
+            f"{journal.stdout}\n{journal.stderr}"
+        )
+
+
 def get_schema():
     global _schema
     if _schema is None:

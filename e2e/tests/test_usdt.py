@@ -55,7 +55,7 @@ def _assert_collector_attached(ssh_cmd, collector_id):
 
 
 @pytest.fixture
-def replace_usdt_target(ssh_cmd, fresh_bloodhound_events):
+def replace_usdt_target(ssh_cmd, fresh_bloodhound_events, start_bloodhound):
     """Temporarily replace the fixed collector target and recover the VM.
 
     The daemon is stopped before its file output is recreated, so the fresh
@@ -74,12 +74,12 @@ def replace_usdt_target(ssh_cmd, fresh_bloodhound_events):
             "systemctl stop bloodhound; "
             "install -m 0644 -o root -g root /dev/null /var/log/bloodhound.ndjson; "
             "cp \"$target\" \"$backup\"; "
-            f'if test {replacement} != "$target"; then cp {replacement} "$target"; fi; '
-            "systemctl start bloodhound",
+            f'if test {replacement} != "$target"; then cp {replacement} "$target"; fi',
             user="root",
         )
         try:
             assert prepare.returncode == 0, prepare.stderr
+            start_bloodhound()
             yield fresh_bloodhound_events
         finally:
             restore = ssh_cmd(
@@ -88,12 +88,11 @@ def replace_usdt_target(ssh_cmd, fresh_bloodhound_events):
                 "systemctl stop bloodhound || true; "
                 "if test -e \"$backup\"; then mv \"$backup\" \"$target\"; fi; "
                 "install -m 0644 -o root -g root /dev/null /var/log/bloodhound.ndjson; "
-                "systemctl start bloodhound; "
-                "systemctl is-active --quiet bloodhound; "
                 "test ! -e \"$backup\"",
                 user="root",
             )
             assert restore.returncode == 0, restore.stderr
+            start_bloodhound()
 
     return replace
 
