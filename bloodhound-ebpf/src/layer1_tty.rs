@@ -1,47 +1,21 @@
 use aya_ebpf::{
-    helpers::{
-        bpf_get_current_pid_tgid, bpf_probe_read_kernel, bpf_probe_read_kernel_buf,
-        bpf_probe_read_user_buf,
-    },
-    macros::{kprobe, kretprobe, map},
-    maps::HashMap,
+    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_kernel, bpf_probe_read_kernel_buf},
+    macros::{kprobe, kretprobe},
     programs::{ProbeContext, RetProbeContext},
 };
 use bloodhound_common::*;
 
 use crate::filter::{get_task_info, should_trace};
-use crate::helpers::emit_event;
-use crate::maps::{ASSEMBLY_BUF, SCRATCH_BUF};
+use crate::helpers::{bpf_memcpy, emit_event};
+use crate::maps::{
+    tty_cleanup, tty_failure, tty_interrupt, tty_save, TtyReadEntry, ASSEMBLY_BUF, SCRATCH_BUF,
+    TTY_READ_ENTRY_MAP,
+};
 use core::ffi::c_void;
 
 // Stable Linux TTY class values, not kernel layout offsets.
 const TTY_DRIVER_TYPE_PTY: i16 = 4;
 const PTY_TYPE_SLAVE: i16 = 2;
-
-// ── kprobe → kretprobe correlation map ───────────────────────────────────────
-
-/// Per-task scratch for `n_tty_read` kprobe → kretprobe handoff.
-///
-/// At kprobe entry, the userspace destination buffer has not been
-/// populated yet. We stash `(buf_ptr, count)` keyed by `pid_tgid`,
-/// then look it up at kretprobe to read the actually-written bytes
-/// (clamped by the return value).
-///
-/// Entries are removed on the kretprobe path; in the rare case the
-/// kretprobe is not invoked (e.g., task exit during read), the entry
-/// is overwritten on the next read by the same task. The 10240-entry
-/// capacity (= `SYSCALL_ENTRY_MAP_SIZE`) is sufficient for any
-/// realistic concurrent-task count.
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct TtyReadEntry {
-    buf_ptr: u64,
-    count: u64,
-}
-
-#[map]
-static TTY_READ_ENTRY_MAP: HashMap<u64, TtyReadEntry> =
-    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
 
 // ── Pseudo-terminal device filter ────────────────────────────────────────────
 
@@ -109,7 +83,10 @@ unsafe fn is_pts_slave(tty: *const c_void) -> bool {
 pub fn tty_write_probe(ctx: ProbeContext) -> u32 {
     match unsafe { try_tty_write(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { tty_failure(SYSCALL_ENTRY_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
@@ -128,7 +105,7 @@ unsafe fn try_tty_write(ctx: &ProbeContext) -> Result<u32, i64> {
     let buf_ptr: *const u8 = ctx.arg(1).ok_or(-1i64)?;
     let count: usize = ctx.arg(2).ok_or(-1i64)?;
 
-    emit_tty_event(EventKind::TtyWrite as u8, buf_ptr, count, false)
+    emit_tty_event(EventKind::TtyWrite as u8, buf_ptr, count)
 }
 
 // ── kprobe + kretprobe:n_tty_read ────────────────────────────────────────────
@@ -180,13 +157,20 @@ unsafe fn try_tty_write(ctx: &ProbeContext) -> Result<u32, i64> {
 pub fn tty_read_probe(ctx: ProbeContext) -> u32 {
     match unsafe { try_tty_read_entry(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { tty_failure(SYSCALL_ENTRY_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
 /// kprobe entry handler: filter + stash buffer pointer for the matching
 /// kretprobe to consume.
 unsafe fn try_tty_read_entry(ctx: &ProbeContext) -> Result<u32, i64> {
+    let pid_tgid = bpf_get_current_pid_tgid();
+    // A missed kretprobe must be accounted before a later read replaces it,
+    // even if that later read is outside the current filter.
+    tty_interrupt(pid_tgid);
     if !should_trace() {
         return Ok(0);
     }
@@ -200,128 +184,103 @@ unsafe fn try_tty_read_entry(ctx: &ProbeContext) -> Result<u32, i64> {
     let buf_ptr: *const u8 = ctx.arg(2).ok_or(-1i64)?;
     let count: usize = ctx.arg(3).ok_or(-1i64)?;
 
-    let pid_tgid = bpf_get_current_pid_tgid();
     let entry = TtyReadEntry {
         buf_ptr: buf_ptr as u64,
         count: count as u64,
     };
-    let _ = TTY_READ_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    tty_save(TTY_READ_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
-/// kretprobe on `n_tty_read`. Reads the bytes the kernel wrote into the
-/// userspace buffer (clamped by the return value) and emits a `TtyRead`
+/// kretprobe on `n_tty_read`. Reads the bytes written into the kernel
+/// buffer (clamped by the return value) and emits a `TtyRead`
 /// event.
 #[kretprobe]
 pub fn tty_read_ret_probe(ctx: RetProbeContext) -> u32 {
     match unsafe { try_tty_read_ret(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { tty_failure(SYSCALL_EXIT_CAPTURE_FAILED) };
+            0
+        }
     }
 }
 
 unsafe fn try_tty_read_ret(ctx: &RetProbeContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
 
-    // Pull and immediately remove the stashed entry. If absent, the entry
-    // probe filtered this call (wrong auid or non-pts device) and there's
-    // nothing to do.
+    // Absence can mean filtering or an invocation in flight at attach.
+    // Neither proves loss; entry-side failures have already been counted.
     let entry = match TTY_READ_ENTRY_MAP.get(&pid_tgid) {
         Some(e) => *e,
         None => return Ok(0),
     };
-    let _ = TTY_READ_ENTRY_MAP.remove(&pid_tgid);
+    tty_cleanup(TTY_READ_ENTRY_MAP.remove(&pid_tgid));
 
     // n_tty_read returns ssize_t: bytes read on success, negative errno
     // on failure. Drop on failure / EOF.
-    let ret: i64 = ctx.ret().unwrap_or(0);
+    let ret: i64 = ctx.ret().ok_or(-1i64)?;
     if ret <= 0 {
-        return Ok(0);
-    }
-
-    let buf_ptr = entry.buf_ptr as *const u8;
-    if buf_ptr.is_null() {
         return Ok(0);
     }
 
     // Clamp the actually-read length by the originally-requested count.
     let bytes_read = (ret as usize).min(entry.count as usize);
-    emit_tty_event(EventKind::TtyRead as u8, buf_ptr, bytes_read, false)
+    emit_tty_event(
+        EventKind::TtyRead as u8,
+        entry.buf_ptr as *const u8,
+        bytes_read,
+    )
 }
 
 // ── Shared event assembly ────────────────────────────────────────────────────
 
-/// Assemble and emit a TTY event. Shared by write and read paths.
-///
-/// # Kernel vs User space buffer
-///
-/// Both `pty_write` and `n_tty_read` (kernel 6.8+) receive **kernel-space**
-/// pointers — the TTY layer allocates internal buffers for data passing,
-/// and the VFS does the `copy_to_user` / `copy_from_user` bookkeeping
-/// outside of these functions. Picking the wrong helper silently fails:
-/// `bpf_probe_read_user_buf` returns `-EFAULT` on kernel pointers, and
-/// vice versa. Because we ignore the error and skip the event, the
-/// failure is invisible — kprobes fire, `should_trace()` passes, but no
-/// events ever appear in the output.
-///
-/// The `from_user` flag selects the helper, kept as a parameter to make
-/// the choice explicit at each call site and guard against future hook
-/// additions where a genuinely userspace buffer appears:
-///   - `false` → `bpf_probe_read_kernel_buf` (used by both current paths)
-///   - `true`  → `bpf_probe_read_user_buf`   (reserved for future hooks)
+/// Assemble a binary TTY capture, including an empty record on read failure.
+/// Both current hooks receive kernel buffers; VFS copies to/from userspace
+/// outside these functions. `read_user_str` is inappropriate here: it uses
+/// user memory and NUL termination, whereas TTY bytes may contain NULs.
 #[inline(always)]
-unsafe fn emit_tty_event(
-    kind: u8,
-    buf_ptr: *const u8,
-    count: usize,
-    from_user: bool,
-) -> Result<u32, i64> {
-    // Clamp to MAX_TTY_DATA - 1 to leave room for null terminator.
-    // BPF verifier constraint: using MAX_TTY_DATA (not -1) would make the
-    // buffer access exactly equal to map value_size, which the verifier
-    // rejects for bpf_probe_read helpers.
-    let data_len = count.min(MAX_TTY_DATA - 1);
-    if data_len == 0 {
+unsafe fn emit_tty_event(kind: u8, buf_ptr: *const u8, count: usize) -> Result<u32, i64> {
+    if count == 0 && !buf_ptr.is_null() {
         return Ok(0);
     }
-
-    // Read TTY data into scratch buffer 2
-    let scratch = match SCRATCH_BUF.get_ptr_mut(2) {
-        Some(s) => s,
-        None => return Ok(0),
-    };
-
-    // BPF verifier constraint: slice upper bound must be < map value_size.
-    // Using MAX_PATH_SIZE (4096) would be off + size == value_size, which
-    // the verifier may reject depending on context. Using -1 ensures
-    // off + size < value_size.
-    let dest = &mut (&mut (*scratch).buf)[..data_len.min(MAX_PATH_SIZE - 1)];
-    let read_result = if from_user {
-        bpf_probe_read_user_buf(buf_ptr, dest)
+    // Clamp, then mask so LLVM/verifier retain the strict sub-buffer bound.
+    // This is a binary prefix bound, not space reserved for a terminator.
+    const {
+        assert!(MAX_TTY_DATA.is_power_of_two() && MAX_TTY_DATA <= MAX_PATH_SIZE);
+        assert!(EventHeader::SIZE + TtyPayload::SIZE + MAX_TTY_DATA - 1 <= crate::maps::ASSEMBLY_BUF_SIZE);
+    }
+    let mut data_len = count.min(MAX_TTY_DATA - 1) & (MAX_TTY_DATA - 1);
+    let mut status = if count > MAX_TTY_DATA - 1 {
+        CaptureStatus::Truncated
     } else {
-        bpf_probe_read_kernel_buf(buf_ptr, dest)
+        CaptureStatus::Complete
     };
-    if read_result.is_err() {
-        return Ok(0);
+    let scratch = SCRATCH_BUF.get_ptr_mut(2).ok_or(-1i64)?;
+    let asm = ASSEMBLY_BUF.get_ptr_mut(0).ok_or(-1i64)?;
+    let out = &mut (*asm).buf;
+    let data_out = out.as_mut_ptr().add(EventHeader::SIZE + TtyPayload::SIZE);
+    let dest = &mut (&mut (*scratch).buf)[..data_len];
+    if buf_ptr.is_null() || bpf_probe_read_kernel_buf(buf_ptr, dest).is_err() {
+        // Never expose partial or stale scratch bytes after a source read fails.
+        data_len = 0;
+        status = CaptureStatus::ReadError;
+    } else if !bpf_memcpy(data_out, (*scratch).buf.as_ptr(), data_len as u32) {
+        // An internal assembly failure prevents emission, like path capture.
+        return Err(-1);
     }
 
-    let header = get_task_info(kind);
+    let mut header = get_task_info(kind);
+    header.capture = HeaderCapture {
+        version: 1,
+        primary: status as u8,
+        secondary: 0,
+    };
     let payload = TtyPayload {
         data_len: data_len as u16,
         _pad: [0; 2],
     };
-
-    // Assemble event in assembly buffer: header + payload + data
     let total_size = EventHeader::SIZE + TtyPayload::SIZE + data_len;
-    let asm = match ASSEMBLY_BUF.get_ptr_mut(0) {
-        Some(s) => s,
-        None => return Ok(0),
-    };
-    let out = &mut (*asm).buf;
-    if total_size > out.len() {
-        return Ok(0);
-    }
-
     core::ptr::copy_nonoverlapping(
         &header as *const EventHeader as *const u8,
         out.as_mut_ptr(),
@@ -332,16 +291,7 @@ unsafe fn emit_tty_event(
         out.as_mut_ptr().add(EventHeader::SIZE),
         TtyPayload::SIZE,
     );
-    // NOTE: This copy_nonoverlapping is safe for the BPF verifier because
-    // data_len ≤ MAX_TTY_DATA - 1 = 255, which is small enough that LLVM
-    // unrolling to ~255 load/store pairs doesn't hit the 1M instruction limit.
-    // For larger variable-length copies, use bpf_memcpy (helpers.rs) instead.
-    core::ptr::copy_nonoverlapping(
-        (*scratch).buf.as_ptr(),
-        out.as_mut_ptr().add(EventHeader::SIZE + TtyPayload::SIZE),
-        data_len,
-    );
-
+    // emit_event exclusively owns ring-loss accounting, even for read_error.
     emit_event(&out[..total_size]);
     Ok(0)
 }

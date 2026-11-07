@@ -1,4 +1,4 @@
-//! Map-operation outcomes shared by Tier-1 raw and Tier-2 rich/path capture and host tests.
+//! Map-operation outcomes shared by raw syscall, rich/path, and TTY capture and host tests.
 
 use crate::{SYSCALL_ENTRY_CLEANUP_FAILED, SYSCALL_ENTRY_SAVE_FAILED};
 

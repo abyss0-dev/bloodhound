@@ -6,7 +6,12 @@ tty_write and tty_read kprobes.
 import base64
 import pexpect
 
-from helpers import assert_event_exists, filter_events, validate_all_events
+from helpers import (
+    assert_event_exists,
+    filter_events,
+    python_command,
+    validate_all_events,
+)
 
 
 def _concat_tty_data(events):
@@ -161,11 +166,10 @@ class TestMaxTtyDataInvariant:
       invoked with `count > 2048` unless the `TTY_NO_WRITE_SPLIT` tty
       flag is set (it is not for PTY slaves).
 
-    Because userspace cannot induce a single kernel call with
-    `count > MAX_TTY_DATA`, no workload can prove the clamp path
-    activates. This test therefore asserts the *observable* invariant
-    the criterion actually cares about — no emitted event's decoded
-    `args.data` exceeds the clamp — across induced traffic. If a
+    Ordinary N_TTY traffic therefore does not activate the clamp. This
+    test checks the observable size invariant across ordinary traffic;
+    TestTtyCaptureStatus uses N_HDLC to exercise an unsplit oversized
+    driver write through its TTY_NO_WRITE_SPLIT setting. If a
     future kernel change removes the 2KiB chunk and delivers
     `pty_write` with `count > 4095`, the clamp will catch it and this
     test continues to pass; if the clamp itself regresses (e.g.,
@@ -224,6 +228,120 @@ class TestMaxTtyDataInvariant:
             f"clamp at `layer1_tty.rs` has regressed. Oversized events: "
             f"{over}"
         )
+
+class TestTtyCaptureStatus:
+    """Capture status describes bytes retained, not whether the I/O succeeded."""
+
+    def test_large_pty_output_is_truncated(
+        self, ssh_cmd, bloodhound_events, wait_for_matching_events
+    ):
+        marker = b"tty_capture_large_79a1_"
+        payload = marker + b"X" * (6000 - len(marker))
+        # N_TTY splits even raw writes into 2048-byte chunks. N_HDLC sets
+        # TTY_NO_WRITE_SPLIT, forwarding this frame in one driver call.
+        loaded = ssh_cmd("sudo modprobe n_hdlc maxframe=8192")
+        assert loaded.returncode == 0, loaded.stderr
+        script = f"""
+import fcntl, os, pty, select, struct, termios, tty
+m, s = pty.openpty()
+tty.setraw(m)
+fcntl.ioctl(s, termios.TIOCSETD, struct.pack('i', 13))
+payload = {payload!r}
+assert os.write(s, payload) == len(payload)
+received = b""
+while len(received) < len(payload):
+    ready, _, _ = select.select([m], [], [], 5)
+    assert ready, ('PTY drain timed out', len(received))
+    chunk = os.read(m, len(payload) - len(received))
+    assert chunk, 'Unexpected PTY EOF'
+    received += chunk
+assert received == payload
+os.close(s)
+os.close(m)
+print(os.getpid())
+"""
+        result = ssh_cmd(python_command(script))
+        assert result.returncode == 0, (result.stdout, result.stderr)
+        pid = int(result.stdout.strip())
+
+        def matching(events):
+            return [
+                ev for ev in filter_events(
+                    events, event_type="TTY", name="tty_write", pid=pid
+                )
+                if base64.b64decode(ev.get("args", {}).get("data", "")).startswith(marker)
+            ]
+
+        events = wait_for_matching_events(
+            bloodhound_events, matching, "large PTY output capture"
+        )
+        captures = matching(events)
+        assert captures, "No capture of the large PTY output"
+        args = captures[0]["args"]
+        assert args["tty_capture_version"] == 1
+        assert args["data_status"] == "truncated", args
+        assert base64.b64decode(args["data"]) == payload[:4095]
+
+    def test_normal_pty_io_is_complete_without_collection_diagnostic(
+        self, ssh_cmd, foreground_bloodhound, wait_for_matching_events,
+    ):
+        output = b"tty_capture_complete_output_38af"
+        typed = b"tty_capture_complete_input_38af"
+        script = f"""
+import os, pty, tty
+m, s = pty.openpty()
+tty.setraw(s)
+output, typed = {output!r}, {typed!r}
+assert os.write(s, output) == len(output)
+assert os.read(m, len(output)) == output
+assert os.write(m, typed) == len(typed)
+assert os.read(s, len(typed)) == typed
+os.close(s)
+os.close(m)
+print(os.getpid())
+"""
+        with foreground_bloodhound() as daemon:
+            wait_for_matching_events(
+                daemon.events,
+                lambda events: filter_events(events, event_type="META", name="bloodhound_ready"),
+                "foreground daemon readiness",
+            )
+            result = ssh_cmd(python_command(script))
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            pid = int(result.stdout.strip())
+
+            def observed_both(events):
+                tty_events = filter_events(events, event_type="TTY", pid=pid)
+                return all(
+                    any(
+                        ev["event"]["name"] == name
+                        and base64.b64decode(ev.get("args", {}).get("data", "")) == data
+                        for ev in tty_events
+                    )
+                    for name, data in [("tty_write", output), ("tty_read", typed)]
+                )
+
+            wait_for_matching_events(
+                daemon.events, observed_both, "complete PTY input and output"
+            )
+            # Shutdown flushes counters: absence before the flush is not proof
+            # that the normal workload produced no collection-loss diagnostic.
+            daemon.signal()
+            assert daemon.wait() == 0, daemon.stderr()
+            events = daemon.events()
+            for name, data in [("tty_write", output), ("tty_read", typed)]:
+                matches = [
+                    ev for ev in filter_events(events, event_type="TTY", name=name, pid=pid)
+                    if base64.b64decode(ev.get("args", {}).get("data", "")) == data
+                ]
+                assert matches, f"Missing {name} capture of {data!r}"
+                for ev in matches:
+                    assert ev["args"]["tty_capture_version"] == 1, ev
+                    assert ev["args"]["data_status"] == "complete", ev
+            assert not filter_events(
+                events, event_type="DIAGNOSTIC", name="tty.collection"
+            ), "Normal PTY I/O emitted a tty.collection diagnostic"
+
 
 class TestPtsFilter:
     """Test the pts/* device filter introduced by issue #12.

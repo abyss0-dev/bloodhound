@@ -30,6 +30,7 @@ RUN printf '%s\n' \
     apt-get install -y --allow-downgrades \
         linux-image-6.8.0-49-generic \
         linux-modules-6.8.0-49-generic \
+        linux-modules-extra-6.8.0-49-generic \
         linux-tools-6.8.0-49-generic && \
     depmod -a 6.8.0-49-generic && \
     rm -f /etc/apt/sources.list.d/jammy-hwe.list && \

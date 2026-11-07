@@ -104,6 +104,7 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
     // its pathname before filtering or thread-group exit checks, so PID
     // reuse cannot inherit the pending invocation and the map stays bounded.
     let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
+    crate::maps::tty_interrupt(tid);
     if crate::maps::OPENAT_ENTRY_MAP.get(&tid).is_some() {
         crate::maps::openat_failure(bloodhound_common::OPENAT_INVOCATION_INTERRUPTED);
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use aya::{
     maps::Array,
-    programs::{trace_point::TracePointLinkId, KProbe, Lsm, RawTracePoint, TracePoint},
+    programs::{kprobe::KProbeLinkId, trace_point::TracePointLinkId, KProbe, Lsm, RawTracePoint, TracePoint},
     Btf, EbpfLoader,
 };
 use log::{info, warn};
@@ -191,15 +191,28 @@ pub fn load_and_attach(
     //   Similarly, `tty_read` → `n_tty_read` for the read path.
     let ok = try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write", &mut report);
     report.record_tty_attach("tty.write", ok, offsets.tty.as_ref());
-    let ok = try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read", &mut report);
-    report.record_tty_attach("tty.read", ok, offsets.tty.as_ref());
-    // kretprobe on n_tty_read: captures the bytes that were actually
-    // written into the userspace buffer during the call. Without this
-    // attach, only metadata (no `data` field) is emitted for tty_read.
-    // Aya's KProbe wrapper handles both kprobe and kretprobe via the
-    // `kind` discriminator set by the `#[kretprobe]` macro.
-    let ok = try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read", &mut report);
-    report.record_tty_attach("tty.read_ret", ok, offsets.tty.as_ref());
+    // A kretprobe registers returns only for calls entering after attachment.
+    // Install it first so startup cannot create entries with no possible return;
+    // if it fails, leave entry capture disabled rather than accumulate orphans.
+    // Why leave the default: Aya 0.13.1 leaves maxactive at zero; Linux 6.8
+    // register_kretprobe defaults to max(10, 2 * num_possible_cpus()) instances.
+    // Blocked n_tty_read calls consume instances: excess concurrent reads miss
+    // returns, and their saved entries later count as invocation_interrupted.
+    // Aya's KProbe API exposes no maxactive override; do not imply full coverage.
+    if let Err(e) = attach_tty_read_pair(
+        &mut bpf,
+        &mut report,
+        offsets.tty.as_ref(),
+        |bpf, report| attach_kprobe(bpf, "tty_read_ret_probe", "n_tty_read", report),
+        |bpf, report| attach_kprobe(bpf, "tty_read_probe", "n_tty_read", report).map(|_| ()),
+        |bpf, link| {
+            let program: &mut KProbe = bpf.program_mut("tty_read_ret_probe").unwrap().try_into()?;
+            program.detach(link)?;
+            Ok(())
+        },
+    ) {
+        warn!("Failed to attach TTY read pair: {e:#}");
+    }
 
     if args.enable_lsm {
         info!("Attaching opt-in LSM hooks...");
@@ -329,7 +342,7 @@ fn attach_pair<B, L>(
     let exit_link = attach_exit(backend, report)?;
     if let Err(error) = attach_enter(backend, report) {
         detach_exit(backend, exit_link)
-            .context("rolling back syscall exit hook after enter attachment failed")?;
+            .context("rolling back exit hook after enter attachment failed")?;
         report.probes -= 1;
         return Err(error);
     }
@@ -392,24 +405,45 @@ fn try_attach_syscall_pair(
     complete
 }
 
+fn attach_tty_read_pair<B, L>(
+    backend: &mut B,
+    report: &mut AttachReport,
+    tty_offsets: Option<&[u32; 3]>,
+    attach_exit: impl FnOnce(&mut B, &mut AttachReport) -> Result<L>,
+    attach_enter: impl FnOnce(&mut B, &mut AttachReport) -> Result<()>,
+    detach_exit: impl FnOnce(&mut B, L) -> Result<()>,
+) -> Result<()> {
+    let result = attach_pair(backend, report, attach_exit, attach_enter, detach_exit);
+    for key in ["tty.read_ret", "tty.read"] {
+        report.record_tty_attach(key, result.is_ok(), tty_offsets);
+    }
+    result
+}
+
+fn attach_kprobe(
+    bpf: &mut aya::Ebpf,
+    prog_name: &str,
+    fn_name: &str,
+    report: &mut AttachReport,
+) -> Result<KProbeLinkId> {
+    let program: &mut KProbe = bpf
+        .program_mut(prog_name)
+        .context(format!("program {} not found", prog_name))?
+        .try_into()?;
+    program.load()?;
+    let link = program.attach(fn_name, 0)?;
+    report.probes += 1;
+    Ok(link)
+}
+
 fn try_attach_kprobe(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
     fn_name: &str,
     report: &mut AttachReport,
 ) -> bool {
-    let result: Result<()> = (|| {
-        let program: &mut KProbe = bpf
-            .program_mut(prog_name)
-            .context(format!("program {} not found", prog_name))?
-            .try_into()?;
-        program.load()?;
-        program.attach(fn_name, 0)?;
-        report.probes += 1;
-        Ok(())
-    })();
-    match result {
-        Ok(()) => {
+    match attach_kprobe(bpf, prog_name, fn_name, report) {
+        Ok(_) => {
             info!("  Attached kprobe: {}", fn_name);
             true
         }
@@ -476,6 +510,37 @@ mod tests {
                 syscall.dedup != Dedup::NoDedup
             );
         }
+    }
+
+    #[test]
+    fn tty_entry_failure_rolls_back_return_and_both_readiness_keys() {
+        let mut report = AttachReport { probes: 2, ..AttachReport::default() };
+        let mut return_attached = false;
+        let result = attach_tty_read_pair(
+            &mut return_attached,
+            &mut report,
+            Some(&[0; 3]),
+            |attached, report| {
+                *attached = true;
+                report.probes += 1;
+                Ok(42)
+            },
+            |attached, _| {
+                assert!(*attached, "return must attach before entry");
+                anyhow::bail!("injected entry attach failure")
+            },
+            |attached, link| {
+                assert_eq!(link, 42);
+                assert!(*attached);
+                *attached = false;
+                Ok(())
+            },
+        );
+        assert!(result.unwrap_err().to_string().contains("injected entry"));
+        assert!(!return_attached);
+        assert_eq!(report.probes, 2);
+        assert_eq!(report.keys.get("tty.read_ret"), Some(&false));
+        assert_eq!(report.keys.get("tty.read"), Some(&false));
     }
 
     #[test]

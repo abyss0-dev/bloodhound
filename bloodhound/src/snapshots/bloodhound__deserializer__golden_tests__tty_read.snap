@@ -4,7 +4,9 @@ expression: to_json(& event)
 ---
 {
   "args": {
-    "data": "QkhfVFRZX1JFQURfR09MREVOCg=="
+    "data": "QkhfVFRZX1JFQURfR09MREVOCg==",
+    "data_status": "unknown",
+    "tty_capture_version": 0
   },
   "event": {
     "layer": "intent",

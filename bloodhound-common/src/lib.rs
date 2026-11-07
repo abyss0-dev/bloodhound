@@ -50,6 +50,12 @@ pub const SYSCALL_FAILURE_COUNT: u32 = SYSCALL_FAILURE_REASONS.len() as u32;
 pub const RAW_SYSCALL_FAILURE_REASONS: [&str; 5] = SYSCALL_FAILURE_REASONS;
 pub const RAW_SYSCALL_FAILURE_COUNT: u32 = RAW_SYSCALL_FAILURE_REASONS.len() as u32;
 
+/// TTY collection loss uses the shared `SYSCALL_*` indices and map-outcome
+/// policies, but owns a separate `TTY_FAILURES` scope. Payload read errors
+/// are emitted as capture status, not counted as lost operations.
+pub const TTY_FAILURE_REASONS: [&str; 5] = SYSCALL_FAILURE_REASONS;
+pub const TTY_FAILURE_COUNT: u32 = TTY_FAILURE_REASONS.len() as u32;
+
 pub const OPENAT_ENTRY_CAPTURE_FAILED: u32 = 0;
 pub const OPENAT_ENTRY_SAVE_FAILED: u32 = 1;
 pub const OPENAT_EXIT_CAPTURE_FAILED: u32 = 2;
@@ -88,7 +94,9 @@ impl TryFrom<u8> for CaptureStatus {
 }
 
 /// Version 1 uses primary/secondary for exec argv/filename or path1/path2 status.
-/// Single-path events use primary and leave secondary zero. Version 0 is unknown.
+/// Single-path and TTY events use primary and leave secondary zero.
+/// TTY primary describes binary data capture, not text encoding.
+/// Version 0 is unknown.
 /// Raw bytes allow legacy versions and untrusted wire values to be validated
 /// before conversion to `CaptureStatus`.
 #[repr(C)]
