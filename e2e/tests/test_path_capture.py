@@ -99,6 +99,14 @@ print(json.dumps(dict(pid=os.getpid(), ret=ret)))
     assert args["path_capture_version"] == 1
     keys = ("path1_status", "path2_status") if two else ("path_status",)
     assert tuple(args[key] for key in keys) == expected, matches
+    path_keys = ("oldpath", "newpath") if two else ("filename",)
+    for key, source in zip(path_keys, (first, second)):
+        if source == "long":
+            assert args[key] == "/" + "x" * 4094, matches
+        elif source == "normal":
+            assert args[key] == "/tmp", matches
+        else:
+            assert args[key] == "", matches
 
 
 def test_single_path_across_cpu_migration(ssh_config, ssh_cmd, bloodhound_events,
