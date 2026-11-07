@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/ndjson_tests.rs
+expression: encoded
+---
+{"header":{"timestamp":1500000000,"auid":1000,"sessionid":42,"pid":1234,"ppid":1,"comm":"test","process_ref":{"tgid":1234,"start_boottime_ns":99},"tid":1235,"ns":{"mnt":{"status":"complete","inode":4026531841},"net":{"status":"complete","inode":4026531840},"uts":{"status":"complete","inode":4026531838},"ipc":{"status":"complete","inode":4026531839},"cgroup":{"status":"unsupported","inode":null},"user":{"status":"complete","inode":4026531837},"pid":{"status":"unavailable","inode":null}}},"event":{"type":"TRACEPOINT","name":"pread64","layer":"behavior"},"args":{"fd":7,"fd_type":"regular","offset":1024,"size":42},"return_code":21}

@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/capture_health.rs
+expression: "serde_json::to_string(&event).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"DIAGNOSTIC","name":"tty.collection","layer":"behavior"},"args":{"failure_count_delta":null,"failure_count_total":null,"reason_code":"counter_read_failed","run_prefix_incomplete":true,"sampling":"userspace_poll","scope":"tty"}}

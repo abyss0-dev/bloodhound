@@ -218,7 +218,7 @@ pub fn selection_failure_diagnostic(path: &Path, error: &anyhow::Error) -> Behav
     } else {
         ReasonCode::AbiIncompatible
     };
-    diagnostic(&configured_id, reason, None)
+    diagnostic(&configured_id, reason, None, crate::clock::monotonic_now_ns())
 }
 
 fn configured_collector_id(text: &str) -> Option<String> {
@@ -324,7 +324,7 @@ impl ReasonCode {
     }
 }
 
-pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>) -> BehaviorEvent {
+pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>, timestamp: u64) -> BehaviorEvent {
     let mut args = serde_json::Map::new();
     args.insert("collector_id".into(), Value::String(collector_id.into()));
     args.insert("reason_code".into(), Value::String(reason.as_str().into()));
@@ -334,7 +334,7 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
     }
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: crate::clock::monotonic_now_ns(),
+            timestamp,
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -465,6 +465,7 @@ pub fn attach_selected(
             &selection.collector_id,
             ReasonCode::Disabled,
             None,
+            crate::clock::monotonic_now_ns(),
         )];
     }
     report.keys.insert(format!("usdt.{}", selection.collector_id), false);
@@ -473,6 +474,7 @@ pub fn attach_selected(
             &selection.collector_id,
             ReasonCode::UnknownCollector,
             None,
+            crate::clock::monotonic_now_ns(),
         )];
     };
     let target = match verify_target(metadata) {
@@ -482,6 +484,7 @@ pub fn attach_selected(
                 metadata.id,
                 reason,
                 Some(json!({"target_path": metadata.target_path})),
+                crate::clock::monotonic_now_ns(),
             )]
         }
     };
@@ -559,6 +562,7 @@ pub fn attach_selected(
                 metadata.id,
                 ReasonCode::AttachFailed,
                 Some(json!({"target_path": metadata.target_path})),
+                crate::clock::monotonic_now_ns(),
             )]
         }
     }
@@ -1290,7 +1294,11 @@ mod tests {
 
     #[test]
     fn diagnostic_has_the_canonical_shape() {
-        let event = diagnostic(TRAINING_SHELL_V3_ID, ReasonCode::ProbeNotFound, None);
+        let event = diagnostic(TRAINING_SHELL_V3_ID, ReasonCode::ProbeNotFound, None, 1_500_000_000);
+        insta::assert_snapshot!("usdt_collector_bytes", serde_json::to_string(&event).unwrap());
+        let contextual = diagnostic(TRAINING_SHELL_V3_ID, ReasonCode::AttachFailed,
+            Some(json!({"attach_point_id": 1})), 1_500_000_000);
+        insta::assert_snapshot!("usdt_collector_context_bytes", serde_json::to_string(&contextual).unwrap());
         assert_eq!(event.event.event_type, "DIAGNOSTIC");
         assert_eq!(event.event.name, "usdt.collector");
         assert_eq!(event.args.unwrap()["reason_code"], "probe_not_found");

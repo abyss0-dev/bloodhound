@@ -1390,6 +1390,10 @@ mod tests {
         buf
     }
 
+    mod ndjson_tests {
+        include!("ndjson_tests.rs");
+    }
+
     // ── Utility function tests (preserved from original) ────────────────
 
     #[test]
@@ -2550,7 +2554,7 @@ mod tests {
 mod golden_tests {
     use super::*;
     use base64::Engine;
-    use insta::assert_json_snapshot;
+    use insta::{assert_json_snapshot, assert_snapshot};
 
     fn to_json(event: &BehaviorEvent) -> serde_json::Value {
         serde_json::to_value(event).unwrap()
@@ -2569,6 +2573,7 @@ mod golden_tests {
                 let raw = captured(include_str!($fixture));
                 let event = deserialize(&raw).expect("QEMU capture must deserialize");
                 assert_json_snapshot!($snapshot_name, to_json(&event));
+                assert_snapshot!(concat!($snapshot_name, "_bytes"), serde_json::to_string(&event).unwrap());
             }
         };
     }

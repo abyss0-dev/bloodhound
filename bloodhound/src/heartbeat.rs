@@ -83,6 +83,7 @@ pub async fn run_heartbeat(
             now_drops.saturating_sub(cursor.drops),
             now_drops,
             now_emitted.saturating_sub(cursor.emitted),
+            crate::clock::monotonic_now_ns(),
         );
         tokio::select! {
             biased;
@@ -99,7 +100,7 @@ pub async fn run_heartbeat(
 ///
 /// Kept separate from the emission loop so unit tests can exercise
 /// the shape of the event without spinning up tokio.
-pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -> BehaviorEvent {
+pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64, timestamp: u64) -> BehaviorEvent {
     let mut args = serde_json::Map::new();
     args.insert("drop_count_delta".into(), json!(drops_delta));
     args.insert("drop_count_total".into(), json!(drops_total));
@@ -114,7 +115,7 @@ pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -
 
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: crate::clock::monotonic_now_ns(),
+            timestamp,
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -139,11 +140,19 @@ pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64) -
 mod tests {
     use super::*;
 
+    #[test]
+    fn heartbeat_bytes() {
+        for (name, delta, total) in [("clean", 0, 0), ("gap", 3, 10), ("incomplete_prefix", 0, 10)] {
+            insta::assert_snapshot!(format!("heartbeat_{name}_bytes"),
+                serde_json::to_string(&build_heartbeat(delta, total, 100, 1_500_000_000)).unwrap());
+        }
+    }
+
     // ── event shape ──────────────────────────────────────────────────────
 
     #[test]
     fn heartbeat_has_expected_type_and_name() {
-        let ev = build_heartbeat(0, 0, 0);
+        let ev = build_heartbeat(0, 0, 0, 1);
         assert_eq!(ev.event.event_type, "HEARTBEAT");
         assert_eq!(ev.event.name, "heartbeat");
         assert_eq!(ev.event.layer, "behavior");
@@ -151,7 +160,7 @@ mod tests {
 
     #[test]
     fn heartbeat_header_sentinels_signal_not_applicable() {
-        let ev = build_heartbeat(0, 0, 0);
+        let ev = build_heartbeat(0, 0, 0, 1);
         assert_eq!(ev.header.auid, 0);
         assert_eq!(ev.header.sessionid, 0);
         assert_eq!(ev.header.pid, 0);
@@ -161,7 +170,7 @@ mod tests {
 
     #[test]
     fn zero_drops_omits_gap_flag() {
-        let ev = build_heartbeat(0, 5, 100);
+        let ev = build_heartbeat(0, 5, 100, 1);
         let args = ev.args.unwrap();
         assert_eq!(args["drop_count_delta"], 0);
         assert_eq!(args["drop_count_total"], 5);
@@ -171,7 +180,7 @@ mod tests {
 
     #[test]
     fn nonzero_drops_sets_gap_flag() {
-        let ev = build_heartbeat(3, 10, 100);
+        let ev = build_heartbeat(3, 10, 100, 1);
         let args = ev.args.unwrap();
         assert_eq!(args["drop_count_delta"], 3);
         assert_eq!(args["gap_detected"], true);
@@ -181,7 +190,7 @@ mod tests {
 
     #[test]
     fn clean_interval_does_not_repair_an_earlier_drop() {
-        let ev = build_heartbeat(0, 10, 100);
+        let ev = build_heartbeat(0, 10, 100, 1);
         let args = ev.args.unwrap();
         assert!(args.get("gap_detected").is_none());
         assert_eq!(args["reason_code"], "ring_buffer_overflow");
@@ -190,7 +199,7 @@ mod tests {
 
     #[test]
     fn new_process_run_starts_with_a_complete_prefix_and_reset_counter() {
-        let ev = build_heartbeat(0, 0, 0);
+        let ev = build_heartbeat(0, 0, 0, 1);
         let args = ev.args.unwrap();
         assert_eq!(args["drop_count_delta"], 0);
         assert_eq!(args["drop_count_total"], 0);
@@ -202,7 +211,7 @@ mod tests {
     async fn stop_interrupts_full_send_without_advancing_cursor() {
         let (tx, mut rx) = mpsc::channel(1);
         tx.send(SequencedInput::Synthesized(Box::new(build_heartbeat(
-            0, 0, 0,
+            0, 0, 0, 1,
         ))))
         .await
         .unwrap();

@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/sequencer.rs
+expression: "serde_json::to_string(&deserialize_rejection_diagnostic(3,\n1_500_000_000)).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"DIAGNOSTIC","name":"stream.health","layer":"behavior"},"args":{"reason_code":"deserialize_rejected","rejection_count_delta":1,"rejection_count_total":3,"run_prefix_incomplete":true}}

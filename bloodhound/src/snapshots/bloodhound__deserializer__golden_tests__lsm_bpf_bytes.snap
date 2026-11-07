@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/deserializer.rs
+expression: "serde_json :: to_string(& event).unwrap()"
+---
+{"header":{"timestamp":3726526176611,"auid":1000,"sessionid":2053,"pid":41663,"comm":"python3","process_ref":{"tgid":41663,"start_boottime_ns":3726489570035},"tid":41663,"ns":{"mnt":{"status":"complete","inode":4026531841},"net":{"status":"complete","inode":4026531840},"uts":{"status":"complete","inode":4026531838},"ipc":{"status":"complete","inode":4026531839},"cgroup":{"status":"complete","inode":4026531835},"user":{"status":"complete","inode":4026531837},"pid":{"status":"complete","inode":4026531836}}},"event":{"type":"LSM","name":"bpf","layer":"behavior"},"args":{"cmd":0},"return_code":0}
