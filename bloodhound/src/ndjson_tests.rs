@@ -185,8 +185,103 @@ fn remaining_syscall_and_lsm_bytes() {
     family!(ReadvWritevPayload { fd: 7, fd_type: 2, iov_truncated: 1, _pad: [0; 2], iov_count: 9, _pad2: [0; 4], requested_size: 42, return_code: 21 }; Readv, Writev);
     family!(MmapPayload { fd: 7, prot: 3, flags: 2, _pad: [0; 4], length: 4096, offset: 0, dev: 8 << 20, ino: 99, return_code: 8192 }; Mmap);
     family!(SendfileSplicePayload { in_fd: 7, out_fd: 9, in_fd_type: 0, out_fd_type: 1, _pad: [0; 6], size: 42, return_code: 21 }; Sendfile, Splice);
-    // These hooks currently share the simple LSM decoder, not the richer wire payloads.
-    family!(LsmBpfPayload { cmd: 7, return_code: -13 }; LsmFileOpen, LsmInodeUnlink, LsmInodeRename);
+    use bloodhound_common::{LsmFileOpenPayload, LsmInodePayload, LsmInodeRenamePayload};
+    family!(LsmFileOpenPayload { path_len: 0, _pad: [0; 2], return_code: 0 }; LsmFileOpen);
+    family!(LsmInodePayload { path_len: 0, _pad: [0; 2], return_code: 0 }; LsmInodeUnlink);
+    family!(LsmInodeRenamePayload { old_path_len: 0, new_path_len: 0, return_code: 0 }; LsmInodeRename);
+}
+
+#[test]
+fn optional_identity_and_unknown_capture_bytes() {
+    snapshot(
+        "signal_generate_no_target_ref_bytes",
+        build_event(
+            EventKind::SignalGenerate,
+            &SignalGeneratePayload {
+                target_tgid: 4321,
+                signal: 15,
+                target_start_boottime_ns: 0,
+                group: 0,
+                result: SIGNAL_RESULT_IGNORED,
+            },
+        ),
+    );
+    for (name, parent_start, child_start) in [
+        ("no_parent", 0, 100),
+        ("no_child", 99, 0),
+        ("neither", 0, 0),
+    ] {
+        snapshot(
+            &format!("process_fork_{name}_bytes"),
+            build_event(
+                EventKind::ProcessFork,
+                &ProcessForkPayload {
+                    parent_tgid: 1234,
+                    child_tgid: 4321,
+                    parent_start_boottime_ns: parent_start,
+                    child_start_boottime_ns: child_start,
+                    clone_flags: 0,
+                },
+            ),
+        );
+    }
+    for kind in [EventKind::Connect, EventKind::Bind] {
+        snapshot(
+            &format!("{kind:?}_unknown_family_bytes"),
+            build_event(
+                kind,
+                &ConnectBindPayload {
+                    family: 1,
+                    port: 0,
+                    addr_v4: 0,
+                    addr_v6: [0; 16],
+                    return_code: 0,
+                },
+            ),
+        );
+    }
+    for kind in [EventKind::Sendto, EventKind::Recvfrom] {
+        snapshot(
+            &format!("{kind:?}_unknown_family_bytes"),
+            build_event(
+                kind,
+                &SendtoRecvfromPayload {
+                    fd: 7,
+                    family: 1,
+                    port: 0,
+                    addr_v4: 0,
+                    addr_v6: [0; 16],
+                    size: 42,
+                    return_code: 21,
+                },
+            ),
+        );
+    }
+    for two in [false, true] {
+        snapshot(
+            &format!("path_{}_unknown_bytes", if two { "two" } else { "single" }),
+            path_capture_record(two, b"/one", b"/two"),
+        );
+    }
+    for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+        snapshot(
+            &format!("{kind:?}_unknown_capture_bytes"),
+            tty_capture_record(kind, HeaderCapture::default(), b"legacy\xff\0"),
+        );
+    }
+    for (version, status) in [(0, 0), (2, 1)] {
+        snapshot(
+            &format!("exec_view_unknown_v{version}_s{status}_bytes"),
+            build_event(
+                EventKind::ExecView,
+                &ExecViewPayload {
+                    version,
+                    status,
+                    ..Default::default()
+                },
+            ),
+        );
+    }
 }
 
 #[test]
