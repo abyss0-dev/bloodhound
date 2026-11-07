@@ -56,9 +56,9 @@ impl TryFrom<u8> for CaptureStatus {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            1 => Ok(Self::Complete),
-            2 => Ok(Self::Truncated),
-            3 => Ok(Self::ReadError),
+            v if v == Self::Complete as u8 => Ok(Self::Complete),
+            v if v == Self::Truncated as u8 => Ok(Self::Truncated),
+            v if v == Self::ReadError as u8 => Ok(Self::ReadError),
             _ => Err(()),
         }
     }
@@ -389,14 +389,14 @@ pub struct OpenatPayload {
     pub mode: u32,
     pub filename_len: u16,
     pub capture_version: u8,
-    /// Bits 0/1: device/inode valid; 2: path complete; 3: path read failed.
+    /// Capture flags: [`DEV_VALID`], [`INO_VALID`], [`PATH_COMPLETE`], [`PATH_READ_FAILED`].
     pub capture_flags: u8,
     pub return_code: i32,
     pub dirfd: i32,
     /// Device of the underlying inode (kernel `s_dev`, major << 20 | minor).
-    /// Valid only when capture_version == 1 and capture_flags bit 0 is set.
+    /// Valid only when capture_version == 1 and [`DEV_VALID`] is set in capture_flags.
     pub dev: u64,
-    /// Inode number; valid only when version 1 and flags bit 1 is set.
+    /// Inode number; valid only when capture_version == 1 and [`INO_VALID`] is set in capture_flags.
     pub ino: u64,
     // Followed by: filename bytes
 }

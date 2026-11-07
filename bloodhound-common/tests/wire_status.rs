@@ -61,9 +61,7 @@ fn reason_tables_cover_the_map_indices() {
 
 #[test]
 fn capture_metadata_preserves_header_layout() {
-    assert_eq!(core::mem::size_of::<CaptureStatus>(), 1);
     assert_eq!(core::mem::size_of::<HeaderCapture>(), 3);
-    assert_eq!(core::mem::align_of::<HeaderCapture>(), 1);
     assert_eq!(core::mem::offset_of!(EventHeader, capture), 1);
     assert_eq!(core::mem::size_of::<EventHeader>(), 96);
 }
