@@ -166,11 +166,10 @@ class TestMaxTtyDataInvariant:
       invoked with `count > 2048` unless the `TTY_NO_WRITE_SPLIT` tty
       flag is set (it is not for PTY slaves).
 
-    Because userspace cannot induce a single kernel call with
-    `count > MAX_TTY_DATA`, no workload can prove the clamp path
-    activates. This test therefore asserts the *observable* invariant
-    the criterion actually cares about — no emitted event's decoded
-    `args.data` exceeds the clamp — across induced traffic. If a
+    Ordinary N_TTY traffic therefore does not activate the clamp. This
+    test checks the observable size invariant across ordinary traffic;
+    TestTtyCaptureStatus uses N_HDLC to exercise an unsplit oversized
+    driver write through its TTY_NO_WRITE_SPLIT setting. If a
     future kernel change removes the 2KiB chunk and delivers
     `pty_write` with `count > 4095`, the clamp will catch it and this
     test continues to pass; if the clamp itself regresses (e.g.,
@@ -238,17 +237,24 @@ class TestTtyCaptureStatus:
     ):
         marker = b"tty_capture_large_79a1_"
         payload = marker + b"X" * (6000 - len(marker))
-        # One slave-side write, not a shell loop of short writes. Drain the
-        # master and verify delivery so a blocked/partial workload cannot pass.
+        # N_TTY splits even raw writes into 2048-byte chunks. N_HDLC sets
+        # TTY_NO_WRITE_SPLIT, forwarding this frame in one driver call.
+        loaded = ssh_cmd("sudo modprobe n_hdlc maxframe=8192")
+        assert loaded.returncode == 0, loaded.stderr
         script = f"""
-import os, pty, tty
+import fcntl, os, pty, select, struct, termios, tty
 m, s = pty.openpty()
-tty.setraw(s)
+tty.setraw(m)
+fcntl.ioctl(s, termios.TIOCSETD, struct.pack('i', 13))
 payload = {payload!r}
 assert os.write(s, payload) == len(payload)
 received = b""
 while len(received) < len(payload):
-    received += os.read(m, len(payload) - len(received))
+    ready, _, _ = select.select([m], [], [], 5)
+    assert ready, ('PTY drain timed out', len(received))
+    chunk = os.read(m, len(payload) - len(received))
+    assert chunk, 'Unexpected PTY EOF'
+    received += chunk
 assert received == payload
 os.close(s)
 os.close(m)
@@ -277,8 +283,7 @@ print(os.getpid())
         assert base64.b64decode(args["data"]) == payload[:4095]
 
     def test_normal_pty_io_is_complete_without_collection_diagnostic(
-        self, ssh_cmd, foreground_bloodhound, wait_for_bloodhound_attachment,
-        wait_for_matching_events,
+        self, ssh_cmd, foreground_bloodhound, wait_for_matching_events,
     ):
         output = b"tty_capture_complete_output_38af"
         typed = b"tty_capture_complete_input_38af"
@@ -296,7 +301,11 @@ os.close(m)
 print(os.getpid())
 """
         with foreground_bloodhound() as daemon:
-            wait_for_bloodhound_attachment()
+            wait_for_matching_events(
+                daemon.events,
+                lambda events: filter_events(events, event_type="META", name="bloodhound_ready"),
+                "foreground daemon readiness",
+            )
             result = ssh_cmd(python_command(script))
             assert result.returncode == 0, (result.stdout, result.stderr)
             pid = int(result.stdout.strip())
