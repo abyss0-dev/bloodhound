@@ -29,12 +29,6 @@ impl AttachReport {
         self.keys
             .insert(key.into(), attached && tty_offsets.is_some());
     }
-
-    fn pair(&mut self, key: &str, enter: bool, exit: bool) -> bool {
-        let complete = enter && exit;
-        self.keys.insert(key.into(), complete);
-        complete
-    }
 }
 
 /// Capacity of the kernel ring buffer as created, in bytes.
@@ -337,11 +331,30 @@ fn attach_tracepoint_pair(
     // Install the consumer before the producer: an enter captured before its
     // exit hook exists can survive until task exit and falsely report an
     // invocation_interrupted collection loss (notably for openat).
-    let exit_link = attach_tracepoint(bpf, exit.0, category, exit.1, report)?;
-    if let Err(error) = attach_tracepoint(bpf, enter.0, category, enter.1, report) {
-        let program: &mut TracePoint = bpf.program_mut(exit.0).unwrap().try_into()?;
-        program
-            .detach(exit_link)
+    attach_pair(
+        bpf,
+        report,
+        |bpf, report| attach_tracepoint(bpf, exit.0, category, exit.1, report),
+        |bpf, report| attach_tracepoint(bpf, enter.0, category, enter.1, report).map(|_| ()),
+        |bpf, exit_link| {
+            let program: &mut TracePoint = bpf.program_mut(exit.0).unwrap().try_into()?;
+            program.detach(exit_link)?;
+            Ok(())
+        },
+    )
+}
+
+// Keep the rollback transaction testable without loading BPF or requiring root.
+fn attach_pair<B, L>(
+    backend: &mut B,
+    report: &mut AttachReport,
+    attach_exit: impl FnOnce(&mut B, &mut AttachReport) -> Result<L>,
+    attach_enter: impl FnOnce(&mut B, &mut AttachReport) -> Result<()>,
+    detach_exit: impl FnOnce(&mut B, L) -> Result<()>,
+) -> Result<()> {
+    let exit_link = attach_exit(backend, report)?;
+    if let Err(error) = attach_enter(backend, report) {
+        detach_exit(backend, exit_link)
             .context("rolling back syscall exit hook after enter attachment failed")?;
         report.probes -= 1;
         return Err(error);
@@ -396,7 +409,8 @@ fn try_attach_syscall_pair(
             false
         }
     };
-    report.pair(key, complete, complete)
+    report.keys.insert(key.into(), complete);
+    complete
 }
 
 fn try_attach_kprobe(
@@ -449,17 +463,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pairs_require_both_halves_and_unselected_keys_stay_absent() {
-        let mut report = AttachReport::default();
-        for (enter, exit, complete) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (true, true, true),
-        ] {
-            assert_eq!(report.pair("tier2.openat", enter, exit), complete);
-            assert_eq!(report.keys["tier2.openat"], complete);
-        }
+    fn unselected_keys_stay_absent() {
+        let report = AttachReport::default();
         for unselected in [
             "tier2.sendfile",
             "tier2.splice",
@@ -472,16 +477,39 @@ mod tests {
 
     #[test]
     fn required_failure_aborts_without_claiming_availability() {
-        let mut report = AttachReport::default();
+        let mut report = AttachReport {
+            probes: 2,
+            ..AttachReport::default()
+        };
+        let mut exit_attached = false;
         let startup: Result<()> = (|| {
             required(&mut report, "exec.execve", |report| {
-                report.probes += 1; // A successful exit does not complete the pair.
-                anyhow::bail!("injected enter attach failure")
+                attach_pair(
+                    &mut exit_attached,
+                    report,
+                    |attached, report| {
+                        assert!(!*attached);
+                        *attached = true;
+                        report.probes += 1;
+                        Ok(42)
+                    },
+                    |attached, _| {
+                        assert!(*attached, "exit must attach before enter");
+                        anyhow::bail!("injected enter attach failure")
+                    },
+                    |attached, link| {
+                        assert_eq!(link, 42);
+                        assert!(*attached);
+                        *attached = false;
+                        Ok(())
+                    },
+                )
             })?;
             panic!("failed required collector must abort startup");
         })();
-        assert!(startup.is_err());
-        assert_eq!(report.probes, 1);
+        assert!(startup.unwrap_err().to_string().contains("exec.execve"));
+        assert!(!exit_attached, "failed pair must detach its exit hook");
+        assert_eq!(report.probes, 2, "rollback restores existing probe count");
         assert!(!report.keys.contains_key("exec.execve"));
         required(&mut report, "signal", |report| {
             report.probes += 1;
@@ -489,6 +517,6 @@ mod tests {
         })
         .unwrap();
         assert!(report.keys["signal"]);
-        assert_eq!(report.probes, 2);
+        assert_eq!(report.probes, 3);
     }
 }
