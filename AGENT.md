@@ -66,7 +66,7 @@ docker build --target build -t bloodhound-workspace-test -f Dockerfile.build .
 docker run --rm bloodhound-workspace-test cargo test --workspace --locked --target x86_64-unknown-linux-musl
 ```
 
-E2E は QEMU/KVM 上の VM を使います。手順は `e2e/` と `README.md` に従ってください。
+E2E は QEMU/KVM 上の VM を使います。手順は `e2e/README.md` に従ってください。
 
 Check は次の通りです。
 
