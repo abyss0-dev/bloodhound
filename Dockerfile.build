@@ -64,6 +64,7 @@ COPY bloodhound/ bloodhound/
 COPY bloodhound-common/ bloodhound-common/
 COPY bloodhound-ebpf/ bloodhound-ebpf/
 COPY bloodhound-tui/ bloodhound-tui/
+COPY docs/schema.json docs/schema.json
 
 RUN cargo build --package bloodhound --release --target x86_64-unknown-linux-musl --verbose
 

@@ -20,7 +20,7 @@ use bloodhound_common::{
 };
 use serde_json::{json, Value};
 
-use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
+use crate::deserializer::{BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer, Payload};
 
 pub const TRAINING_SHELL_V3_ID: &str = "training-shell-v3";
 pub const TRAINING_PEER_V1_ID: &str = "training-peer-v1";
@@ -274,9 +274,9 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
     BehaviorEvent {
         header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
-            event_type: "DIAGNOSTIC".into(),
+            event_type: EventClass::Diagnostic,
             name: "usdt.collector".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(Value::Object(args)),
@@ -581,10 +581,7 @@ fn attach_uprobe_with_semaphore(
 /// Convert a collector-owned fixed ring-buffer payload to a canonical event.
 /// The core deserializer delegates here generically and contains no collector
 /// IDs, provider/probe names, or field definitions.
-pub fn decode_payload(
-    kind: EventKind,
-    payload: &[u8],
-) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+pub fn decode_payload(kind: EventKind, payload: &[u8]) -> Result<Payload> {
     match kind {
         EventKind::UsdtTrainingShellV3 => decode_training_shell_payload(payload),
         EventKind::UsdtTrainingPeerV1 => decode_training_peer_payload(payload),
@@ -593,9 +590,7 @@ pub fn decode_payload(
     }
 }
 
-fn decode_training_shell_capture_error(
-    payload: &[u8],
-) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_shell_capture_error(payload: &[u8]) -> Result<Payload> {
     if payload.len() != UsdtTrainingShellCaptureErrorPayload::SIZE {
         bail!("USDT training-shell capture-error payload has an invalid size");
     }
@@ -610,24 +605,24 @@ fn decode_training_shell_capture_error(
         1 => "unreadable_user_memory",
         _ => bail!("USDT training-shell capture-error reason is unknown"),
     };
-    Ok((
-        "DIAGNOSTIC".into(),
-        "usdt.collector".into(),
-        "behavior".into(),
-        Some(json!({
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Diagnostic,
+            name: "usdt.collector".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(json!({
             "collector_id": TRAINING_SHELL_V3_ID,
             "reason_code": ReasonCode::AbiIncompatible.as_str(),
             "attach_point_id": fixed.attach_point_id,
             "argument": field,
             "read_error_code": read_error_code,
         })),
-        None,
-    ))
+        return_code: None,
+    })
 }
 
-fn decode_training_shell_payload(
-    payload: &[u8],
-) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_shell_payload(payload: &[u8]) -> Result<Payload> {
     if payload.len() < UsdtTrainingShellPayload::SIZE {
         bail!("USDT training-shell payload too short");
     }
@@ -665,11 +660,13 @@ fn decode_training_shell_payload(
     if fixed.semantic_flags & 1 != 0 {
         flags.push("SELF_PID_EXPANDED");
     }
-    Ok((
-        "USDT".into(),
-        "abyss0_shell.simple_command_completed".into(),
-        "behavior".into(),
-        Some(json!({
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Usdt,
+            name: "abyss0_shell.simple_command_completed".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(json!({
             "attach_point_id": fixed.attach_point_id,
             "shell_pid": fixed.shell_pid,
             "command_id": fixed.command_id,
@@ -679,29 +676,29 @@ fn decode_training_shell_payload(
             "semantic_flags": flags,
             "exit_status": fixed.exit_status,
         })),
-        None,
-    ))
+        return_code: None,
+    })
 }
 
-fn decode_training_peer_payload(
-    payload: &[u8],
-) -> Result<(String, String, String, Option<Value>, Option<i64>)> {
+fn decode_training_peer_payload(payload: &[u8]) -> Result<Payload> {
     if payload.len() != UsdtTrainingPeerPayload::SIZE {
         bail!("USDT training-peer payload has invalid length");
     }
     let fixed =
         unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const UsdtTrainingPeerPayload) };
-    Ok((
-        "USDT".into(),
-        "abyss0_peer.task_finished".into(),
-        "behavior".into(),
-        Some(json!({
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Usdt,
+            name: "abyss0_peer.task_finished".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(json!({
             "attach_point_id": fixed.attach_point_id,
             "task_id": fixed.task_id,
             "result": match fixed.result { 0 => "ok", 1 => "failed", _ => "other" },
         })),
-        None,
-    ))
+        return_code: None,
+    })
 }
 
 // A deliberately small ELF parser: we only read the pieces that make a static
@@ -1240,7 +1237,7 @@ mod tests {
         let contextual = diagnostic(TRAINING_SHELL_V3_ID, ReasonCode::AttachFailed,
             Some(json!({"attach_point_id": 1})), 1_500_000_000);
         insta::assert_snapshot!("usdt_collector_context_bytes", serde_json::to_string(&contextual).unwrap());
-        assert_eq!(event.event.event_type, "DIAGNOSTIC");
+        assert_eq!(event.event.event_type, EventClass::Diagnostic);
         assert_eq!(event.event.name, "usdt.collector");
         assert_eq!(event.args.unwrap()["reason_code"], "probe_not_found");
     }
@@ -1266,10 +1263,9 @@ mod tests {
             .to_vec()
         };
         payload.extend_from_slice(b"echo");
-        let (_, name, _, args, _) =
-            decode_payload(EventKind::UsdtTrainingShellV3, &payload).unwrap();
-        assert_eq!(name, "abyss0_shell.simple_command_completed");
-        let args = args.unwrap();
+        let decoded = decode_payload(EventKind::UsdtTrainingShellV3, &payload).unwrap();
+        assert_eq!(decoded.event.name, "abyss0_shell.simple_command_completed");
+        let args = decoded.args.unwrap();
         assert_eq!(args["attach_point_id"], 3);
         assert_eq!(args["command_name"]["value"], "echo");
         assert_eq!(args["command_name_bytes"]["base64"], "ZWNobw==");
@@ -1356,12 +1352,11 @@ mod tests {
                 UsdtTrainingShellCaptureErrorPayload::SIZE,
             )
         };
-        let (event_type, name, layer, args, _) =
+        let Payload { event, args, .. } =
             decode_payload(EventKind::UsdtTrainingShellV3CaptureError, payload).unwrap();
-        assert_eq!(
-            (event_type.as_str(), name.as_str(), layer.as_str()),
-            ("DIAGNOSTIC", "usdt.collector", "behavior")
-        );
+        assert_eq!(event.event_type, EventClass::Diagnostic);
+        assert_eq!(event.name, "usdt.collector");
+        assert_eq!(event.layer, Layer::Behavior);
         assert_eq!(
             args.unwrap(),
             json!({

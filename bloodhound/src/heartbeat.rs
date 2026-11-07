@@ -26,7 +26,7 @@ use serde_json::json;
 use tokio::sync::mpsc;
 use tokio::time;
 
-use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
+use crate::deserializer::{BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer};
 use crate::drop_counter::DropCounter;
 use crate::sequencer::SequencedInput;
 
@@ -116,9 +116,9 @@ pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64, t
     BehaviorEvent {
         header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
-            event_type: "HEARTBEAT".into(),
+            event_type: EventClass::Heartbeat,
             name: "heartbeat".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(serde_json::Value::Object(args)),
@@ -143,9 +143,9 @@ mod tests {
     #[test]
     fn heartbeat_has_expected_type_and_name() {
         let ev = build_heartbeat(0, 0, 0, 1);
-        assert_eq!(ev.event.event_type, "HEARTBEAT");
+        assert_eq!(ev.event.event_type, EventClass::Heartbeat);
         assert_eq!(ev.event.name, "heartbeat");
-        assert_eq!(ev.event.layer, "behavior");
+        assert_eq!(ev.event.layer, Layer::Behavior);
     }
 
     #[test]
@@ -274,7 +274,7 @@ mod tests {
             panic!("heartbeat emitted a raw sequencer input");
         };
 
-        assert_eq!(ev.event.event_type, "HEARTBEAT");
+        assert_eq!(ev.event.event_type, EventClass::Heartbeat);
         let args = ev.args.unwrap();
         assert_eq!(args["drop_count_total"], 3);
         assert_eq!(args["drop_count_delta"], 3);
