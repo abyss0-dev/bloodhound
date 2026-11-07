@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/deserializer.rs
+expression: "serde_json :: to_string(& event).unwrap()"
+---
+{"header":{"timestamp":615106044084,"auid":1000,"sessionid":460,"pid":6240,"comm":"python3","process_ref":{"tgid":6240,"start_boottime_ns":615093524915},"tid":6240,"ns":{"mnt":{"status":"complete","inode":4026531841},"net":{"status":"complete","inode":4026531840},"uts":{"status":"complete","inode":4026531838},"ipc":{"status":"complete","inode":4026531839},"cgroup":{"status":"complete","inode":4026531835},"user":{"status":"complete","inode":4026531837},"pid":{"status":"complete","inode":4026531836}}},"event":{"type":"LSM","name":"task_kill","layer":"behavior"},"args":{"signal":0,"target_pid":6241,"target_ref":{"start_boottime_ns":615105867471,"tgid":6241}},"return_code":0}

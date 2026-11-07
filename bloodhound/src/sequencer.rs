@@ -51,7 +51,7 @@ impl<W: Write> Sequencer<W> {
             Err(error) => {
                 self.deserialize_rejections = self.deserialize_rejections.saturating_add(1);
                 eprintln!("Failed to deserialize event: {error}");
-                let diagnostic = deserialize_rejection_diagnostic(self.deserialize_rejections);
+                let diagnostic = deserialize_rejection_diagnostic(self.deserialize_rejections, monotonic_now_ns());
                 return self.write(&diagnostic);
             }
         };
@@ -82,10 +82,10 @@ impl<W: Write> Sequencer<W> {
     }
 }
 
-fn deserialize_rejection_diagnostic(total: u64) -> BehaviorEvent {
+fn deserialize_rejection_diagnostic(total: u64, timestamp: u64) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: monotonic_now_ns(),
+            timestamp,
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -115,6 +115,12 @@ fn deserialize_rejection_diagnostic(total: u64) -> BehaviorEvent {
 mod tests {
     use super::*;
     use bloodhound_common::{EventHeader, EventKind, RawSyscallPayload};
+
+    #[test]
+    fn stream_health_bytes() {
+        insta::assert_snapshot!("stream_health_bytes", serde_json::to_string(
+            &deserialize_rejection_diagnostic(3, 1_500_000_000)).unwrap());
+    }
 
     fn as_bytes<T>(value: &T) -> &[u8] {
         unsafe {

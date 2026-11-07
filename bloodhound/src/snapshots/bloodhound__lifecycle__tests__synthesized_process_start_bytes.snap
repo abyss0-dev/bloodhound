@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/lifecycle.rs
+expression: "serde_json::to_string(&start).unwrap()"
+---
+{"header":{"timestamp":1,"auid":1000,"sessionid":1,"pid":42,"comm":"t","process_ref":{"tgid":42,"start_boottime_ns":100}},"event":{"type":"LIFECYCLE","name":"process_start","layer":"behavior"},"args":{"process_ref":{"start_boottime_ns":100,"tgid":42}}}

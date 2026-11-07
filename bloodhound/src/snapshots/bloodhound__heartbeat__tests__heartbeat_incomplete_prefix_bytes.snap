@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/heartbeat.rs
+expression: "serde_json::to_string(&build_heartbeat_at(delta, total, 100,\n1_500_000_000)).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"HEARTBEAT","name":"heartbeat","layer":"behavior"},"args":{"drop_count_delta":0,"drop_count_total":10,"events_emitted_delta":100,"reason_code":"ring_buffer_overflow","run_prefix_incomplete":true}}

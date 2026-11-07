@@ -5,7 +5,6 @@ use std::os::unix::fs::MetadataExt;
 
 use serde_json::json;
 
-use crate::clock::monotonic_now_ns;
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 
 const NSFS_MAGIC: i64 = 0x6e73_6673;
@@ -59,10 +58,11 @@ pub fn ready_event(
     ring_buffer_size: u32,
     nsfs_dev: Option<u64>,
     facts: &StartupFacts,
+    timestamp: u64,
 ) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: monotonic_now_ns(),
+            timestamp,
             auid: 0,
             sessionid: 0,
             pid: 0,
@@ -122,6 +122,7 @@ mod tests {
                     1,
                     None,
                     &StartupFacts::default(),
+                    1_500_000_000,
                 ))
                 .unwrap();
                 for key in ["tty.write", "tty.read", "tty.read_ret"] {
@@ -150,7 +151,10 @@ mod tests {
         };
         report.keys.insert("lifecycle".into(), true);
         report.keys.insert("tier2.openat".into(), false);
-        let json = serde_json::to_value(ready_event(&report, 4 << 20, None, &facts)).unwrap();
+        let json = serde_json::to_value(ready_event(&report, 4 << 20, None, &facts, 1_500_000_000)).unwrap();
+        for (name, nsfs) in [("ready_unavailable_bytes", None), ("ready_verified_bytes", Some(4))] {
+            insta::assert_snapshot!(name, serde_json::to_string(&ready_event(&report, 4 << 20, nsfs, &facts, 1_500_000_000)).unwrap());
+        }
         assert_eq!(json["event"]["type"], "META");
         assert_eq!(json["event"]["name"], "bloodhound_ready");
         assert_eq!(
@@ -160,7 +164,7 @@ mod tests {
             "attached": {"lifecycle": true, "tier2.openat": false}})
         );
         assert!(json["header"].get("tid").is_none() && json["header"].get("ns").is_none());
-        let json = serde_json::to_value(ready_event(&report, 1, Some(4), &facts)).unwrap();
+        let json = serde_json::to_value(ready_event(&report, 1, Some(4), &facts, 1_500_000_000)).unwrap();
         assert_eq!(json["args"]["nsfs_dev"], 4);
     }
 }

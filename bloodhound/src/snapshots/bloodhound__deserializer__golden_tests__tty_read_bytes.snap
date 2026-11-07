@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/deserializer.rs
+expression: "serde_json :: to_string(& event).unwrap()"
+---
+{"header":{"timestamp":527456534215,"auid":1000,"sessionid":317,"pid":4411,"comm":"bash","process_ref":{"tgid":4411,"start_boottime_ns":527453528301},"tid":4411,"ns":{"mnt":{"status":"complete","inode":4026531841},"net":{"status":"complete","inode":4026531840},"uts":{"status":"complete","inode":4026531838},"ipc":{"status":"complete","inode":4026531839},"cgroup":{"status":"complete","inode":4026531835},"user":{"status":"complete","inode":4026531837},"pid":{"status":"complete","inode":4026531836}}},"event":{"type":"TTY","name":"tty_read","layer":"intent"},"args":{"data":"QkhfVFRZX1JFQURfR09MREVOCg==","data_status":"unknown","tty_capture_version":0}}

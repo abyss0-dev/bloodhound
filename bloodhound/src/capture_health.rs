@@ -9,10 +9,10 @@ use crate::clock::monotonic_now_ns;
 use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
 use crate::sequencer::SequencedInput;
 
-fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>) -> BehaviorEvent {
+fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>, timestamp: u64) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: monotonic_now_ns(), auid: 0, sessionid: 0, pid: 0,
+            timestamp, auid: 0, sessionid: 0, pid: 0,
             ppid: None, comm: String::new(), process_ref: None, tid: None, ns: None,
         },
         event: EventTypeJson {
@@ -48,9 +48,9 @@ pub async fn monitor(
                     let delta = total.saturating_sub(previous[index]);
                     previous[index] = total;
                     if delta == 0 { continue; }
-                    diagnostic(scope, reason, Some(delta), Some(total))
+                    diagnostic(scope, reason, Some(delta), Some(total), monotonic_now_ns())
                 }
-                Err(_) => diagnostic(scope, "counter_read_failed", None, None),
+                Err(_) => diagnostic(scope, "counter_read_failed", None, None, monotonic_now_ns()),
             };
             if tx.send(SequencedInput::Synthesized(Box::new(event))).await.is_err() {
                 return;
@@ -65,9 +65,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn collection_bytes() {
+        let families: &[(&str, &[&str])] = &[
+            ("exec", &bloodhound_common::EXEC_FAILURE_REASONS),
+            ("openat", &bloodhound_common::OPENAT_FAILURE_REASONS),
+            ("process_exit", &bloodhound_common::exit_claim::EXIT_FAILURE_REASONS),
+            ("syscall", &bloodhound_common::SYSCALL_FAILURE_REASONS),
+            ("raw_syscall", &bloodhound_common::RAW_SYSCALL_FAILURE_REASONS),
+            ("tty", &bloodhound_common::TTY_FAILURE_REASONS),
+        ];
+        for (scope, reasons) in families {
+            for reason in *reasons {
+                let event = diagnostic(scope, reason, Some(2), Some(5), 1_500_000_000);
+                insta::assert_snapshot!(format!("{scope}_{reason}_bytes"), serde_json::to_string(&event).unwrap());
+            }
+            let event = diagnostic(scope, "counter_read_failed", None, None, 1_500_000_000);
+            insta::assert_snapshot!(format!("{scope}_counter_read_failed_bytes"), serde_json::to_string(&event).unwrap());
+        }
+    }
+
+    #[test]
     fn tty_collection_reports_loss_without_operation_identity_or_ring_drops() {
         for reason in bloodhound_common::TTY_FAILURE_REASONS {
-            let event = diagnostic("tty", reason, Some(2), Some(5));
+            let event = diagnostic("tty", reason, Some(2), Some(5), 1);
             assert_eq!(event.event.event_type, "DIAGNOSTIC");
             assert_eq!(event.event.name, "tty.collection");
             assert_eq!(event.event.layer, "behavior");
@@ -86,7 +106,7 @@ mod tests {
 
     #[test]
     fn tty_unreadable_counter_is_unknown_not_zero() {
-        let event = diagnostic("tty", "counter_read_failed", None, None);
+        let event = diagnostic("tty", "counter_read_failed", None, None, 1);
         assert_eq!(event.event.name, "tty.collection");
         assert!(event.header.process_ref.is_none());
         assert_eq!(event.args.unwrap(), json!({
@@ -99,7 +119,7 @@ mod tests {
     #[test]
     fn raw_syscall_collection_reports_loss_without_operation_identity() {
         for reason in bloodhound_common::RAW_SYSCALL_FAILURE_REASONS {
-            let event = diagnostic("raw_syscall", reason, Some(2), Some(5));
+            let event = diagnostic("raw_syscall", reason, Some(2), Some(5), 1);
             assert_eq!(event.event.event_type, "DIAGNOSTIC");
             assert_eq!(event.event.name, "raw_syscall.collection");
             assert_eq!(event.event.layer, "behavior");
@@ -113,7 +133,7 @@ mod tests {
                 "run_prefix_incomplete": true, "sampling": "userspace_poll",
             }));
         }
-        let event = diagnostic("raw_syscall", "counter_read_failed", None, None);
+        let event = diagnostic("raw_syscall", "counter_read_failed", None, None, 1);
         assert_eq!(event.event.name, "raw_syscall.collection");
         assert_eq!(event.args.unwrap(), json!({
             "scope": "raw_syscall", "reason_code": "counter_read_failed",
@@ -125,7 +145,7 @@ mod tests {
     #[test]
     fn syscall_collection_reports_loss_without_claiming_operation_identity() {
         for reason in bloodhound_common::SYSCALL_FAILURE_REASONS {
-            let event = diagnostic("syscall", reason, Some(2), Some(5));
+            let event = diagnostic("syscall", reason, Some(2), Some(5), 1);
             assert_eq!(event.event.event_type, "DIAGNOSTIC");
             assert_eq!(event.event.name, "syscall.collection");
             assert_eq!(event.event.layer, "behavior");
@@ -142,7 +162,7 @@ mod tests {
 
     #[test]
     fn syscall_unreadable_counter_is_unknown_not_zero() {
-        let event = diagnostic("syscall", "counter_read_failed", None, None);
+        let event = diagnostic("syscall", "counter_read_failed", None, None, 1);
         assert_eq!(event.event.event_type, "DIAGNOSTIC");
         assert_eq!(event.event.name, "syscall.collection");
         assert!(event.header.process_ref.is_none());
@@ -156,7 +176,7 @@ mod tests {
     #[test]
     fn exec_collection_loss_reports_an_incomplete_prefix() {
         for reason in bloodhound_common::EXEC_FAILURE_REASONS {
-            let event = diagnostic("exec", reason, Some(2), Some(4));
+            let event = diagnostic("exec", reason, Some(2), Some(4), 1);
             assert_eq!(event.event.name, "exec.collection");
             let args = event.args.unwrap();
             assert_eq!(args["scope"], "exec");
@@ -168,7 +188,7 @@ mod tests {
     #[test]
     fn exit_claim_and_cleanup_failures_are_not_reported_as_ring_loss() {
         for reason in bloodhound_common::exit_claim::EXIT_FAILURE_REASONS {
-            let event = diagnostic("process_exit", reason, Some(1), Some(3));
+            let event = diagnostic("process_exit", reason, Some(1), Some(3), 1);
             assert_eq!(event.event.name, "process_exit.collection");
             assert!(event.header.process_ref.is_none());
             let args = event.args.unwrap();
@@ -178,14 +198,14 @@ mod tests {
             assert_eq!(args["failure_count_total"], 3);
             assert!(args.get("drop_count_total").is_none());
         }
-        let args = diagnostic("process_exit", "counter_read_failed", None, None).args.unwrap();
+        let args = diagnostic("process_exit", "counter_read_failed", None, None, 1).args.unwrap();
         assert!(args["failure_count_total"].is_null());
         assert_eq!(args["run_prefix_incomplete"], true);
     }
 
     #[test]
     fn capture_loss_has_its_own_scope_and_does_not_claim_event_placement() {
-        let event = diagnostic("openat", "entry_save_failed", Some(2), Some(5));
+        let event = diagnostic("openat", "entry_save_failed", Some(2), Some(5), 1);
         assert_eq!(event.event.name, "openat.collection");
         assert!(event.header.process_ref.is_none());
         let args = event.args.unwrap();
@@ -197,7 +217,7 @@ mod tests {
 
     #[test]
     fn unreadable_counter_never_claims_zero_failures() {
-        let args = diagnostic("openat", "counter_read_failed", None, None).args.unwrap();
+        let args = diagnostic("openat", "counter_read_failed", None, None, 1).args.unwrap();
         assert!(args["failure_count_total"].is_null());
         assert!(args["failure_count_delta"].is_null());
         assert_eq!(args["run_prefix_incomplete"], true);

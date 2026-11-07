@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/deserializer.rs
+expression: "serde_json :: to_string(& event).unwrap()"
+---
+{"header":{"timestamp":1137297804245,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"PACKET","name":"ingress","layer":"behavior"},"args":{"data":"AAAAAAAAAAAAAAAACABFAAAsvKlAAEARgBV/AAABfwAAAQ==","ifindex":0}}
