@@ -56,6 +56,8 @@ BehaviorEvent
 |   +-- path_capture_version : u8 (path events: 1 when capture status is recorded, 0 when absent/legacy)
 |   +-- path_status : string  (single-path events: complete, truncated, read_error, invalid_encoding, unknown)
 |   +-- path1_status, path2_status : string (two-path events: complete, truncated, read_error, invalid_encoding, unknown)
+|   +-- tty_capture_version : u8 (TTY events: 1 when capture status is recorded, 0 when absent/legacy)
+|   +-- data_status : string  (TTY events: complete, truncated, read_error, unknown)
 |   +-- ...      : (extensible per event type)
 |
 +-- return_code (OPTIONAL) : i32
@@ -522,6 +524,44 @@ excluded syscall numbers, invocations in flight at attach, and `-ENOENT` return
 values on map removal. Interrupted accounting requires a recorded entry, and
 ring-buffer drops remain strictly in `DROP_COUNT` / `HEARTBEAT`.
 
+`DIAGNOSTIC/tty.collection` reports pre-ring-buffer collection loss for
+TTY capture (`pty_write` and `n_tty_read` kprobes / `n_tty_read` kretprobe),
+with the same fields (`reason_code`, `failure_count_delta`, `failure_count_total`,
+`scope: tty`, `sampling: userspace_poll`, and sticky `run_prefix_incomplete: true`)
+and periodic/shutdown polling behavior as `syscall.collection`. It uses the same
+reason set (`bloodhound_common::TTY_FAILURE_REASONS`, which aliases
+`SYSCALL_FAILURE_REASONS`). Operational meanings reflect TTY capture specifics
+verified from `bloodhound-ebpf/src/layer1_tty.rs` and `maps.rs`:
+- `entry_capture_failed`: Context or probe argument read failure on `pty_write`
+  or `n_tty_read` entry, or internal assembly failure on write (scratch or assembly
+  buffer acquisition failure, or `bpf_memcpy` failure during `emit_tty_event`).
+- `entry_save_failed`: Map insertion failure when storing in-flight read entry state
+  in `TTY_READ_ENTRY_MAP` (e.g. map capacity reached or memory allocation failure).
+- `exit_capture_failed`: Return-code read failure at `n_tty_read` kretprobe after a
+  recorded entry was found in `TTY_READ_ENTRY_MAP`, or internal assembly failure on read
+  (scratch or assembly buffer acquisition failure, or `bpf_memcpy` failure during `emit_tty_event`).
+- `invocation_interrupted`: Pending `n_tty_read` invocation entry never paired with a return.
+  This is accounted when a thread terminates before returning (removed from
+  `TTY_READ_ENTRY_MAP` during lifecycle exit cleanup via `sched_process_exit`) or when
+  a subsequent `n_tty_read` on the same thread arrives before the prior return and
+  reclaims the stale entry (`tty_interrupt` at entry). This includes concurrent blocked
+  reads beyond the kretprobe maxactive limit (Aya 0.13.1 leaves maxactive at zero,
+  defaulting in Linux 6.8 `register_kretprobe` to `max(10, 2 * num_possible_cpus())`
+  instances; concurrent blocked reads consume instances, causing excess invocations to
+  miss returns and later be counted as `invocation_interrupted`).
+- `entry_cleanup_failed`: Map deletion error when removing a recorded entry from
+  `TTY_READ_ENTRY_MAP`.
+
+As with other collection scopes, the userspace monitor reports `counter_read_failed`
+with null counts when `TTY_FAILURES` cannot be read; see
+[observer-connection rows 115/116](https://github.com/abyss0-dev/workspace/blob/99d751b90f8520a62c428d2012d018c6100a30ad/docs/spec/tracer/observer-connection.md#5-loss-accounting-and-health-mapping)
+for consumer mapping. Not counted as failures: AUID filtering (`should_trace`),
+non-pts device filtering (`is_pts_slave`), invocations already in flight when tracing
+attaches (an absent entry in `TTY_READ_ENTRY_MAP` at kretprobe is not counted),
+return values <= 0 (EOF or error), and `-ENOENT` return values on map removal.
+Interrupted accounting requires a recorded entry, and ring-buffer drops remain
+strictly in `DROP_COUNT` / `HEARTBEAT`.
+
 ### Path event acquisition status (capture version 1)
 
 Path capture status reports the acquisition completeness for all TRACEPOINT
@@ -597,6 +637,68 @@ For version 1 records, the deserializer strictly validates that `path_len`
 (single-path) or `path1_len + path2_len` (two-path) equals the variable-length
 payload length. Any record with inconsistent lengths, unknown status codes, or a
 non-zero secondary byte on a single-path event is rejected via the
+`DIAGNOSTIC/stream.health` deserialization rejection path.
+
+### TTY event acquisition status (capture version 1)
+
+TTY capture status reports the acquisition completeness for TTY intent events
+(`tty_read` and `tty_write`). The wire layout contract is defined in
+[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+
+#### Covered Events
+
+The events covered by this rule, verified from `bloodhound/src/deserializer.rs`
+and `bloodhound-ebpf/src/layer1_tty.rs`, are:
+
+- `tty_read` (`event.type == "TTY"`, `event.layer == "intent"`)
+- `tty_write` (`event.type == "TTY"`, `event.layer == "intent"`)
+
+#### Added `args` Fields
+
+For covered events, `args` carries:
+
+- `tty_capture_version` (integer): Wire capture version. Emitted as `1` for
+  records with capture status metadata, or `0` for legacy or unversioned records.
+- `data_status` (string): Capture status for raw binary `args.data`.
+
+#### Status Values and Semantics
+
+The `data_status` field takes one of the following string values:
+
+- `complete`: The TTY data was completely and successfully read from kernel memory
+  into the capture buffer. Data of up to 4095 bytes (including exactly 4095 bytes,
+  matching `MAX_TTY_DATA - 1`) is reported `complete`. A complete capture must be
+  non-empty.
+- `truncated`: More than 4095 bytes were written or read (`count > 4095`, verified
+  in `bloodhound-ebpf/src/layer1_tty.rs`). The payload contains the bounded prefix of
+  exactly 4095 bytes.
+- `read_error`: The kernel buffer pointer was NULL (`0`) or `bpf_probe_read_kernel_buf`
+  failed. The event carries empty data (`args.data: ""` / 0 decoded bytes) rather
+  than omitting the event or reporting collection loss. Events with `read_error` are
+  still subject to pts-only device filtering and AUID filtering.
+- `unknown`: Reported when `tty_capture_version` is 0 or absent (legacy records).
+  Downstream consumers must require an explicitly `complete` status rather than
+  inferring completeness from the presence of data or the absence of a truncation flag.
+
+Unlike pathname capture, TTY capture processes arbitrary binary streams (Base64-encoded
+in `args.data`), so text encoding validation is not performed and `invalid_encoding`
+does not apply.
+
+#### Wire and Validation Rules
+
+In `HeaderCapture`, capture status is encoded in three bytes `[version, primary, secondary]`:
+- For version 1, `version` is `1`, `primary` carries the `CaptureStatus` code
+  for `data_status`, and `secondary` (the third byte) must be zero (`0x00`).
+- The deserializer strictly validates records and rejects invalid wire metadata:
+  - Version other than `0` or `1`.
+  - Non-zero third byte (`secondary != 0`).
+  - Unknown status code (a primary byte that does not map to `Complete`, `Truncated`, or `ReadError`).
+  - Length mismatch (`declared_len != var_data.len()` or `declared_len > 4095`).
+  - Truncated status without exactly 4095 bytes (`data_status == "truncated"` with `declared_len != 4095`).
+  - Read error status with data (`data_status == "read_error"` with `declared_len != 0`).
+  - Complete status with empty data (`data_status == "complete"` with `declared_len == 0`).
+
+Any record violating these constraints is rejected via the
 `DIAGNOSTIC/stream.health` deserialization rejection path.
 
 ### Exec-entry filesystem view
