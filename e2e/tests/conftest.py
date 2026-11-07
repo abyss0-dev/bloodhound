@@ -68,7 +68,10 @@ def start_bloodhound(ssh_cmd):
     """Start the service and assert it is active, with systemd failure evidence."""
 
     def start():
+        # Test-driven stop/start cycles are not crashes: clear their accumulated
+        # rate-limit budget without weakening the unit's production policy.
         result = ssh_cmd(
+            "systemctl reset-failed bloodhound && "
             "systemctl start bloodhound && systemctl is-active --quiet bloodhound",
             user="root",
         )

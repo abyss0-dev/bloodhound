@@ -44,8 +44,11 @@ sshpass -p root scp ${SSH_OPTS} -P "${SSH_PORT}" \
 
 # ── 3. Restart ──────────────────────────────────────────────────────
 echo "🚀 Starting daemon..."
+# Explicit E2E starts must not consume the production crash-loop budget.
 sshpass -p root ssh ${SSH_OPTS} -p "${SSH_PORT}" "root@${SSH_HOST}" \
-    "systemctl start bloodhound && systemctl is-active --quiet bloodhound || {
+    "{ systemctl reset-failed bloodhound &&
+        systemctl start bloodhound && systemctl is-active --quiet bloodhound;
+    } || {
         systemctl status bloodhound --no-pager;
         journalctl -u bloodhound -n 200 --no-pager;
         exit 1;
