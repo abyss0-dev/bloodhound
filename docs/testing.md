@@ -27,20 +27,7 @@ does not skip USDT attachment when BPF prerequisites are unavailable.
 
 ## Build Environment
 
-Development is done on macOS; BPF programs target Linux. Cross-compilation
-is required.
-
-```
-+------------------+       +----------------------------+
-| macOS (host)     |       | QEMU VM (target)           |
-|                  |       |                            |
-| Rust toolchain   |       | Ubuntu 24.04 + kernel 6.8  |
-| cross-compile    |------>| BTF, BPF LSM enabled       |
-| target: x86_64-  |  scp  | Bloodhound binary runs     |
-| unknown-linux-   |  scp  | with BPF programs loaded   |
-| gnu              |       |                            |
-+------------------+       +----------------------------+
-```
+Building and running tests require Linux. See [README.md](../README.md#requirements) and [AGENT.md](../AGENT.md#project-commands) for host environment requirements and rationale.
 
 
 ## E2E Test Infrastructure
