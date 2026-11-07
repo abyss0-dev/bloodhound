@@ -21,32 +21,6 @@ class TestSchemaValidation:
 
         validate_all_events(events)
 
-    def test_required_fields_present(
-        self, ssh_cmd, bloodhound_events, wait_for_events
-    ):
-        """All events must have required 'header' and 'event' fields."""
-        ssh_cmd("true")
-        wait_for_events()
-
-        events = bloodhound_events()
-        for ev in events:
-            assert "header" in ev, f"Missing 'header' field: {ev}"
-            assert "event" in ev, f"Missing 'event' field: {ev}"
-
-            header = ev["header"]
-            assert "timestamp" in header
-            assert isinstance(header["timestamp"], int)
-            assert header["timestamp"] >= 0
-            assert "auid" in header
-            assert "sessionid" in header
-            assert "pid" in header
-            assert "comm" in header
-
-            event = ev["event"]
-            assert "type" in event
-            assert "name" in event
-            assert "layer" in event
-
     def test_bpf_and_heartbeat_timestamps_share_monotonic_domain(
         self, ssh_cmd, bloodhound_events, wait_for_matching_events
     ):
@@ -75,35 +49,6 @@ class TestSchemaValidation:
         # Both values are VM-uptime-scale nanoseconds. A mixed Unix timestamp
         # would differ by decades, while scheduling jitter is bounded here.
         assert abs(heartbeat_timestamp - bpf_timestamp) < 60_000_000_000
-
-    def test_event_type_values(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """event.type must be one of the allowed enum values."""
-        ssh_cmd("ls /tmp")
-        wait_for_events()
-
-        events = bloodhound_events()
-        allowed_types = {
-            "SYSCALL", "TTY", "KPROBE", "TRACEPOINT", "LSM", "META",
-            # Userspace-synthesised types (see docs/output-schema.md).
-            "LIFECYCLE", "HEARTBEAT", "USDT", "DIAGNOSTIC",
-        }
-        for ev in events:
-            assert ev["event"]["type"] in allowed_types, (
-                f"Invalid event type: {ev['event']['type']}"
-            )
-
-    def test_layer_values(self, ssh_cmd, bloodhound_events, wait_for_events):
-        """The producer retains its legacy layer field and allowed values."""
-        ssh_cmd("ls /tmp")
-        wait_for_events()
-
-        events = bloodhound_events()
-        assert events, "No events captured"
-        allowed_layers = {"intent", "tooling", "behavior"}
-        for ev in events:
-            assert ev["event"]["layer"] in allowed_layers, (
-                f"Invalid layer: {ev['event']['layer']}"
-            )
 
 
 class TestAuidFilter:
