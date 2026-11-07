@@ -1,59 +1,6 @@
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// Syscall numbers (as string, since `event.name` is a string for
-/// Tier 1 `SYSCALL` events) that have a Tier 2 rich-extraction
-/// counterpart. Must stay aligned with `tier2_syscalls` in
-/// `bloodhound/src/loader.rs`.
-const TIER2_COVERED_NRS: &[&str] = &[
-    "0",   // read
-    "1",   // write
-    "9",   // mmap
-    "17",  // pread64
-    "18",  // pwrite64
-    "19",  // readv
-    "20",  // writev
-    "32",  // dup
-    "33",  // dup2
-    "40",  // sendfile (opt-in)
-    "41",  // socket
-    "42",  // connect
-    "44",  // sendto
-    "45",  // recvfrom
-    "49",  // bind
-    "50",  // listen
-    "56",  // clone
-    "59",  // execve
-    "76",  // truncate
-    "77",  // ftruncate
-    "80",  // chdir
-    "81",  // fchdir
-    "82",  // rename
-    "83",  // mkdir
-    "84",  // rmdir
-    "86",  // link
-    "87",  // unlink
-    "88",  // symlink
-    "90",  // chmod
-    "91",  // fchmod
-    "92",  // chown
-    "93",  // fchown
-    "165", // mount
-    "166", // umount2
-    "257", // openat
-    "258", // mkdirat
-    "260", // fchownat
-    "263", // unlinkat
-    "265", // linkat
-    "266", // symlinkat
-    "268", // fchmodat
-    "275", // splice (opt-in)
-    "292", // dup3
-    "316", // renameat2
-    "322", // execveat
-    "435", // clone3
-];
-
 /// Deserialized BehaviorEvent from Bloodhound NDJSON output.
 #[derive(Debug, Clone, Deserialize)]
 #[allow(dead_code)]
@@ -179,23 +126,6 @@ impl BehaviorEvent {
             self.event.event_type.as_str(),
             "LIFECYCLE" | "HEARTBEAT" | "DIAGNOSTIC"
         )
-    }
-
-    /// True when a Tier 1 raw `SYSCALL` event describes a syscall that
-    /// also has Tier 2 rich coverage.
-    ///
-    /// The daemon's `TIER2_BITMAP` already suppresses Tier 1 emission
-    /// for these syscalls in-kernel, so duplicates should never reach
-    /// us in a correctly-configured run. The check is defensive: it
-    /// protects the detail pane from double-counting if a daemon ships
-    /// with an incomplete bitmap or a newer Tier 2 that the kernel-side
-    /// filter missed. The list is kept in sync with `tier2_syscalls`
-    /// in `bloodhound/src/loader.rs`.
-    pub fn is_redundant_tier1(&self) -> bool {
-        if self.event.event_type != "SYSCALL" {
-            return false;
-        }
-        TIER2_COVERED_NRS.contains(&self.event.name.as_str())
     }
 
     /// Format a one-line summary for display in the detail pane.
@@ -677,21 +607,5 @@ mod tests {
             serde_json::json!({"oldpath":"/dev/sda1","newpath":"/mnt"}),
         );
         assert!(mount.summary_line(None).starts_with("MOUNT /dev/sda1 → /mnt"));
-    }
-
-    #[test]
-    fn test_is_redundant_tier1_drops_tier2_covered_syscalls() {
-        // SYSCALL + NR that has Tier 2 coverage → redundant.
-        assert!(make_event("SYSCALL", "257").is_redundant_tier1()); // openat
-        assert!(make_event("SYSCALL", "32").is_redundant_tier1()); // dup
-        assert!(make_event("SYSCALL", "435").is_redundant_tier1()); // clone3
-
-        // SYSCALL without Tier 2 coverage → keep.
-        assert!(!make_event("SYSCALL", "231").is_redundant_tier1()); // exit_group
-        assert!(!make_event("SYSCALL", "72").is_redundant_tier1()); // fcntl (not in bitmap)
-
-        // Non-SYSCALL event types must never be flagged regardless of name.
-        assert!(!make_event("TRACEPOINT", "257").is_redundant_tier1());
-        assert!(!make_event("TRACEPOINT", "openat").is_redundant_tier1());
     }
 }

@@ -90,7 +90,6 @@ pub(crate) fn build_app_from_path(
 
     let mut events: Vec<BehaviorEvent> = Vec::new();
     let mut parse_errors = 0;
-    let mut tier1_duplicates = 0;
 
     for (line_num, line) in content.lines().enumerate() {
         let line = line.trim();
@@ -98,14 +97,8 @@ pub(crate) fn build_app_from_path(
             continue;
         }
         match serde_json::from_str::<BehaviorEvent>(line) {
-            // Defensive dedup: when the daemon's TIER2_BITMAP is
-            // mis-configured (e.g. old binary against a newer schema)
-            // a Tier 1 raw `SYSCALL` event can accompany its Tier 2
-            // rich counterpart. Drop the Tier 1 copy here so the
-            // detail pane doesn't double-count the same syscall.
-            Ok(event) if event.is_redundant_tier1() => {
-                tier1_duplicates += 1;
-            }
+            // The kernel's TIER2_BITMAP owns deduplication; emitted Tier 1
+            // records may be the only coverage when a Tier 2 hook is absent.
             Ok(event) => events.push(event),
             Err(e) => {
                 parse_errors += 1;
@@ -125,13 +118,6 @@ pub(crate) fn build_app_from_path(
             "Loaded {} events ({} lines failed to parse)",
             events.len(),
             parse_errors,
-        );
-    }
-
-    if tier1_duplicates > 0 {
-        eprintln!(
-            "Dropped {} Tier 1 raw-syscall events that are already covered by Tier 2 rich extraction",
-            tier1_duplicates,
         );
     }
 

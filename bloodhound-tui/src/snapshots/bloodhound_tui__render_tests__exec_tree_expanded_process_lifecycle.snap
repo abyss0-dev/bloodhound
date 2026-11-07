@@ -3,7 +3,7 @@ source: bloodhound-tui/src/render_tests.rs
 expression: render(&app)
 ---
 "┌ History (16 commands) ─────────────────┐┌ Output (0 lines) ──────────────────────────────────────────────────────────────────────────────┐"
-"│00:00:04 ▾ [pre-session] (50/13301)     ││No terminal output for this command.                                                            │"
+"│00:00:04 ▾ [pre-session] (50/13325)     ││No terminal output for this command.                                                            │"
 "│00:00:04   ├─ /usr/lib/systemd/systemd -││                                                                                                │"
 "│00:00:04   ├─ /usr/lib/systemd/user-envi││                                                                                                │"
 "│00:00:04   ├─ /usr/lib/systemd/user-gene││                                                                                                │"
@@ -41,4 +41,4 @@ expression: render(&app)
 "│00:00:04       └─ uname -m :307         ││00:00:04  PROC  ▸ execve /usr/bin/run-parts [run-parts --lsbsysinit /etc/update-motd.d] (pid:303│"
 "│00:00:04     ├─ /etc/update-motd.d/10-he││00:00:04  PROC  ▸ FORK (0x1200011) (pid:303 rc=304)                                             │"
 "└────────────────────────────────────────┘└────────────────────────────────────────────────────────────────────────────────────────────────┘"
-" 03_process_lifecycle.ndjson  │ 17113 events total │ Command 1/16 │ 13301 events │ ▶ History   j/k:nav  ⏎:expand  Tab:pane  1-4:tab  q:quit "
+" 03_process_lifecycle.ndjson  │ 17156 events total │ Command 1/16 │ 13325 events │ ▶ History   j/k:nav  ⏎:expand  Tab:pane  1-4:tab  q:quit "
