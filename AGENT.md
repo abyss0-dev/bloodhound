@@ -43,7 +43,7 @@ GitHub 上の設定の適用は、ユーザーの明示的な許可がある場�
 
 ## Project commands
 
-ビルドと E2E は Linux または WSL2 を前提とします。
+ビルドと E2E は Linux を前提とします。
 eBPF の読み込みに必要なカーネル機能（`CONFIG_AUDIT`、BTF）と KVM が macOS にはないためです。
 CI が実行するコマンドの正は `.github/workflows/` です。この節と食い違う場合は workflow に合わせて更新してください。
 
