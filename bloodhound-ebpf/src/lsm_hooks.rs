@@ -1,70 +1,13 @@
 use aya_ebpf::{
-    helpers::{bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_ktime_get_ns, bpf_probe_read_kernel},
+    helpers::bpf_probe_read_kernel,
     macros::lsm,
     programs::LsmContext,
 };
 use bloodhound_common::*;
 
-use crate::filter::{get_current_auid, process_ref_from_task};
-use crate::helpers::emit_event;
+use crate::filter::{get_current_auid, get_task_info, process_ref_from_task, should_trace};
+use crate::helpers::emit_fixed;
 use crate::{DAEMON_PID, OFF_TGID, TARGET_AUID};
-
-#[inline(always)]
-unsafe fn is_daemon() -> bool {
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let tgid = (pid_tgid >> 32) as u32;
-    let daemon_pid = core::ptr::read_volatile(&raw const DAEMON_PID);
-    daemon_pid != 0 && tgid == daemon_pid
-}
-
-/// Emit an LSM event. Builds flat bytes on the stack.
-#[inline(always)]
-unsafe fn emit_lsm_event<T>(kind: u8, payload: &T) {
-    let auid = get_current_auid();
-    let timestamp_ns = bpf_ktime_get_ns();
-    let pid_tgid = bpf_get_current_pid_tgid();
-    let pid = (pid_tgid >> 32) as u32;
-    let comm = match bpf_get_current_comm() {
-        Ok(c) => c,
-        Err(_) => [0u8; COMM_SIZE],
-    };
-    let sessionid = crate::filter::get_current_sessionid();
-    let process_start_boottime_ns =
-        process_ref_from_task(aya_ebpf::helpers::bpf_get_current_task() as *const u8)
-            .map(|process_ref| process_ref.start_boottime_ns)
-            .unwrap_or(0);
-
-    let mut header = EventHeader {
-        kind,
-        capture: HeaderCapture::default(),
-        timestamp_ns,
-        auid,
-        sessionid,
-        pid,
-        ppid: 0,
-        process_start_boottime_ns,
-        comm,
-        tid: pid_tgid as u32,
-        ns: bloodhound_common::NsSnapshot::default(),
-    };
-    crate::ns::snapshot(aya_ebpf::helpers::bpf_get_current_task() as usize, &mut header.ns);
-
-    let payload_size = core::mem::size_of::<T>();
-    let total_size = EventHeader::SIZE + payload_size;
-    let mut buf = [0u8; 256];
-    const { assert!(EventHeader::SIZE + core::mem::size_of::<T>() <= 256); }
-    core::ptr::copy_nonoverlapping(
-        &header as *const EventHeader as *const u8,
-        buf.as_mut_ptr(),
-        EventHeader::SIZE,
-    );
-    core::ptr::copy_nonoverlapping(
-        payload as *const T as *const u8,
-        buf.as_mut_ptr().add(EventHeader::SIZE),
-        payload_size,
-    );
-    emit_event(&buf[..total_size]);
-}
 
 // ── lsm/task_kill ────────────────────────────────────────────────────────────
 //
@@ -95,15 +38,7 @@ pub fn task_kill(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
-    if is_daemon() {
-        return Ok(0);
-    }
-
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-
-    // Only care about kills from the target user
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0);
     }
 
@@ -136,7 +71,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
             return_code: -1,
             _pad: 0,
         };
-        emit_lsm_event(EventKind::LsmTaskKill as u8, &payload);
+        emit_fixed(&get_task_info(EventKind::LsmTaskKill as u8), Some(&payload));
         Ok(-1) // -EPERM: block target user from killing daemon
     } else {
         // Allow kills to non-daemon processes, but still emit an event for observability
@@ -147,7 +82,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
             return_code: 0,
             _pad: 0,
         };
-        emit_lsm_event(EventKind::LsmTaskKill as u8, &payload);
+        emit_fixed(&get_task_info(EventKind::LsmTaskKill as u8), Some(&payload));
         Ok(0)
     }
 }
@@ -163,13 +98,7 @@ pub fn bpf_hook(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_bpf_hook(_ctx: &LsmContext) -> Result<i32, i64> {
-    if is_daemon() {
-        return Ok(0);
-    }
-
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0); // Allow non-target user BPF operations
     }
 
@@ -179,7 +108,7 @@ unsafe fn try_bpf_hook(_ctx: &LsmContext) -> Result<i32, i64> {
         cmd: 0,
         return_code: 0,
     };
-    emit_lsm_event(EventKind::LsmBpf as u8, &payload);
+    emit_fixed(&get_task_info(EventKind::LsmBpf as u8), Some(&payload));
     Ok(0) // Never enforce a blanket BPF denial.
 }
 
@@ -201,13 +130,7 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i64> {
     if previous != 0 {
         return Ok(previous);
     }
-    if is_daemon() {
-        return Ok(0);
-    }
-
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0); // Allow non-target user ptrace
     }
 
@@ -224,7 +147,7 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i64> {
         target_pid: daemon_pid,
         return_code: -1,
     };
-    emit_lsm_event(EventKind::LsmPtraceAccessCheck as u8, &payload);
+    emit_fixed(&get_task_info(EventKind::LsmPtraceAccessCheck as u8), Some(&payload));
     Ok(-1) // Block target user ptrace on daemon
 }
 
@@ -239,12 +162,7 @@ pub fn file_open(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_file_open(_ctx: &LsmContext) -> Result<i32, i64> {
-    if is_daemon() {
-        return Ok(0);
-    }
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0);
     }
 
@@ -253,7 +171,7 @@ unsafe fn try_file_open(_ctx: &LsmContext) -> Result<i32, i64> {
         _pad: [0; 2],
         return_code: 0,
     };
-    emit_lsm_event(EventKind::LsmFileOpen as u8, &payload);
+    emit_fixed(&get_task_info(EventKind::LsmFileOpen as u8), Some(&payload));
     Ok(0)
 }
 
@@ -268,12 +186,7 @@ pub fn inode_unlink(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_inode_op(_ctx: &LsmContext, kind: u8) -> Result<i32, i64> {
-    if is_daemon() {
-        return Ok(0);
-    }
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0);
     }
     let payload = LsmInodePayload {
@@ -281,7 +194,7 @@ unsafe fn try_inode_op(_ctx: &LsmContext, kind: u8) -> Result<i32, i64> {
         _pad: [0; 2],
         return_code: 0,
     };
-    emit_lsm_event(kind, &payload);
+    emit_fixed(&get_task_info(kind), Some(&payload));
     Ok(0)
 }
 
@@ -296,12 +209,7 @@ pub fn inode_rename(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_inode_rename(_ctx: &LsmContext) -> Result<i32, i64> {
-    if is_daemon() {
-        return Ok(0);
-    }
-    let auid = get_current_auid();
-    let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
-    if auid != target_auid {
+    if !should_trace() {
         return Ok(0);
     }
     let payload = LsmInodeRenamePayload {
@@ -309,7 +217,7 @@ unsafe fn try_inode_rename(_ctx: &LsmContext) -> Result<i32, i64> {
         new_path_len: 0,
         return_code: 0,
     };
-    emit_lsm_event(EventKind::LsmInodeRename as u8, &payload);
+    emit_fixed(&get_task_info(EventKind::LsmInodeRename as u8), Some(&payload));
     Ok(0)
 }
 
@@ -324,6 +232,7 @@ pub fn task_fix_setuid(ctx: LsmContext) -> i32 {
 }
 
 unsafe fn try_setuid(_ctx: &LsmContext) -> Result<i32, i64> {
+    // Keep daemon credential transitions observable when its AUID matches the target.
     let auid = get_current_auid();
     let target_auid = core::ptr::read_volatile(&raw const TARGET_AUID);
     if auid != target_auid {
@@ -336,6 +245,6 @@ unsafe fn try_setuid(_ctx: &LsmContext) -> Result<i32, i64> {
         new_gid: 0,
         return_code: 0,
     };
-    emit_lsm_event(EventKind::LsmTaskFixSetuid as u8, &payload);
+    emit_fixed(&get_task_info(EventKind::LsmTaskFixSetuid as u8), Some(&payload));
     Ok(0)
 }
