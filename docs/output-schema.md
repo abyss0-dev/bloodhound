@@ -181,7 +181,8 @@ no `ns`). `args` carries:
       only when `--enable-rich-sendfile` is passed; `true` iff both enter and exit
       halves attached.
     - `tty.write`, `tty.read`, `tty.read_ret`: kprobes (`pty_write`, `n_tty_read`, and
-      `n_tty_read` kretprobe); `true` if attached, `false` if failed.
+      `n_tty_read` kretprobe); `true` iff attached and TTY BTF classification offsets
+      are resolved; `false` if probe attach failed or BTF classification is unsupported.
     - `lsm.<hook>`: 7 LSM hooks (`task_kill`, `bpf`, `ptrace_access_check`, `file_open`,
       `inode_unlink`, `inode_rename`, `task_fix_setuid`). Present only when `--enable-lsm`
       is opted in; `true` if attached, `false` if attempted and failed. Note that the
@@ -195,7 +196,8 @@ no `ns`). `args` carries:
     - Both halves of an optional pair are attempted even if one fails.
     - A key is **absent** when its collector was not selected by configuration (e.g.,
       `--enable-rich-sendfile` not passed, `--enable-lsm` not passed, or USDT ID not
-      selected). It is **`false`** when the collector was attempted and failed.
+      selected). It is **`false`** when the collector was attempted and failed, or
+      when required BTF classification offsets are unavailable.
       Downstream consumers never treat absent or `false` as available.
 - `heartbeat_interval_ms` (u32) — configured periodic heartbeat cadence in milliseconds.
   Configured on the CLI as f64 seconds via `--heartbeat-interval`; Bloodhound quantizes
@@ -421,8 +423,11 @@ opens have negative `return_code` and identity `not_attempted`. For version 1,
 only successfully read components are emitted, including valid zero values.
 `dev` is kernel-encoded major << 20 | minor. Compare `dev_major`/`dev_minor`
 against userspace major(st_dev)/minor(st_dev), rather than comparing encoded
-device values. A complete pair requires both components and a validated target
-kernel layout. Current fixed layouts were measured on x86_64 6.8.0-49-generic.
+device values. A complete pair requires both components. Member offsets are
+resolved at runtime from the running kernel's BTF (`/sys/kernel/btf/vmlinux`).
+When fd identity BTF fields are unresolved, `file_identity_status` is `unavailable`.
+Because transient runtime read failures also report `unavailable`, consumers
+cannot distinguish kernel-unsupported from read failure.
 
 Actor header and pathname are captured at entry; returned FD and identity at
 exit. FD close/reuse races and readable but incorrect kernel offsets cannot

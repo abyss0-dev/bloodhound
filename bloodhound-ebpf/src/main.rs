@@ -15,7 +15,6 @@ mod maps;
 mod ns;
 mod signal;
 mod usdt;
-mod vmlinux;
 
 // ── Global Variables ─────────────────────────────────────────────────────────
 
@@ -86,6 +85,14 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
 pub static mut OFF_EXEC_VIEW: [u32;14] = [0;14];
 #[no_mangle]
 pub static mut EXEC_VIEW_SUPPORTED: u32 = 0;
+#[no_mangle]
+pub static mut OFF_FD_IDENT: [u32; 8] = [0; 8];
+#[no_mangle]
+pub static mut FD_IDENT_SUPPORTED: u32 = 0;
+#[no_mangle]
+pub static mut OFF_TTY: [u32; 3] = [0; 3];
+#[no_mangle]
+pub static mut TTY_SUPPORTED: u32 = 0;
 /// Offsets for NS_FIELDS, then `sizeof(struct upid)`.
 #[no_mangle]
 pub static mut OFF_NS: [u32; bloodhound_common::NS_OFFSETS_LEN] =

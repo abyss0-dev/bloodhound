@@ -51,10 +51,8 @@ aya's `SkBuff::load_bytes()` computes length at runtime → verifier sees possib
 ### `SchedClassifier::load()` is one-shot
 `load()` can only be called once per program. Call it **outside** any per-interface loop, then `attach()` to each interface.
 
-## `task_struct` Hardcoded Offsets
+## Kernel Struct Offset Resolution
 
-The eBPF code reads `task_struct` fields (loginuid, sessionid, tgid) using hardcoded byte offsets. These offsets are **kernel-version-specific**.
+Kernel struct member offsets (process lifecycle, namespaces, mount views, fd identity, and TTY classification) are resolved at runtime from the running kernel's BTF (`/sys/kernel/btf/vmlinux`) and injected before eBPF load. No hardcoded struct offsets remain.
 
-> **⚠️ Critical:** The build host (WSL2) and target VM run **different kernels** with different `task_struct` layouts. Always verify offsets on the **target VM kernel**, never on the host.
-
-See [ebpf-offsets.md](ebpf-offsets.md) for the full offset table, verification script, and troubleshooting guide.
+See [ebpf-offsets.md](ebpf-offsets.md) for details and manual verification with `pahole`.

@@ -66,6 +66,44 @@ def test_openat_path_failures_and_relative_dirfd(
             assert args["filename_status"] == status and record["ret"] == ret
 
 
+def test_openat_and_mmap_identity_match_vm_stat(
+        ssh_cmd, bloodhound_events, wait_for_events):
+    script = '''
+import json, mmap, os, tempfile
+with tempfile.NamedTemporaryFile(prefix="bh-fd-identity-") as f:
+    f.write(b"x" * mmap.PAGESIZE)
+    f.flush()
+    fd = os.open(f.name, os.O_RDONLY)
+    st = os.fstat(fd)
+    with mmap.mmap(fd, mmap.PAGESIZE, access=mmap.ACCESS_READ) as mapping:
+        assert mapping[0] == ord("x")
+        print(json.dumps(dict(pid=os.getpid(), path=f.name, fd=fd,
+            major=os.major(st.st_dev), minor=os.minor(st.st_dev), ino=st.st_ino)))
+    os.close(fd)
+'''
+    result = ssh_cmd("python3 -c " + shlex.quote(script))
+    assert result.returncode == 0, result.stderr
+    report = json.loads(result.stdout)
+    wait_for_events()
+    actor = [e for e in bloodhound_events() if e["header"]["pid"] == report["pid"]]
+    opened = [e for e in actor if e["event"]["name"] == "openat"
+              and e.get("args", {}).get("filename") == report["path"]
+              and e.get("return_code") == report["fd"]]
+    assert opened, (report, actor)
+    for event in opened:
+        args = event["args"]
+        assert args["file_identity_status"] == "complete"
+        assert (args["dev_major"], args["dev_minor"], args["ino"]) == (
+            report["major"], report["minor"], report["ino"])
+    mapped = [e for e in actor if e["event"]["name"] == "mmap"
+              and e.get("args", {}).get("fd") == report["fd"]
+              and e.get("return_code", -1) >= 0]
+    assert len(mapped) == 1, (report, actor)
+    # mmap carries the kernel's compact dev_t, not userspace's st_dev encoding.
+    assert mapped[0]["args"]["dev"] == (report["major"] << 20) | report["minor"]
+    assert mapped[0]["args"]["ino"] == report["ino"]
+
+
 def test_openat_map_pressure_is_not_silent(
         ssh_config, ssh_cmd, bloodhound_events, wait_for_events):
     result = ssh_cmd("bpftool -j map show", user="root")

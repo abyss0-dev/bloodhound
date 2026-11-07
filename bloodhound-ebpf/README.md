@@ -46,6 +46,4 @@ graph TD
 
 ## Kernel Struct Offsets
 
-This crate uses hardcoded `task_struct` byte offsets. See [docs/ebpf-offsets.md](../docs/ebpf-offsets.md) for the offset table and verification procedure.
-
-> ⚠️ Always verify offsets on the **target VM kernel**, not the build host.
+Member offsets for process lifecycle, namespace membership, mount/exec views, fd identity, and TTY classification are resolved at runtime from the target kernel's BTF (`/sys/kernel/btf/vmlinux`) and injected before eBPF load. No hardcoded struct offsets remain. See [docs/ebpf-offsets.md](../docs/ebpf-offsets.md) for details.

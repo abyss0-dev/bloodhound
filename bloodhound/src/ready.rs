@@ -109,6 +109,34 @@ mod tests {
     }
 
     #[test]
+    fn ready_event_tty_availability_requires_resolution_and_attachment() {
+        for tty_offsets in [None, Some([0, 8, 16])] {
+            for attached in [false, true] {
+                let mut report = crate::loader::AttachReport::default();
+                report.keys.insert("lifecycle".into(), true);
+                for key in ["tty.write", "tty.read", "tty.read_ret"] {
+                    report.record_tty_attach(key, attached, tty_offsets.as_ref());
+                }
+                let json = serde_json::to_value(ready_event(
+                    &report,
+                    1,
+                    None,
+                    &StartupFacts::default(),
+                ))
+                .unwrap();
+                for key in ["tty.write", "tty.read", "tty.read_ret"] {
+                    assert_eq!(
+                        json["args"]["attached"][key],
+                        tty_offsets.is_some() && attached,
+                        "{key}: offsets={tty_offsets:?}, attached={attached}",
+                    );
+                }
+                assert_eq!(json["args"]["attached"]["lifecycle"], true);
+            }
+        }
+    }
+
+    #[test]
     fn ready_event_carries_contract_fields_without_task_context() {
         let facts = StartupFacts {
             boot_id: "01234567-89ab-cdef-0123-456789abcdef".into(),
