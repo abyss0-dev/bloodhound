@@ -1,4 +1,4 @@
-"""Normal rich/path collection must not report syscall collection loss."""
+"""Normal rich/path/raw collection must not report collection loss."""
 
 import json
 import shlex
@@ -10,6 +10,7 @@ def test_rich_and_path_workload_has_no_syscall_collection_loss(
     script = '''
 import ctypes, json, os, tempfile
 libc = ctypes.CDLL(None, use_errno=True)
+assert libc.syscall(186) == os.getpid()  # gettid: Tier 1, main thread
 with tempfile.TemporaryDirectory(prefix="bh-syscall-collection-") as root:
     oldpath, newpath = root + "/source", root + "/destination"
     with open(oldpath, "wb+") as source, tempfile.TemporaryFile() as target:
@@ -50,9 +51,13 @@ with tempfile.TemporaryDirectory(prefix="bh-syscall-collection-") as root:
             assert len(matches) == 1, (name, records)
             assert matches[0]["event"]["type"] == "TRACEPOINT"
             assert matches[0]["return_code"] == (13 if name == "sendfile" else 0)
+        assert any(e["event"]["type"] == "SYSCALL"
+                   and e["args"].get("syscall_nr") == 186
+                   and e["return_code"] == call["pid"] for e in records), records
         truncate = next(e for e in records if e["event"]["name"] == "truncate")
         assert truncate["args"]["filename"] == call["oldpath"]
         rename = next(e for e in records if e["event"]["name"] == "rename")
         assert rename["args"]["oldpath"] == call["oldpath"]
         assert rename["args"]["newpath"] == call["newpath"]
-        assert not any(e["event"]["name"] == "syscall.collection" for e in events), events
+        assert not any(e["event"]["name"] in {"syscall.collection", "raw_syscall.collection"}
+                       for e in events), events

@@ -39,6 +39,21 @@ fn cleanup_absence_is_normal_but_other_errors_are_loss() {
 }
 
 #[test]
+fn raw_reason_indices_cover_the_counter_map_without_holes() {
+    use bloodhound_common::{RAW_SYSCALL_FAILURE_COUNT, RAW_SYSCALL_FAILURE_REASONS};
+    assert_eq!(RAW_SYSCALL_FAILURE_COUNT as usize, RAW_SYSCALL_FAILURE_REASONS.len());
+    for (reason, name) in [
+        (SYSCALL_ENTRY_CAPTURE_FAILED, "entry_capture_failed"),
+        (SYSCALL_ENTRY_SAVE_FAILED, "entry_save_failed"),
+        (SYSCALL_EXIT_CAPTURE_FAILED, "exit_capture_failed"),
+        (SYSCALL_INVOCATION_INTERRUPTED, "invocation_interrupted"),
+        (SYSCALL_ENTRY_CLEANUP_FAILED, "entry_cleanup_failed"),
+    ] {
+        assert_eq!(RAW_SYSCALL_FAILURE_REASONS[reason as usize], name);
+    }
+}
+
+#[test]
 fn reason_indices_cover_the_counter_map_without_holes() {
     let reasons = [
         (SYSCALL_ENTRY_CAPTURE_FAILED, "entry_capture_failed"),
