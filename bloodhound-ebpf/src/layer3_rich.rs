@@ -615,18 +615,29 @@ unsafe fn try_exit_fd(ctx: &TracePointContext) -> Result<u32, i64> {
 
 // ── Generic two-path enter/exit ──────────────────────────────────────────────
 
-fn two_path_args(kind: EventKind) -> Option<(usize, usize)> {
+#[repr(u8)]
+#[derive(Clone, Copy)]
+enum TwoPathKind {
+    Rename = EventKind::Rename as u8,
+    Renameat2 = EventKind::Renameat2 as u8,
+    Link = EventKind::Link as u8,
+    Linkat = EventKind::Linkat as u8,
+    Symlink = EventKind::Symlink as u8,
+    Symlinkat = EventKind::Symlinkat as u8,
+    Mount = EventKind::Mount as u8,
+}
+
+fn two_path_args(kind: TwoPathKind) -> (usize, usize) {
     match kind {
-        EventKind::Rename | EventKind::Link | EventKind::Symlink | EventKind::Mount => Some((0, 1)),
-        EventKind::Renameat2 | EventKind::Linkat => Some((1, 3)),
-        EventKind::Symlinkat => Some((0, 2)),
-        _ => None,
+        TwoPathKind::Rename | TwoPathKind::Link | TwoPathKind::Symlink | TwoPathKind::Mount => (0, 1),
+        TwoPathKind::Renameat2 | TwoPathKind::Linkat => (1, 3),
+        TwoPathKind::Symlinkat => (0, 2),
     }
 }
 
-unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: EventKind) -> Result<u32, i64> {
+unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: TwoPathKind) -> Result<u32, i64> {
     if !should_trace() { return Ok(0); }
-    let (path1_arg, path2_arg) = match two_path_args(kind) { Some(args) => args, None => return Ok(0) };
+    let (path1_arg, path2_arg) = two_path_args(kind);
     let path1_ptr: u64 = ctx.read_at(16 + 8 * path1_arg).map_err(|_| -1i64)?;
     let path2_ptr: u64 = ctx.read_at(16 + 8 * path2_arg).map_err(|_| -1i64)?;
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -732,17 +743,17 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
 #[tracepoint] pub fn sys_exit_mkdir(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Mkdirat as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlink) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Symlink) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_symlink(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Symlinkat) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Symlinkat) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Link) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Link) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_link(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Linkat) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Linkat) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_linkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Rename) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Rename) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_rename(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Renameat2) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Renameat2) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_renameat2(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_chmod(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Chmod as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_chmod(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
@@ -760,7 +771,7 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
 #[tracepoint] pub fn sys_exit_truncate(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Ftruncate as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, EventKind::Mount) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Mount) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_mount(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_enter_umount2(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Umount2 as u8) } { Ok(_)|Err(_) => 0 } }
 #[tracepoint] pub fn sys_exit_umount2(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }

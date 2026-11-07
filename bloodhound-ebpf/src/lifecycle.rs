@@ -105,7 +105,11 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         crate::maps::openat_failure(3);
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
     }
-    // Fatal signals can bypass sys_exit, so release invocation-owned path bytes.
+    // Entry/exit tracepoints attach separately: an invocation can be saved
+    // before its exit hook is attached. Reclaim orphaned path bytes before
+    // PID reuse. Ordinary fatal-signal delivery is not a skipped syscall exit:
+    // Linux 6.8 kernel/entry/common.c traces sys_exit before return-to-user
+    // signal handling.
     let _ = crate::maps::PATH_ENTRY_MAP.remove(&tid);
     // Same for an exec that never reached sys_exit; a later task may reuse
     // this task_struct address.

@@ -1,5 +1,6 @@
 #![allow(unused)]
 use aya_ebpf::{
+    bindings::BPF_F_NO_PREALLOC,
     macros::map,
     maps::{Array, HashMap, PerCpuArray, RingBuf},
 };
@@ -60,9 +61,14 @@ pub struct PathEntry {
     pub path2: [u8; MAX_PATH_SIZE],
 }
 
+// Preallocating ~8.3 KB per entry at 10,240 slots would reserve ~85 MB even
+// when idle. These syscall tracepoints and sched_process_exit (not NMI hooks)
+// can use NO_PREALLOC so value storage scales with in-flight invocations.
+// Allocation under memory pressure can now fail at insertion; accounting for
+// that loss is deferred to the later path capture-failure contract.
 #[map]
 pub static PATH_ENTRY_MAP: HashMap<u64, PathEntry> =
-    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
+    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, BPF_F_NO_PREALLOC);
 
 // Construct in map memory to stay below the 512-byte BPF stack limit.
 #[map]
