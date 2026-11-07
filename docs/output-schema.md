@@ -52,6 +52,10 @@ BehaviorEvent
 |   +-- prot     : [string]   (mmap: ["PROT_READ", "PROT_WRITE", "PROT_EXEC"])
 |   +-- length   : u64        (mmap: requested mapping length in bytes)
 |   +-- in_fd, out_fd, in_fd_type, out_fd_type, size : sendfile/splice
+|   +-- oldpath, newpath : string (two-path syscalls: input paths)
+|   +-- path_capture_version : u8 (path events: 1 when capture status is recorded, 0 when absent/legacy)
+|   +-- path_status : string  (single-path events: complete, truncated, read_error, invalid_encoding, unknown)
+|   +-- path1_status, path2_status : string (two-path events: complete, truncated, read_error, invalid_encoding, unknown)
 |   +-- ...      : (extensible per event type)
 |
 +-- return_code (OPTIONAL) : i32
@@ -517,6 +521,83 @@ Tier-2-covered syscall numbers (delegated to rich/path capture), out-of-range or
 excluded syscall numbers, invocations in flight at attach, and `-ENOENT` return
 values on map removal. Interrupted accounting requires a recorded entry, and
 ring-buffer drops remain strictly in `DROP_COUNT` / `HEARTBEAT`.
+
+### Path event acquisition status (capture version 1)
+
+Path capture status reports the acquisition completeness for all TRACEPOINT
+path-bearing syscall events other than `openat` and `exec` (`execve`/`execveat`),
+which retain their own dedicated capture metadata and public fields. The wire
+layout contract is defined in
+[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+
+#### Covered Events
+
+The events covered by this rule, verified from `bloodhound/src/deserializer.rs`,
+are every path-bearing syscall event other than `openat` and `exec`:
+
+- **Single-path syscalls** (12 events, reporting `args.filename`):
+  `chdir`, `unlink`, `unlinkat`, `mkdir`, `mkdirat`, `rmdir`, `chmod`,
+  `fchmodat`, `chown`, `fchownat`, `truncate`, `umount2`.
+- **Two-path syscalls** (7 events, reporting `args.oldpath` and `args.newpath`):
+  `rename`, `renameat2`, `symlink`, `symlinkat`, `link`, `linkat`, `mount`.
+
+(FD-only variants such as `fchdir`, `fchmod`, `fchown`, and `ftruncate` operate
+on file descriptors rather than paths and do not carry path capture fields.)
+
+`openat` and `exec` (`execve`/`execveat`) are governed by their respective
+capture contracts and retain their existing published fields (`capture_version`,
+`dirfd`, `filename_status`, and `file_identity_status` for `openat`;
+`exec_capture_version`, `argv_status`, and `filename_status` for `exec`);
+their schemas are unchanged.
+
+#### Added `args` Fields
+
+For covered events, `args` carries:
+
+- `path_capture_version` (integer): Wire capture version. Emitted as `1` for
+  records with capture status metadata, or `0` for legacy or unversioned records.
+- For single-path events:
+  - `path_status` (string): Capture status for `args.filename`.
+- For two-path events:
+  - `path1_status` (string): Capture status for the primary input path (`args.oldpath`).
+  - `path2_status` (string): Capture status for the secondary input path (`args.newpath`).
+
+#### Status Values and Semantics
+
+The status fields take one of the following string values:
+
+- `complete`: The pathname was completely and successfully read from user memory
+  into the kernel buffer and verified by userspace as valid UTF-8.
+- `truncated`: The pathname reached the kernel read buffer limit. Specifically,
+  a path of exactly 4095 bytes is reported `truncated` because the kernel string
+  read cannot distinguish a 4095-byte pathname from a longer one (the same
+  conservative saturation rule used by `openat` and `exec`).
+- `read_error`: The pathname pointer was NULL (`0`) or pointed to an unreadable
+  user-memory address (e.g. invalid address or unmapped memory). NULL is treated
+  as an actual user-memory read failure and produces `read_error`; userspace
+  never infers successful acquisition from an empty string.
+- `invalid_encoding`: The kernel read succeeded without truncation
+  (`CaptureStatus::Complete`), but userspace string validation detected non-UTF-8
+  byte sequences. UTF-8 validation is owned by userspace; lossy conversion is
+  never labeled `complete`.
+- `unknown`: Reported when `path_capture_version` is 0 or absent (legacy records).
+  Downstream consumers must require an explicitly `complete` status rather than
+  inferring completeness from an empty string or the absence of a truncation flag.
+
+#### Wire and Validation Rules
+
+In `HeaderCapture`, capture status codes are mapped in input path order:
+- For single-path events, `primary` carries the status of `filename`. `secondary`
+  must be zero (`0x00`); a single-path version 1 record with a non-zero secondary
+  status byte is rejected by the deserializer as invalid wire metadata.
+- For two-path events, `primary` carries the status of `oldpath` and `secondary`
+  carries the status of `newpath`.
+
+For version 1 records, the deserializer strictly validates that `path_len`
+(single-path) or `path1_len + path2_len` (two-path) equals the variable-length
+payload length. Any record with inconsistent lengths, unknown status codes, or a
+non-zero secondary byte on a single-path event is rejected via the
+`DIAGNOSTIC/stream.health` deserialization rejection path.
 
 ### Exec-entry filesystem view
 

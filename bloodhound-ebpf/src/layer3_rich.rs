@@ -1,5 +1,5 @@
 use aya_ebpf::{
-    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user, bpf_probe_read_user_str_bytes},
+    helpers::{bpf_get_current_pid_tgid, bpf_probe_read_user},
     macros::tracepoint,
     programs::TracePointContext,
 };
@@ -7,12 +7,16 @@ use bloodhound_common::*;
 
 use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
-use crate::helpers::{emit_event, bpf_memcpy};
+use crate::helpers::{emit_event, bpf_memcpy, read_user_str};
 use crate::maps::{syscall_failure, syscall_save, syscall_cleanup};
 use crate::maps::{
     ASSEMBLY_BUF, OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, PATH_ENTRY_MAP, PATH_TMP_BUF,
     RICH_ENTRY_MAP, SYSCALL_TMP_BUF,
 };
+
+// Path exit lengths use masks rather than min() so LLVM spills/reloads do not
+// hide their bounds from the BPF verifier, including single-path and openat.
+const _: () = assert!(MAX_PATH_SIZE.is_power_of_two());
 
 // ── Emit helpers ─────────────────────────────────────────────────────────────
 
@@ -124,16 +128,13 @@ unsafe fn try_sys_enter_openat(ctx: &TracePointContext) -> Result<u32, i64> {
     entry.header = header;
     entry.flags = flags;
     entry.dirfd = ctx.read_at::<i32>(16).map_err(|_| -1i64)?;
-    entry.capture_flags = 0;
     entry.mode = mode as u32;
-    entry.filename_len = match bpf_probe_read_user_str_bytes(
-        filename_ptr as *const u8, &mut entry.filename,
-    ) {
-        Ok(s) => {
-            if s.len() < MAX_PATH_SIZE - 1 { entry.capture_flags = PATH_COMPLETE; }
-            s.len() as u16
-        }
-        Err(_) => { entry.capture_flags = PATH_READ_FAILED; 0 },
+    let (filename_len, status) = read_user_str(filename_ptr as *const u8, &mut entry.filename);
+    entry.filename_len = filename_len;
+    entry.capture_flags = match status {
+        CaptureStatus::Complete => PATH_COMPLETE,
+        CaptureStatus::Truncated => 0,
+        CaptureStatus::ReadError => PATH_READ_FAILED,
     };
     if OPENAT_ENTRY_MAP.insert(&pid_tgid, entry, 0).is_err() {
         crate::maps::openat_failure(OPENAT_ENTRY_SAVE_FAILED);
@@ -164,7 +165,7 @@ unsafe fn try_sys_exit_openat(ctx: &TracePointContext) -> Result<u32, i64> {
     } else {
         crate::fd_ident::DevIno::default()
     };
-    let filename_len = (entry.filename_len as usize).min(MAX_PATH_SIZE - 1);
+    let filename_len = (entry.filename_len as usize) & (MAX_PATH_SIZE - 1);
 
     let payload = OpenatPayload {
         flags: entry.flags,
@@ -559,19 +560,17 @@ unsafe fn enter_path_arg(ctx: &TracePointContext, kind: u8, path_arg: usize) -> 
     let pid_tgid = bpf_get_current_pid_tgid();
     let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Err(-1) };
     entry.header = get_task_info(kind);
-    entry.path1_len = read_path(pathname, &mut entry.path1);
+    let (path_len, status) = read_path(pathname, &mut entry.path1);
+    entry.path1_len = path_len;
     entry.path2_len = 0;
+    entry.header.capture = HeaderCapture { version: 1, primary: status as u8, secondary: 0 };
     syscall_save(PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0));
     Ok(0)
 }
 
 #[inline(always)]
-unsafe fn read_path(pathname: u64, buf: &mut [u8; MAX_PATH_SIZE]) -> u16 {
-    if pathname == 0 { return 0; }
-    match bpf_probe_read_user_str_bytes(pathname as *const u8, buf) {
-        Ok(s) => s.len() as u16,
-        Err(_) => 0,
-    }
+unsafe fn read_path(pathname: u64, buf: &mut [u8; MAX_PATH_SIZE]) -> (u16, CaptureStatus) {
+    read_user_str(pathname as *const u8, buf)
 }
 
 unsafe fn try_exit_path(ctx: &TracePointContext) -> Result<u32, i64> {
@@ -579,7 +578,7 @@ unsafe fn try_exit_path(ctx: &TracePointContext) -> Result<u32, i64> {
     // Borrow map memory: copying an entry would exceed the BPF stack limit.
     let entry = match PATH_ENTRY_MAP.get(&pid_tgid) { Some(e) => e, None => return Ok(0) };
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let path_len = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
+    let path_len = (entry.path1_len as usize) & (MAX_PATH_SIZE - 1);
     let payload = PathPayload { path_len: path_len as u16, _pad: [0; 2], return_code: ret as i32 };
     if !emit_varlen(&entry.header, &payload, &entry.path1[..path_len]) {
         return Err(-1);
@@ -654,8 +653,13 @@ unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: TwoPathKind) -> Resu
     let pid_tgid = bpf_get_current_pid_tgid();
     let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Err(-1) };
     entry.header = get_task_info(kind as u8);
-    entry.path1_len = read_path(path1_ptr, &mut entry.path1);
-    entry.path2_len = read_path(path2_ptr, &mut entry.path2);
+    let (path1_len, status1) = read_path(path1_ptr, &mut entry.path1);
+    let (path2_len, status2) = read_path(path2_ptr, &mut entry.path2);
+    entry.path1_len = path1_len;
+    entry.path2_len = path2_len;
+    entry.header.capture = HeaderCapture {
+        version: 1, primary: status1 as u8, secondary: status2 as u8,
+    };
     syscall_save(PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0));
     Ok(0)
 }
@@ -667,7 +671,6 @@ unsafe fn try_exit_two_path(ctx: &TracePointContext) -> Result<u32, i64> {
     // read_path stores at most MAX_PATH_SIZE - 1 bytes. Masking preserves
     // those lengths and keeps their bounds visible after LLVM spills/reloads
     // across the checked copy helpers (min() can lose the verifier's bound).
-    const { assert!(MAX_PATH_SIZE.is_power_of_two()); }
     let p1 = (entry.path1_len as usize) & (MAX_PATH_SIZE - 1);
     let p2 = (entry.path2_len as usize) & (MAX_PATH_SIZE - 1);
     let payload = TwoPathPayload { path1_len: p1 as u16, path2_len: p2 as u16, return_code: ret as i32 };

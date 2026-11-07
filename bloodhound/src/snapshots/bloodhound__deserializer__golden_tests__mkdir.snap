@@ -4,7 +4,9 @@ expression: to_json(& event)
 ---
 {
   "args": {
-    "filename": "/tmp/bh-golden-mkdir"
+    "filename": "/tmp/bh-golden-mkdir",
+    "path_capture_version": 0,
+    "path_status": "unknown"
   },
   "event": {
     "layer": "behavior",

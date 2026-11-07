@@ -6,7 +6,7 @@ use aya_ebpf::{
 use bloodhound_common::*;
 
 use crate::filter::{fill_task_info, should_trace};
-use crate::helpers::emit_event;
+use crate::helpers::{emit_event, read_user_str};
 use crate::maps::{ASSEMBLY_BUF, EXECVE_ENTRY_MAP, EXECVE_TMP_BUF, SCRATCH_BUF};
 
 // ── sys_enter_execve ─────────────────────────────────────────────────────────
@@ -203,10 +203,7 @@ unsafe fn read_filename(filename_ptr: *const u8) -> (u16, CaptureStatus) {
     let buf = match SCRATCH_BUF.get_ptr_mut(0) {
         Some(b) => &mut (*b).buf, None => return (0, CaptureStatus::ReadError),
     };
-    match bpf_probe_read_user_str_bytes(filename_ptr, buf) {
-        Ok(s) => (s.len() as u16, if s.len() < MAX_PATH_SIZE - 1 { CaptureStatus::Complete } else { CaptureStatus::Truncated }),
-        Err(_) => (0, CaptureStatus::ReadError),
-    }
+    read_user_str(filename_ptr, buf)
 }
 
 #[inline(always)]

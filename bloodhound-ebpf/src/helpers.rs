@@ -3,22 +3,21 @@ use aya_ebpf::{
     programs::RawTracePointContext,
     EbpfContext,
 };
-use bloodhound_common::{EventHeader, MAX_PATH_SIZE};
+use bloodhound_common::{CaptureStatus, EventHeader, MAX_PATH_SIZE};
 
-use crate::maps::{DROP_COUNT, EVENTS, SCRATCH_BUF};
+use crate::maps::{DROP_COUNT, EVENTS};
 
-/// Read a user-space string into the per-CPU scratch buffer at the given index.
-/// Returns the number of bytes read (including null terminator), or 0 on failure.
+/// Read a user-space path, returning its byte length (excluding NUL) and capture status.
 #[inline(always)]
-pub unsafe fn read_user_str(src: *const u8, scratch_idx: u32) -> u16 {
-    let buf = match SCRATCH_BUF.get_ptr_mut(scratch_idx) {
-        Some(b) => &mut (*b).buf,
-        None => return 0,
-    };
-
-    match bpf_probe_read_user_str_bytes(src, buf) {
-        Ok(s) => s.len() as u16,
-        Err(_) => 0,
+pub unsafe fn read_user_str(src: *const u8, buffer: &mut [u8; MAX_PATH_SIZE]) -> (u16, CaptureStatus) {
+    match bpf_probe_read_user_str_bytes(src, buffer) {
+        // Aya excludes NUL; a full buffer cannot certify that the source ended.
+        Ok(s) => (s.len() as u16, if s.len() < MAX_PATH_SIZE - 1 {
+            CaptureStatus::Complete
+        } else {
+            CaptureStatus::Truncated
+        }),
+        Err(_) => (0, CaptureStatus::ReadError),
     }
 }
 

@@ -62,6 +62,54 @@ with tempfile.TemporaryDirectory(prefix="bh-{name}-") as root:
     assert matches[0]["args"]["newpath"] == record["newpath"]
 
 
+@pytest.mark.parametrize("two,first,second,expected", [
+    (False, "normal", "normal", ("complete",)),
+    (False, "long", "normal", ("truncated",)),
+    (False, "bad", "normal", ("read_error",)),
+    (False, "null", "normal", ("read_error",)),
+    (True, "long", "bad", ("truncated", "read_error")),
+    (True, "bad", "long", ("read_error", "truncated")),
+    (True, "normal", "normal", ("complete", "complete")),
+])
+def test_path_capture_status(two, first, second, expected, ssh_cmd,
+                             bloodhound_events, wait_for_matching_events):
+    name = "rename" if two else "mkdir"
+    script = f'''
+import ctypes, json, os
+libc = ctypes.CDLL(None, use_errno=True)
+normal = ctypes.c_char_p(b"/tmp")
+long = ctypes.c_char_p(b"/" + b"x" * 8192)
+paths = dict(normal=normal, long=long, bad=ctypes.c_void_p(1), null=ctypes.c_void_p(0))
+second_arg = paths[{second!r}] if {two!r} else ctypes.c_uint(0o700)
+ret = libc.syscall({82 if two else 83}, paths[{first!r}], second_arg)
+print(json.dumps(dict(pid=os.getpid(), ret=ret)))
+'''
+    result = ssh_cmd("python3 -c " + shlex.quote(script))
+    assert result.returncode == 0, result.stderr
+    record = json.loads(result.stdout)
+    events = wait_for_matching_events(
+        bloodhound_events,
+        lambda events: any(e["header"]["pid"] == record["pid"]
+                           and e["event"]["name"] == name for e in events),
+        f"{name} capture status for PID {record['pid']}",
+    )
+    matches = [e for e in events if e["header"]["pid"] == record["pid"]
+               and e["event"]["name"] == name]
+    assert len(matches) == 1, matches
+    args = matches[0]["args"]
+    assert args["path_capture_version"] == 1
+    keys = ("path1_status", "path2_status") if two else ("path_status",)
+    assert tuple(args[key] for key in keys) == expected, matches
+    path_keys = ("oldpath", "newpath") if two else ("filename",)
+    for key, source in zip(path_keys, (first, second)):
+        if source == "long":
+            assert args[key] == "/" + "x" * 4094, matches
+        elif source == "normal":
+            assert args[key] == "/tmp", matches
+        else:
+            assert args[key] == "", matches
+
+
 def test_single_path_across_cpu_migration(ssh_config, ssh_cmd, bloodhound_events,
                                           wait_for_matching_events):
     records = run_fixture(ssh_config, ssh_cmd, "path-concurrency.c")

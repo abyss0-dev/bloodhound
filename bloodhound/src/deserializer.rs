@@ -198,29 +198,29 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::Socket => parse_socket(payload)?,
         EventKind::Clone => parse_clone(payload, "clone")?,
         EventKind::Clone3 => parse_clone(payload, "clone3")?,
-        EventKind::Chdir => parse_path_event(payload, "chdir")?,
+        EventKind::Chdir => parse_path_event(payload, "chdir", header.capture)?,
         EventKind::Fchdir => parse_fd_event(payload, "fchdir")?,
-        EventKind::Unlink => parse_path_event(payload, "unlink")?,
-        EventKind::Unlinkat => parse_path_event(payload, "unlinkat")?,
-        EventKind::Rename => parse_two_path_event(payload, "rename")?,
-        EventKind::Renameat2 => parse_two_path_event(payload, "renameat2")?,
-        EventKind::Mkdir => parse_path_event(payload, "mkdir")?,
-        EventKind::Mkdirat => parse_path_event(payload, "mkdirat")?,
-        EventKind::Rmdir => parse_path_event(payload, "rmdir")?,
-        EventKind::Symlink => parse_two_path_event(payload, "symlink")?,
-        EventKind::Symlinkat => parse_two_path_event(payload, "symlinkat")?,
-        EventKind::Link => parse_two_path_event(payload, "link")?,
-        EventKind::Linkat => parse_two_path_event(payload, "linkat")?,
-        EventKind::Chmod => parse_path_event(payload, "chmod")?,
+        EventKind::Unlink => parse_path_event(payload, "unlink", header.capture)?,
+        EventKind::Unlinkat => parse_path_event(payload, "unlinkat", header.capture)?,
+        EventKind::Rename => parse_two_path_event(payload, "rename", header.capture)?,
+        EventKind::Renameat2 => parse_two_path_event(payload, "renameat2", header.capture)?,
+        EventKind::Mkdir => parse_path_event(payload, "mkdir", header.capture)?,
+        EventKind::Mkdirat => parse_path_event(payload, "mkdirat", header.capture)?,
+        EventKind::Rmdir => parse_path_event(payload, "rmdir", header.capture)?,
+        EventKind::Symlink => parse_two_path_event(payload, "symlink", header.capture)?,
+        EventKind::Symlinkat => parse_two_path_event(payload, "symlinkat", header.capture)?,
+        EventKind::Link => parse_two_path_event(payload, "link", header.capture)?,
+        EventKind::Linkat => parse_two_path_event(payload, "linkat", header.capture)?,
+        EventKind::Chmod => parse_path_event(payload, "chmod", header.capture)?,
         EventKind::Fchmod => parse_fd_event(payload, "fchmod")?,
-        EventKind::Fchmodat => parse_path_event(payload, "fchmodat")?,
-        EventKind::Chown => parse_path_event(payload, "chown")?,
+        EventKind::Fchmodat => parse_path_event(payload, "fchmodat", header.capture)?,
+        EventKind::Chown => parse_path_event(payload, "chown", header.capture)?,
         EventKind::Fchown => parse_fd_event(payload, "fchown")?,
-        EventKind::Fchownat => parse_path_event(payload, "fchownat")?,
-        EventKind::Truncate => parse_path_event(payload, "truncate")?,
+        EventKind::Fchownat => parse_path_event(payload, "fchownat", header.capture)?,
+        EventKind::Truncate => parse_path_event(payload, "truncate", header.capture)?,
         EventKind::Ftruncate => parse_fd_event(payload, "ftruncate")?,
-        EventKind::Mount => parse_two_path_event(payload, "mount")?,
-        EventKind::Umount2 => parse_path_event(payload, "umount2")?,
+        EventKind::Mount => parse_two_path_event(payload, "mount", header.capture)?,
+        EventKind::Umount2 => parse_path_event(payload, "umount2", header.capture)?,
         EventKind::Sendto => parse_sendto_recvfrom(payload, "sendto")?,
         EventKind::Recvfrom => parse_sendto_recvfrom(payload, "recvfrom")?,
         EventKind::Dup => parse_dup(payload, "dup")?,
@@ -703,17 +703,38 @@ fn parse_process_exit(payload: &[u8]) -> Result<(String, String, String, Option<
     Ok(("LIFECYCLE".into(), "process_exit".into(), "behavior".into(), Some(args), None))
 }
 
-fn parse_path_event(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn path_capture_status(version: u8, code: u8, data: &[u8]) -> Result<&'static str> {
+    if version != 1 {
+        return Ok("unknown");
+    }
+    let status = CaptureStatus::try_from(code).ok().context("invalid path capture status")?;
+    Ok(match status {
+        CaptureStatus::Complete if std::str::from_utf8(data).is_err() => "invalid_encoding",
+        CaptureStatus::Complete => "complete",
+        CaptureStatus::Truncated => "truncated",
+        CaptureStatus::ReadError => "read_error",
+    })
+}
+
+fn parse_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < PathPayload::SIZE {
         bail!("Path payload too short");
     }
     let path = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const PathPayload) };
     let var_data = &payload[PathPayload::SIZE..];
+    if capture.version == 1 && capture.secondary != 0 {
+        bail!("Single-path capture secondary must be zero");
+    }
+    if capture.version == 1 && path.path_len as usize != var_data.len() {
+        bail!("Path capture length does not match record");
+    }
     let path_len = (path.path_len as usize).min(var_data.len());
     let filename = extract_string(&var_data[..path_len]);
 
     let args = serde_json::json!({
         "filename": filename,
+        "path_capture_version": capture.version,
+        "path_status": path_capture_status(capture.version, capture.primary, &var_data[..path_len])?,
     });
 
     Ok((
@@ -744,12 +765,15 @@ fn parse_fd_event(payload: &[u8], name: &str) -> Result<(String, String, String,
     ))
 }
 
-fn parse_two_path_event(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_two_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < TwoPathPayload::SIZE {
         bail!("TwoPath payload too short");
     }
     let tp = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const TwoPathPayload) };
     let var_data = &payload[TwoPathPayload::SIZE..];
+    if capture.version == 1 && tp.path1_len as usize + tp.path2_len as usize != var_data.len() {
+        bail!("Two-path capture lengths do not match record");
+    }
 
     let p1_len = (tp.path1_len as usize).min(var_data.len());
     let path1 = extract_string(&var_data[..p1_len]);
@@ -761,6 +785,9 @@ fn parse_two_path_event(payload: &[u8], name: &str) -> Result<(String, String, S
     let args = serde_json::json!({
         "oldpath": path1,
         "newpath": path2,
+        "path_capture_version": capture.version,
+        "path1_status": path_capture_status(capture.version, capture.primary, &var_data[..p1_len])?,
+        "path2_status": path_capture_status(capture.version, capture.secondary, &var_data[p2_start..p2_start + p2_len])?,
     });
 
     Ok((
@@ -1968,6 +1995,101 @@ mod tests {
         let args = event.args.unwrap();
         assert!(args.get("dev").is_none());
         assert!(args.get("ino").is_none());
+    }
+
+    #[test]
+    fn path_capture_status_contract() {
+        for two in [false, true] {
+            for (version, code, expected) in [
+                (0, 255, "unknown"), (1, CaptureStatus::Complete as u8, "complete"),
+                (1, CaptureStatus::Truncated as u8, "truncated"),
+                (1, CaptureStatus::ReadError as u8, "read_error"),
+            ] {
+                let mut data = path_capture_record(two, b"/one", b"/two");
+                let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+                header.capture = HeaderCapture { version, primary: code, secondary: if two { code } else { 0 } };
+                data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+                let args = deserialize(&data).unwrap().args.unwrap();
+                assert_eq!(args["path_capture_version"], version);
+                if two {
+                    assert_eq!(args["path1_status"], expected);
+                    assert_eq!(args["path2_status"], expected);
+                } else {
+                    assert_eq!(args["path_status"], expected);
+                }
+            }
+        }
+    }
+
+    fn path_capture_record(two: bool, first: &[u8], second: &[u8]) -> Vec<u8> {
+        if two {
+            let payload = TwoPathPayload { path1_len: first.len() as u16,
+                path2_len: second.len() as u16, return_code: -1 };
+            build_event_with_vardata(EventKind::Rename, &payload, &[first, second].concat())
+        } else {
+            let payload = PathPayload { path_len: first.len() as u16, _pad: [0; 2], return_code: -1 };
+            build_event_with_vardata(EventKind::Chdir, &payload, first)
+        }
+    }
+
+    #[test]
+    fn single_path_v1_rejects_nonzero_secondary() {
+        for secondary in 1..=u8::MAX {
+            let mut data = path_capture_record(false, b"a", b"");
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture {
+                version: 1, primary: CaptureStatus::Complete as u8, secondary,
+            };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            assert!(deserialize(&data).is_err(), "accepted secondary={secondary}");
+        }
+    }
+
+    #[test]
+    fn path_capture_rejects_invalid_codes() {
+        for (two, primary, secondary) in [
+            (false, 0, 0), (false, 255, 0),
+            (true, 255, CaptureStatus::Complete as u8),
+            (true, CaptureStatus::Complete as u8, 255),
+        ] {
+            let mut data = path_capture_record(two, b"a", b"b");
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture { version: 1, primary, secondary };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            assert!(deserialize(&data).is_err());
+        }
+    }
+
+    #[test]
+    fn path_capture_invalid_encoding_and_order() {
+        for (two, first, second, primary, secondary, expected1, expected2) in [
+            (false, &b"\xff"[..], &b""[..], CaptureStatus::Complete, CaptureStatus::Complete, "invalid_encoding", "complete"),
+            (true, &b"\xff"[..], &b"ok"[..], CaptureStatus::Complete, CaptureStatus::ReadError, "invalid_encoding", "read_error"),
+            (true, &b"ok"[..], &b"\xff"[..], CaptureStatus::Truncated, CaptureStatus::Complete, "truncated", "invalid_encoding"),
+        ] {
+            let mut data = path_capture_record(two, first, second);
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture { version: 1, primary: primary as u8, secondary: if two { secondary as u8 } else { 0 } };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args[if two { "path1_status" } else { "path_status" }], expected1);
+            if two { assert_eq!(args["path2_status"], expected2); }
+        }
+    }
+
+    #[test]
+    fn path_capture_v1_rejects_mismatched_lengths() {
+        for two in [false, true] {
+            for extra in [false, true] {
+                let mut data = path_capture_record(two, b"one", b"two");
+                let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+                header.capture = HeaderCapture { version: 1,
+                    primary: CaptureStatus::Complete as u8, secondary: if two { CaptureStatus::Complete as u8 } else { 0 } };
+                data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+                if extra { data.push(0); } else { data.pop(); }
+                assert!(deserialize(&data).is_err());
+            }
+        }
     }
 
     /// Path events (chdir, mkdir, unlink, etc.) must extract the path.
