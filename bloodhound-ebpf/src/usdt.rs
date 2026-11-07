@@ -13,8 +13,6 @@ use crate::{
     maps::ASSEMBLY_BUF,
 };
 
-const COMMAND_NAME_LIMIT: usize = 64;
-
 #[inline(always)]
 unsafe fn emit_shell(
     attach_point_id: u32,
@@ -32,7 +30,7 @@ unsafe fn emit_shell(
         emit_shell_capture_error(attach_point_id, 3, 1);
         return;
     }
-    let mut name = [0u8; COMMAND_NAME_LIMIT];
+    let mut name = [0u8; TRAINING_SHELL_COMMAND_NAME_LIMIT];
     let length = match bpf_probe_read_user_str_bytes(command_name, &mut name) {
         Ok(read) => read.len(),
         Err(_) => {
@@ -52,7 +50,7 @@ unsafe fn emit_shell(
         // Aya's byte helper removes the terminating NUL. At the capture
         // boundary we cannot distinguish an exactly-63-byte string from one
         // that was truncated, so report the bounded, conservative result.
-        command_name_truncated: (length == COMMAND_NAME_LIMIT - 1) as u8,
+        command_name_truncated: (length == TRAINING_SHELL_COMMAND_NAME_LIMIT - 1) as u8,
         _pad: 0,
     };
     let total = EventHeader::SIZE + UsdtTrainingShellPayload::SIZE + length;
@@ -79,7 +77,7 @@ unsafe fn emit_shell(
         // the fixed loop keeps both source and destination bounds visible to
         // the verifier.
         let destination = EventHeader::SIZE + UsdtTrainingShellPayload::SIZE;
-        for index in 0..COMMAND_NAME_LIMIT {
+        for index in 0..TRAINING_SHELL_COMMAND_NAME_LIMIT {
             if index >= length {
                 break;
             }

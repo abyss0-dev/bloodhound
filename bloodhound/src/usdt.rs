@@ -16,7 +16,7 @@ use std::{
 use anyhow::{anyhow, bail, Context, Result};
 use bloodhound_common::{
     EventKind, UsdtTrainingPeerPayload, UsdtTrainingShellCaptureErrorPayload,
-    UsdtTrainingShellPayload,
+    UsdtTrainingShellPayload, TRAINING_SHELL_COMMAND_NAME_LIMIT,
 };
 use serde_json::{json, Value};
 
@@ -34,21 +34,16 @@ pub struct CollectorMetadata {
     pub build_ids: &'static [&'static str],
     pub provider: &'static str,
     pub probe: &'static str,
-    pub schema_version: u16,
+    pub program_prefix: &'static str,
     pub maximum_attach_points: usize,
     /// Exact, build-time-declared operand form accepted from the USDT note.
     pub operands: &'static str,
-    pub fields: &'static [FieldMetadata],
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FieldMetadata {
-    pub name: &'static str,
-    pub source_type: &'static str,
-    pub operand_form: &'static str,
-    pub output_type: &'static str,
-    pub maximum_size: Option<usize>,
-    pub required: bool,
+impl CollectorMetadata {
+    fn program_name(&self, attach_point_id: usize) -> String {
+        format!("{}_{attach_point_id}", self.program_prefix)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -68,77 +63,6 @@ impl Architecture {
 // e2e/fixtures/Makefile.  They are not values read from configuration.
 const TRAINING_SHELL_V3_BUILD_IDS: &[&str] = &["11223344556677889900aabbccddeeff00112233"];
 const TRAINING_PEER_V1_BUILD_IDS: &[&str] = &["44556677889900aabbccddeeff00112233445566"];
-const TRAINING_SHELL_COMMAND_NAME_LIMIT: usize = 64;
-
-const TRAINING_SHELL_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata {
-        name: "shell_pid",
-        source_type: "u32",
-        operand_form: "8@%rdi",
-        output_type: "u32",
-        maximum_size: None,
-        required: true,
-    },
-    FieldMetadata {
-        name: "command_id",
-        source_type: "u64",
-        operand_form: "8@%rsi",
-        output_type: "u64",
-        maximum_size: None,
-        required: true,
-    },
-    FieldMetadata {
-        name: "command_kind",
-        source_type: "enum",
-        operand_form: "8@%rdx",
-        output_type: "enum",
-        maximum_size: None,
-        required: true,
-    },
-    FieldMetadata {
-        name: "command_name",
-        source_type: "utf8_pointer",
-        operand_form: "8@%rcx",
-        output_type: "utf8",
-        maximum_size: Some(64),
-        required: true,
-    },
-    FieldMetadata {
-        name: "semantic_flags",
-        source_type: "u32",
-        operand_form: "8@%r8",
-        output_type: "enum",
-        maximum_size: None,
-        required: true,
-    },
-    FieldMetadata {
-        name: "exit_status",
-        source_type: "i32",
-        operand_form: "8@%r9",
-        output_type: "i32",
-        maximum_size: None,
-        required: true,
-    },
-];
-
-const TRAINING_PEER_FIELDS: &[FieldMetadata] = &[
-    FieldMetadata {
-        name: "task_id",
-        source_type: "u64",
-        operand_form: "8@%rdi",
-        output_type: "u64",
-        maximum_size: None,
-        required: true,
-    },
-    FieldMetadata {
-        name: "result",
-        source_type: "enum",
-        operand_form: "8@%rsi",
-        output_type: "enum",
-        maximum_size: None,
-        required: true,
-    },
-];
 
 const REGISTRY: &[CollectorMetadata] = &[
     CollectorMetadata {
@@ -148,10 +72,9 @@ const REGISTRY: &[CollectorMetadata] = &[
         build_ids: TRAINING_SHELL_V3_BUILD_IDS,
         provider: "abyss0_shell",
         probe: "simple_command_completed",
-        schema_version: 3,
+        program_prefix: "usdt_training_shell_v3",
         maximum_attach_points: 8,
         operands: "8@%rdi 8@%rsi 8@%rdx 8@%rcx 8@%r8 8@%r9",
-        fields: TRAINING_SHELL_FIELDS,
     },
     CollectorMetadata {
         id: TRAINING_PEER_V1_ID,
@@ -160,14 +83,14 @@ const REGISTRY: &[CollectorMetadata] = &[
         build_ids: TRAINING_PEER_V1_BUILD_IDS,
         provider: "abyss0_peer",
         probe: "task_finished",
-        schema_version: 1,
+        program_prefix: "usdt_training_peer_v1",
         maximum_attach_points: 8,
         operands: "8@%rdi 8@%rsi",
-        fields: TRAINING_PEER_FIELDS,
     },
 ];
 
-pub fn registered_collectors() -> &'static [CollectorMetadata] {
+#[cfg(test)]
+fn registered_collectors() -> &'static [CollectorMetadata] {
     REGISTRY
 }
 
@@ -504,11 +427,7 @@ pub fn attach_selected(
             bail!("collector has more static locations than its compiled attach-point programs");
         }
         for (attach_point_id, probe) in target.probes.iter().enumerate() {
-            let program_name = match metadata.id {
-                TRAINING_SHELL_V3_ID => format!("usdt_training_shell_v3_{attach_point_id}"),
-                TRAINING_PEER_V1_ID => format!("usdt_training_peer_v1_{attach_point_id}"),
-                _ => bail!("unknown compiled collector"),
-            };
+            let program_name = metadata.program_name(attach_point_id);
             let program: &mut UProbe = bpf
                 .program_mut(&program_name)
                 .with_context(|| {
@@ -657,31 +576,6 @@ fn attach_uprobe_with_semaphore(
         return Err(io::Error::last_os_error()).context("enabling semaphore-backed uprobe");
     }
     Ok(fd)
-}
-
-/// Decode a fixed, collector-owned byte field into the canonical safe form.
-pub fn bounded_bytes(
-    bytes: &[u8],
-    capture_limit: usize,
-    observed_length: Option<usize>,
-    truncated: bool,
-) -> Value {
-    use base64::{engine::general_purpose::STANDARD, Engine as _};
-    json!({
-        "base64": STANDARD.encode(bytes),
-        "capture_limit": capture_limit,
-        "observed_length": observed_length,
-        "truncated": truncated,
-    })
-}
-
-pub fn bounded_utf8(
-    bytes: &[u8],
-    capture_limit: usize,
-    truncated: bool,
-) -> std::result::Result<Value, ReasonCode> {
-    let value = std::str::from_utf8(bytes).map_err(|_| ReasonCode::AbiIncompatible)?;
-    Ok(json!({"value": value, "capture_limit": capture_limit, "truncated": truncated}))
 }
 
 /// Convert a collector-owned fixed ring-buffer payload to a canonical event.
@@ -1323,13 +1217,20 @@ mod tests {
     }
 
     #[test]
-    fn bounded_values_never_expose_pointers_or_unbounded_bytes() {
-        let bytes = bounded_bytes(&[0, 1, 2], 8, Some(3), false);
-        assert_eq!(bytes["base64"], "AAEC");
-        assert_eq!(bytes["capture_limit"], 8);
-        let string = bounded_utf8(b"echo", 64, false).unwrap();
-        assert_eq!(string["value"], "echo");
-        assert!(bounded_utf8(&[0xff], 64, false).is_err());
+    fn derived_program_names_preserve_the_attach_contract() {
+        for (id, prefix) in [
+            (TRAINING_SHELL_V3_ID, "usdt_training_shell_v3"),
+            (TRAINING_PEER_V1_ID, "usdt_training_peer_v1"),
+        ] {
+            let metadata = collector(id).unwrap();
+            assert_eq!(metadata.program_prefix, prefix);
+            for attach_point_id in 0..metadata.maximum_attach_points {
+                assert_eq!(
+                    metadata.program_name(attach_point_id),
+                    format!("{prefix}_{attach_point_id}")
+                );
+            }
+        }
     }
 
     #[test]
