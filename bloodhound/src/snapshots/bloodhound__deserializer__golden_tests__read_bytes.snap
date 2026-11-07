@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/deserializer.rs
+expression: "serde_json :: to_string(& event).unwrap()"
+---
+{"header":{"timestamp":559852103419,"auid":1000,"sessionid":369,"pid":5075,"comm":"python3","process_ref":{"tgid":5075,"start_boottime_ns":559839916408},"tid":5075,"ns":{"mnt":{"status":"complete","inode":4026531841},"net":{"status":"complete","inode":4026531840},"uts":{"status":"complete","inode":4026531838},"ipc":{"status":"complete","inode":4026531839},"cgroup":{"status":"complete","inode":4026531835},"user":{"status":"complete","inode":4026531837},"pid":{"status":"complete","inode":4026531836}}},"event":{"type":"TRACEPOINT","name":"read","layer":"behavior"},"args":{"fd":3,"fd_type":"other","requested_size":7},"return_code":0}

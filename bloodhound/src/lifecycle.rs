@@ -237,6 +237,18 @@ mod tests {
     }
 
     #[test]
+    fn synthesized_lifecycle_bytes() {
+        let mut life = LifecycleSynthesizer::new();
+        let triggering = event(42, 100, "TRACEPOINT", "openat");
+        let start = life.before(&triggering).remove(0);
+        insta::assert_snapshot!("synthesized_process_start_bytes", serde_json::to_string(&start).unwrap());
+        let mut unknown = event(43, 0, "TRACEPOINT", "openat");
+        unknown.header.process_ref = None;
+        let diagnostic = life.before(&unknown).remove(0);
+        insta::assert_snapshot!("process_identity_bytes", serde_json::to_string(&diagnostic).unwrap());
+    }
+
+    #[test]
     fn synthesized_start_never_copies_proc_enrichment() {
         let mut triggering = event(std::process::id(), 100, "TRACEPOINT", "openat");
         triggering.proc = Some(crate::deserializer::ProcInfo {

@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/capture_health.rs
+expression: "serde_json::to_string(&event).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"DIAGNOSTIC","name":"raw_syscall.collection","layer":"behavior"},"args":{"failure_count_delta":2,"failure_count_total":5,"reason_code":"entry_save_failed","run_prefix_incomplete":true,"sampling":"userspace_poll","scope":"raw_syscall"}}

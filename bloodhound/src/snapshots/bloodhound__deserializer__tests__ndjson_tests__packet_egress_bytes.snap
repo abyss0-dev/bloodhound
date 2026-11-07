@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/ndjson_tests.rs
+expression: encoded
+---
+{"header":{"timestamp":1137297804245,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"PACKET","name":"egress","layer":"behavior"},"args":{"data":"AAAAAAAAAAAAAAAACABFAAAsvKlAAEARgBV/AAABfwAAAQ==","ifindex":0}}

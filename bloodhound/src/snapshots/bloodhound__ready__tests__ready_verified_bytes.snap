@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/ready.rs
+expression: "serde_json::to_string(&ready_event(&report, 4 << 20, nsfs, &facts,\n1_500_000_000)).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"META","name":"bloodhound_ready","layer":"behavior"},"args":{"attached":{"lifecycle":true,"tier2.openat":false},"auid":1000,"boot_id":"01234567-89ab-cdef-0123-456789abcdef","excluded":[123],"heartbeat_interval_ms":1,"nsfs_dev":4,"probes_attached":42,"ring_buffer_size":4194304}}

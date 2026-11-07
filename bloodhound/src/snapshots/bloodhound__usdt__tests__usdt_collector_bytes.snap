@@ -1,0 +1,5 @@
+---
+source: bloodhound/src/usdt.rs
+expression: "serde_json::to_string(&event).unwrap()"
+---
+{"header":{"timestamp":1500000000,"auid":0,"sessionid":0,"pid":0,"comm":""},"event":{"type":"DIAGNOSTIC","name":"usdt.collector","layer":"behavior"},"args":{"collector_id":"training-shell-v3","reason_code":"probe_not_found"}}

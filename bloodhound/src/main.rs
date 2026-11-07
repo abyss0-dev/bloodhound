@@ -84,6 +84,7 @@ async fn main() -> Result<()> {
         loader::ring_buffer_size(&bpf)?,
         ready::nsfs_dev(),
         &startup,
+        clock::monotonic_now_ns(),
     );
     sequence_tx
         .send(SequencedInput::Synthesized(Box::new(ready)))
@@ -393,6 +394,7 @@ fn finish_output<W: std::io::Write, R: drop_counter::DropCountReader>(
             emitted
                 .load(Ordering::Relaxed)
                 .saturating_sub(cursor.emitted),
+            clock::monotonic_now_ns(),
         );
         sequencer.accept(SequencedInput::Synthesized(Box::new(event)))?;
     }
@@ -500,7 +502,7 @@ mod final_tests {
         let task = tokio::spawn(async move {
             for _ in 0..100 {
                 tx.send(SequencedInput::Synthesized(Box::new(
-                    heartbeat::build_heartbeat(0, 0, 0),
+                    heartbeat::build_heartbeat(0, 0, 0, 1),
                 )))
                 .await
                 .unwrap();
@@ -559,10 +561,11 @@ mod final_tests {
                 4096,
                 Some(4),
                 &startup,
+                1_500_000_000,
             ))))
             .unwrap();
             seq.accept(SequencedInput::Synthesized(Box::new(
-                heartbeat::build_heartbeat(2, 2, 1),
+                heartbeat::build_heartbeat(2, 2, 1, 1),
             )))
             .unwrap();
             seq.accept(SequencedInput::Synthesized(Box::new(ready::ready_event(
@@ -570,6 +573,7 @@ mod final_tests {
                 4096,
                 Some(4),
                 &startup,
+                1_500_000_000,
             ))))
             .unwrap();
             finish_output(
