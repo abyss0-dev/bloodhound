@@ -1,0 +1,2 @@
+{"header":{"timestamp":1000000000,"auid":1000,"sessionid":5,"pid":291,"ppid":229,"comm":"test"},"event":{"type":"SYSCALL","name":"40","layer":"behavior"},"return_code":0}
+{"header":{"timestamp":1000000001,"auid":1000,"sessionid":5,"pid":291,"ppid":229,"comm":"test"},"event":{"type":"SYSCALL","name":"166","layer":"behavior"},"return_code":0}

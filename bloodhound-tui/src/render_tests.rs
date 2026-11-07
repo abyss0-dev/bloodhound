@@ -46,6 +46,18 @@ fn load_app(fixture: &str) -> App {
         .expect("fixture should parse cleanly")
 }
 
+#[test]
+fn tier1_fallback_syscalls_survive_loading() {
+    let app = load_app("tier1_fallback.ndjson");
+    let syscalls: Vec<_> = app
+        .events
+        .iter()
+        .map(|event| (event.event.event_type.as_str(), event.event.name.as_str()))
+        .collect();
+    assert_eq!(syscalls, vec![("SYSCALL", "40"), ("SYSCALL", "166")]);
+    assert!(render(&app).contains("2 events total"));
+}
+
 fn render(app: &App) -> String {
     render_sized(app, 140, 40)
 }
