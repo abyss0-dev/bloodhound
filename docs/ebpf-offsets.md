@@ -58,7 +58,9 @@ are absent:
   ```
   The loader sets `FD_IDENT_SUPPORTED = 0`. In eBPF, `fd_to_dev_ino` checks
   this flag and returns a default identity with validity bits clear:
-  - `openat`: reports `file_identity_status: unavailable`.
+  - `openat`: reports `file_identity_status: unavailable`. Because transient
+    runtime read failures also report `unavailable`, consumers cannot
+    distinguish kernel-unsupported from read failure.
   - `mmap`: emits zero values (`dev: 0, ino: 0`), preserving the existing wire
     format without extra validity fields.
   - *Runtime traversal failures* (negative fd, fd out of bounds, null pointer,
@@ -89,6 +91,12 @@ wrong fields.
 Runtime BTF resolution inspects the running kernel's `/sys/kernel/btf/vmlinux`
 directly, eliminating compile-time kernel layout definitions (`vmlinux.rs` and
 hard-coded `FILES_OFFSET_IN_TASK` are completely absent).
+
+> **Scope:** Runtime BTF resolution covers direct member offsets only, not full
+> CO-RE (no type, enum, field-existence, or bitfield relocation). Read widths
+> (e.g. `fdtable.max_fds` `u32`, `inode.i_ino` `u64`, `super_block.s_dev` `u32`,
+> `tty_driver.type`/`subtype` `i16`) are compile-time assumptions in eBPF, not
+> verified against BTF.
 
 ## How to Verify Offsets Manually
 

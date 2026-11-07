@@ -316,6 +316,8 @@ from the running kernel's BTF (`/sys/kernel/btf/vmlinux`) by the same resolver
 used for `exec_view`. If BTF lacks required fd traversal fields, fd identity is
 marked unsupported: openat leaves validity bits clear (`file_identity_status: unavailable`),
 mmap emits zero identity (`dev: 0, ino: 0`), and the daemon logs a startup warning.
+Because transient runtime read failures also report `unavailable`, consumers cannot
+distinguish kernel-unsupported from read failure.
 
 Openat version 1 reports each component's read validity independently and
 exposes `file_identity_status`; only complete pairs are consumable as complete
