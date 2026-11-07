@@ -261,7 +261,6 @@ pub(super) fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option
             name: "usdt.collector".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(Value::Object(args)),
         return_code: None,
     }

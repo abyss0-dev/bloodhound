@@ -11,8 +11,6 @@ pub struct BehaviorEvent {
     pub header: EventHeaderJson,
     pub event: EventTypeJson,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub proc: Option<ProcInfo>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub args: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub return_code: Option<i64>,
@@ -193,16 +191,6 @@ pub struct Payload {
     pub return_code: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ProcInfo {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub main_executable: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tty: Option<String>,
-}
-
 /// Parse raw ring buffer bytes into a BehaviorEvent.
 pub fn deserialize(data: &[u8]) -> Result<BehaviorEvent> {
     Ok(deserialize_with_authority(data)?.event)
@@ -370,7 +358,6 @@ fn deserialize_process_event(
         BehaviorEvent {
             header: header_json,
             event,
-            proc: None, // Filled by enricher
             args,
             return_code,
         },
@@ -407,7 +394,6 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
             name: name.into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(args),
         return_code: None,
     })
@@ -2915,16 +2901,6 @@ mod tests {
         assert!(deserialize(&buf).is_err());
     }
 
-    // ── proc field: initially None, to be filled by enricher ─────────────
-
-    #[test]
-    fn proc_field_initially_none() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 1, args: [0; 6], return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::RawSyscall, &payload)).unwrap();
-        assert!(event.proc.is_none());
-    }
 }
 
 // ── Golden / Snapshot tests ──────────────────────────────────────────────────

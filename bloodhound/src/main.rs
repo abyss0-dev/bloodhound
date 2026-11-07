@@ -45,7 +45,7 @@ async fn main() -> Result<()> {
     eprintln!("Bloodhound starting: tracing uid={}", args.uid);
 
     let events_emitted = heartbeat::new_events_emitted_counter();
-    let mut sequencer = Sequencer::new(args.uid, Serializer::new(), events_emitted.clone());
+    let mut sequencer = Sequencer::new(Serializer::new(), events_emitted.clone());
     // Create the one bounded admission path before any source can emit a
     // BehaviorEvent, including startup validation diagnostics.
     let (sequence_tx, mut sequence_rx) = mpsc::channel::<SequencedInput>(4096);
@@ -408,7 +408,6 @@ mod final_tests {
 
     fn sequencer() -> Sequencer<Vec<u8>> {
         Sequencer::new(
-            1000,
             Serializer::with_writer(Vec::new()),
             heartbeat::new_events_emitted_counter(),
         )
@@ -531,7 +530,7 @@ mod final_tests {
     #[test]
     fn final_read_failure_emits_nothing_and_disabled_emits_nothing() {
         let emitted = heartbeat::new_events_emitted_counter();
-        let mut seq = Sequencer::new(1000, Serializer::with_writer(Vec::new()), emitted.clone());
+        let mut seq = Sequencer::new(Serializer::with_writer(Vec::new()), emitted.clone());
         assert!(finish_output(
             &mut seq,
             &mut Reader(Err(anyhow::anyhow!("read failed"))),
@@ -550,7 +549,7 @@ mod final_tests {
         let mut bytes = Vec::new();
         {
             let mut seq =
-                Sequencer::new(1000, Serializer::with_writer(&mut bytes), emitted.clone());
+                Sequencer::new(Serializer::with_writer(&mut bytes), emitted.clone());
             let report = loader::AttachReport {
                 probes: 1,
                 ..Default::default()
@@ -637,7 +636,6 @@ mod final_tests {
         for fail_write in [true, false] {
             let emitted = heartbeat::new_events_emitted_counter();
             let mut seq = Sequencer::new(
-                1000,
                 Serializer::with_writer(FailedWriter(fail_write)),
                 emitted.clone(),
             );

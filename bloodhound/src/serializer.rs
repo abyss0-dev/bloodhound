@@ -67,7 +67,6 @@ mod tests {
                 name: name.into(),
                 layer: Layer::Behavior,
             },
-            proc: None,
             args: None,
             return_code: Some(0),
         }
