@@ -2150,6 +2150,86 @@ mod tests {
         assert_eq!(decoded, tty_data);
     }
 
+    fn tty_capture_record(kind: EventKind, capture: HeaderCapture, bytes: &[u8]) -> Vec<u8> {
+        let payload = TtyPayload { data_len: bytes.len() as u16, _pad: [0; 2] };
+        let mut data = build_event_with_vardata(kind, &payload, bytes);
+        let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+        header.capture = capture;
+        data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+        data
+    }
+
+    fn assert_tty_capture_status(version: u8, primary: u8, expected: &str, bytes: &[u8]) {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            let data = tty_capture_record(kind, HeaderCapture { version, primary, secondary: 0 }, bytes);
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args["tty_capture_version"], version, "{kind:?}");
+            assert_eq!(args["data_status"], expected, "{kind:?}");
+            let decoded = base64::engine::general_purpose::STANDARD
+                .decode(args["data"].as_str().unwrap()).unwrap();
+            assert_eq!(decoded, bytes, "{kind:?}");
+        }
+    }
+
+    #[test]
+    fn tty_capture_legacy_version_zero_is_unknown() {
+        // Neither nonempty data nor an empty capture proves completeness.
+        for bytes in [&b"legacy\xff\0"[..], &b""[..]] {
+            assert_tty_capture_status(0, 0, "unknown", bytes);
+        }
+    }
+
+    #[test]
+    fn tty_capture_v1_complete_preserves_binary_data() {
+        // TTY data is binary: invalid UTF-8 must not change its capture status.
+        assert_tty_capture_status(1, CaptureStatus::Complete as u8, "complete", b"ok\xff\0\r\n");
+    }
+
+    #[test]
+    fn tty_capture_v1_truncated_preserves_prefix() {
+        let prefix = vec![b'x'; MAX_TTY_DATA - 1];
+        assert_tty_capture_status(1, CaptureStatus::Truncated as u8, "truncated", &prefix);
+    }
+
+    #[test]
+    fn tty_capture_v1_read_error_is_not_empty_complete() {
+        assert_tty_capture_status(1, CaptureStatus::ReadError as u8, "read_error", b"");
+    }
+
+    #[test]
+    fn tty_capture_rejects_invalid_status() {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            for primary in (0..=u8::MAX).filter(|code| !(1..=3).contains(code)) {
+                let data = tty_capture_record(kind, HeaderCapture { version: 1, primary, secondary: 0 }, b"data");
+                assert!(deserialize(&data).is_err(), "{kind:?} accepted status={primary}");
+            }
+        }
+    }
+
+    #[test]
+    fn tty_capture_rejects_invalid_version() {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            for version in 2..=u8::MAX {
+                let data = tty_capture_record(kind, HeaderCapture {
+                    version, primary: CaptureStatus::Complete as u8, secondary: 0,
+                }, b"data");
+                assert!(deserialize(&data).is_err(), "{kind:?} accepted version={version}");
+            }
+        }
+    }
+
+    #[test]
+    fn tty_capture_v1_rejects_nonzero_third_byte() {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            for secondary in 1..=u8::MAX {
+                let data = tty_capture_record(kind, HeaderCapture {
+                    version: 1, primary: CaptureStatus::Complete as u8, secondary,
+                }, b"data");
+                assert!(deserialize(&data).is_err(), "{kind:?} accepted secondary={secondary}");
+            }
+        }
+    }
+
     // ── Core contract: structured field extraction ───────────────────────
 
     /// RawSyscall must faithfully reproduce all 6 arguments.
