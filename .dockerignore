@@ -1,4 +1,5 @@
 target/
 .git/
-docs/
+docs/*
+!docs/schema.json
 e2e/
