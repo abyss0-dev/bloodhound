@@ -175,8 +175,8 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
     };
 
     let (event_type, name, layer, mut args, return_code) = match kind {
-        EventKind::TtyRead => parse_tty(payload, "tty_read")?,
-        EventKind::TtyWrite => parse_tty(payload, "tty_write")?,
+        EventKind::TtyRead => parse_tty(payload, "tty_read", header.capture)?,
+        EventKind::TtyWrite => parse_tty(payload, "tty_write", header.capture)?,
         EventKind::UsdtTrainingShellV3
         | EventKind::UsdtTrainingPeerV1
         | EventKind::UsdtTrainingShellV3CaptureError => {
@@ -315,17 +315,47 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
 
 use base64::Engine;
 
-fn parse_tty(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_tty(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
     if payload.len() < TtyPayload::SIZE {
         bail!("TTY payload too short");
     }
     let tty = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const TtyPayload) };
-    let data_start = TtyPayload::SIZE;
-    let data_len = (tty.data_len as usize).min(payload.len() - data_start);
-    let raw_data = &payload[data_start..data_start + data_len];
+    let var_data = &payload[TtyPayload::SIZE..];
+    let declared_len = tty.data_len as usize;
+    let status = match capture.version {
+        0 => "unknown",
+        1 => {
+            if capture.secondary != 0 {
+                bail!("TTY capture secondary must be zero");
+            }
+            if declared_len != var_data.len() || declared_len > MAX_TTY_DATA - 1 {
+                bail!("TTY capture length does not match bounded record");
+            }
+            match CaptureStatus::try_from(capture.primary).ok().context("invalid TTY capture status")? {
+                CaptureStatus::Complete => "complete",
+                CaptureStatus::Truncated => {
+                    if declared_len != MAX_TTY_DATA - 1 {
+                        bail!("Truncated TTY capture must contain the bounded prefix");
+                    }
+                    "truncated"
+                }
+                CaptureStatus::ReadError => {
+                    if declared_len != 0 {
+                        bail!("Failed TTY capture must be empty");
+                    }
+                    "read_error"
+                }
+            }
+        }
+        _ => bail!("Unsupported TTY capture version: {}", capture.version),
+    };
+    // Legacy records retain their historical best-effort length handling.
+    let raw_data = &var_data[..declared_len.min(var_data.len())];
     let encoded = base64::engine::general_purpose::STANDARD.encode(raw_data);
 
-    let args = serde_json::json!({ "data": encoded });
+    let args = serde_json::json!({
+        "data": encoded, "tty_capture_version": capture.version, "data_status": status,
+    });
     Ok(("TTY".into(), name.into(), "intent".into(), Some(args), None))
 }
 
@@ -2230,6 +2260,51 @@ mod tests {
         }
     }
 
+    #[test]
+    fn tty_capture_v1_rejects_invalid_lengths() {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            for (status, declared_len, bytes) in [
+                (CaptureStatus::Complete, 2, vec![b'x']),
+                (CaptureStatus::Complete, 1, vec![b'x'; 2]),
+                (CaptureStatus::Complete, MAX_TTY_DATA, vec![b'x'; MAX_TTY_DATA]),
+                (CaptureStatus::Truncated, 0, vec![]),
+                (CaptureStatus::Truncated, MAX_TTY_DATA - 2, vec![b'x'; MAX_TTY_DATA - 2]),
+                (CaptureStatus::ReadError, 1, vec![b'x']),
+                (CaptureStatus::ReadError, 0, vec![b'x']),
+            ] {
+                let mut data = tty_capture_record(kind, HeaderCapture {
+                    version: 1, primary: status as u8, secondary: 0,
+                }, &bytes);
+                let payload = TtyPayload { data_len: declared_len as u16, _pad: [0; 2] };
+                data[EventHeader::SIZE..EventHeader::SIZE + TtyPayload::SIZE]
+                    .copy_from_slice(&payload_bytes(&payload));
+                assert!(deserialize(&data).is_err(), "{kind:?} accepted {status:?} len={declared_len}");
+            }
+        }
+    }
+
+    #[test]
+    fn tty_capture_complete_at_bound_is_not_inferred_truncated() {
+        assert_tty_capture_status(1, CaptureStatus::Complete as u8, "complete", &vec![0xff; MAX_TTY_DATA - 1]);
+        assert_tty_capture_status(1, CaptureStatus::Complete as u8, "complete", b"");
+    }
+
+    #[test]
+    fn tty_capture_legacy_ignores_status_bytes_and_clamps_length() {
+        for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
+            let mut data = tty_capture_record(kind, HeaderCapture {
+                version: 0, primary: 255, secondary: 255,
+            }, b"\0\xff");
+            let payload = TtyPayload { data_len: 10, _pad: [0; 2] };
+            data[EventHeader::SIZE..EventHeader::SIZE + TtyPayload::SIZE]
+                .copy_from_slice(&payload_bytes(&payload));
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args["tty_capture_version"], 0);
+            assert_eq!(args["data_status"], "unknown");
+            assert_eq!(args["data"], base64::engine::general_purpose::STANDARD.encode(b"\0\xff"));
+        }
+    }
+
     // ── Core contract: structured field extraction ───────────────────────
 
     /// RawSyscall must faithfully reproduce all 6 arguments.
@@ -2493,8 +2568,131 @@ mod golden_tests {
         };
     }
 
-    golden_from_qemu!(golden_tty_write, "tty_write", "../testdata/qemu/tty_write.b64");
-    golden_from_qemu!(golden_tty_read, "tty_read", "../testdata/qemu/tty_read.b64");
+    // Historical wire captures remain version 0; the additive JSON contract
+    // is kept inline so the original capture snapshots remain untouched.
+    #[test]
+    fn golden_tty_write() {
+        let raw = captured(include_str!("../testdata/qemu/tty_write.b64"));
+        let event = deserialize(&raw).expect("QEMU capture must deserialize");
+        assert_json_snapshot!(to_json(&event), @r#"
+        {
+          "args": {
+            "data": "QkhfVFRZX1dSSVRFX0dPTERFTg==",
+            "data_status": "unknown",
+            "tty_capture_version": 0
+          },
+          "event": {
+            "layer": "intent",
+            "name": "tty_write",
+            "type": "TTY"
+          },
+          "header": {
+            "auid": 1000,
+            "comm": "bash",
+            "ns": {
+              "cgroup": {
+                "inode": 4026531835,
+                "status": "complete"
+              },
+              "ipc": {
+                "inode": 4026531839,
+                "status": "complete"
+              },
+              "mnt": {
+                "inode": 4026531841,
+                "status": "complete"
+              },
+              "net": {
+                "inode": 4026531840,
+                "status": "complete"
+              },
+              "pid": {
+                "inode": 4026531836,
+                "status": "complete"
+              },
+              "user": {
+                "inode": 4026531837,
+                "status": "complete"
+              },
+              "uts": {
+                "inode": 4026531838,
+                "status": "complete"
+              }
+            },
+            "pid": 4242,
+            "process_ref": {
+              "start_boottime_ns": 519309894905,
+              "tgid": 4242
+            },
+            "sessionid": 303,
+            "tid": 4242,
+            "timestamp": 519312100487
+          }
+        }
+        "#);
+    }
+
+    #[test]
+    fn golden_tty_read() {
+        let raw = captured(include_str!("../testdata/qemu/tty_read.b64"));
+        let event = deserialize(&raw).expect("QEMU capture must deserialize");
+        assert_json_snapshot!(to_json(&event), @r#"
+        {
+          "args": {
+            "data": "QkhfVFRZX1JFQURfR09MREVOCg==",
+            "data_status": "unknown",
+            "tty_capture_version": 0
+          },
+          "event": {
+            "layer": "intent",
+            "name": "tty_read",
+            "type": "TTY"
+          },
+          "header": {
+            "auid": 1000,
+            "comm": "bash",
+            "ns": {
+              "cgroup": {
+                "inode": 4026531835,
+                "status": "complete"
+              },
+              "ipc": {
+                "inode": 4026531839,
+                "status": "complete"
+              },
+              "mnt": {
+                "inode": 4026531841,
+                "status": "complete"
+              },
+              "net": {
+                "inode": 4026531840,
+                "status": "complete"
+              },
+              "pid": {
+                "inode": 4026531836,
+                "status": "complete"
+              },
+              "user": {
+                "inode": 4026531837,
+                "status": "complete"
+              },
+              "uts": {
+                "inode": 4026531838,
+                "status": "complete"
+              }
+            },
+            "pid": 4411,
+            "process_ref": {
+              "start_boottime_ns": 527453528301,
+              "tgid": 4411
+            },
+            "sessionid": 317,
+            "tid": 4411,
+            "timestamp": 527456534215
+          }
+        }
+        "#);
+    }
     golden_from_qemu!(golden_execve, "execve", "../testdata/qemu/execve.b64");
     golden_from_qemu!(golden_raw_syscall, "raw_syscall", "../testdata/qemu/raw_syscall.b64");
     golden_from_qemu!(golden_openat, "openat", "../testdata/qemu/openat.b64");

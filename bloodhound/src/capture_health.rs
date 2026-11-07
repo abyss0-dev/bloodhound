@@ -65,6 +65,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn tty_collection_reports_loss_without_operation_identity_or_ring_drops() {
+        for reason in bloodhound_common::TTY_FAILURE_REASONS {
+            let event = diagnostic("tty", reason, Some(2), Some(5));
+            assert_eq!(event.event.event_type, "DIAGNOSTIC");
+            assert_eq!(event.event.name, "tty.collection");
+            assert_eq!(event.event.layer, "behavior");
+            assert!(event.header.process_ref.is_none());
+            assert!(event.header.tid.is_none());
+            assert!(event.header.ns.is_none());
+            assert!(event.proc.is_none());
+            assert!(event.return_code.is_none());
+            assert_eq!(event.args.unwrap(), json!({
+                "scope": "tty", "reason_code": reason,
+                "failure_count_delta": 2, "failure_count_total": 5,
+                "run_prefix_incomplete": true, "sampling": "userspace_poll",
+            }));
+        }
+    }
+
+    #[test]
+    fn tty_unreadable_counter_is_unknown_not_zero() {
+        let event = diagnostic("tty", "counter_read_failed", None, None);
+        assert_eq!(event.event.name, "tty.collection");
+        assert!(event.header.process_ref.is_none());
+        assert_eq!(event.args.unwrap(), json!({
+            "scope": "tty", "reason_code": "counter_read_failed",
+            "failure_count_delta": null, "failure_count_total": null,
+            "run_prefix_incomplete": true, "sampling": "userspace_poll",
+        }));
+    }
+
+    #[test]
     fn raw_syscall_collection_reports_loss_without_operation_identity() {
         for reason in bloodhound_common::RAW_SYSCALL_FAILURE_REASONS {
             let event = diagnostic("raw_syscall", reason, Some(2), Some(5));

@@ -159,6 +159,54 @@ pub unsafe fn raw_syscall_cleanup(result: Result<(), i64>) {
     }
 }
 
+/// Correlates n_tty_read entry/return without retaining per-CPU pointers.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct TtyReadEntry {
+    pub buf_ptr: u64,
+    pub count: u64,
+}
+
+#[map]
+pub static TTY_READ_ENTRY_MAP: HashMap<u64, TtyReadEntry> =
+    HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, 0);
+
+/// TTY loss before ring emission. Payload read errors are event statuses;
+/// ring failures belong exclusively to DROP_COUNT.
+#[map]
+pub static TTY_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(TTY_FAILURE_COUNT, 0);
+
+#[inline(always)]
+pub unsafe fn tty_failure(reason: u32) {
+    if let Some(counter) = TTY_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn tty_save(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::save_outcome(result) {
+        tty_failure(reason);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn tty_cleanup(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::cleanup_outcome(result) {
+        tty_failure(reason);
+    }
+}
+
+/// Reclaim only recorded reads, including a missed return before task reuse.
+#[inline(always)]
+pub unsafe fn tty_interrupt(pid_tgid: u64) {
+    if TTY_READ_ENTRY_MAP.get(&pid_tgid).is_some() {
+        tty_failure(SYSCALL_INVOCATION_INTERRUPTED);
+        tty_cleanup(TTY_READ_ENTRY_MAP.remove(&pid_tgid));
+    }
+}
+
 // ── Per-CPU Scratch Buffers ──────────────────────────────────────────────────
 
 /// Scratch buffer for reading variable-length data in BPF programs.

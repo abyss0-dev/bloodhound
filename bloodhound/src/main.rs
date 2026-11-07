@@ -154,6 +154,19 @@ async fn main() -> Result<()> {
         raw_syscall_shutdown_rx,
     ));
 
+    let tty_map = bpf
+        .take_map("TTY_FAILURES")
+        .context("TTY_FAILURES map not found in BPF object")?;
+    let tty_map: PerCpuArray<_, u64> = PerCpuArray::try_from(tty_map)?;
+    let (tty_shutdown_tx, tty_shutdown_rx) = tokio::sync::oneshot::channel();
+    let tty_health_handle = tokio::spawn(capture_health::monitor(
+        "tty",
+        &bloodhound_common::TTY_FAILURE_REASONS,
+        tty_map,
+        sequence_tx.clone(),
+        tty_shutdown_rx,
+    ));
+
     let exec_map = bpf
         .take_map("EXEC_FAILURES")
         .context("EXEC_FAILURES map not found in BPF object")?;
@@ -272,12 +285,13 @@ async fn main() -> Result<()> {
     let _ = capture_shutdown_tx.send(());
     let _ = syscall_shutdown_tx.send(());
     let _ = raw_syscall_shutdown_tx.send(());
+    let _ = tty_shutdown_tx.send(());
     let _ = exec_shutdown_tx.send(());
     let _ = exit_shutdown_tx.send(());
     let _ = consumer_shutdown_tx.send(());
 
     let producers = async {
-        let (_, _, _, _, _, _, cursor) = tokio::try_join!(
+        let (_, _, _, _, _, _, _, cursor) = tokio::try_join!(
             async {
                 consumer_handle
                     .await
@@ -297,6 +311,11 @@ async fn main() -> Result<()> {
                 raw_syscall_health_handle
                     .await
                     .context("raw syscall collection monitor panicked")
+            },
+            async {
+                tty_health_handle
+                    .await
+                    .context("TTY collection monitor panicked")
             },
             async {
                 exec_health_handle
