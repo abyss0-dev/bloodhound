@@ -528,8 +528,7 @@ Path capture status reports the acquisition completeness for all TRACEPOINT
 path-bearing syscall events other than `openat` and `exec` (`execve`/`execveat`),
 which retain their own dedicated capture metadata and public fields. The wire
 layout contract is defined in
-[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-path-capture-status);
-the wire encoding is not restated here.
+[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
 
 #### Covered Events
 
