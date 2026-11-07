@@ -78,9 +78,28 @@ pub struct HeaderCapture {
 
 // ── EventKind ────────────────────────────────────────────────────────────────
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EventKind {
+macro_rules! event_kinds {
+    ($( $(#[$attr:meta])* $variant:ident = $wire:literal, )*) => {
+        #[repr(u8)]
+        #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+        pub enum EventKind {
+            $( $(#[$attr])* $variant = $wire, )*
+        }
+
+        impl EventKind {
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)*];
+
+            pub fn from_u8(v: u8) -> Option<Self> {
+                match v {
+                    $($wire => Some(Self::$variant),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+event_kinds! {
     // Layer 1: Intent (TTY)
     TtyRead = 0,
     TtyWrite = 1,
@@ -140,6 +159,7 @@ pub enum EventKind {
     Splice = 64,
 
     // Reserved forever: historical offline packet decode only (Phase 2 retirement).
+    // Keep these decodable variants, not RESERVED unknown IDs, for legacy records.
     PacketIngress = 100,
     PacketEgress = 101,
 
@@ -158,8 +178,6 @@ pub enum EventKind {
     ProcessExit = 222,
     SignalGenerate = 223,
     ExecView = 224,
-    // Reserved: 225 (removed exec stdio), 226 (removed fork-file scan),
-    // 227 (removed Bash internal-function probes). Never reuse these wire IDs.
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -172,78 +190,12 @@ pub enum EventKind {
 }
 
 impl EventKind {
-    pub fn from_u8(v: u8) -> Option<Self> {
-        match v {
-            0 => Some(Self::TtyRead),
-            1 => Some(Self::TtyWrite),
-            2 => Some(Self::Execve),
-            3 => Some(Self::Execveat),
-            10 => Some(Self::RawSyscall),
-            20 => Some(Self::Openat),
-            21 => Some(Self::Read),
-            22 => Some(Self::Write),
-            23 => Some(Self::Connect),
-            24 => Some(Self::Bind),
-            25 => Some(Self::Listen),
-            26 => Some(Self::Socket),
-            27 => Some(Self::Clone),
-            28 => Some(Self::Clone3),
-            29 => Some(Self::Chdir),
-            30 => Some(Self::Fchdir),
-            31 => Some(Self::Unlink),
-            32 => Some(Self::Unlinkat),
-            33 => Some(Self::Rename),
-            34 => Some(Self::Renameat2),
-            35 => Some(Self::Mkdir),
-            36 => Some(Self::Mkdirat),
-            37 => Some(Self::Rmdir),
-            38 => Some(Self::Symlink),
-            39 => Some(Self::Symlinkat),
-            40 => Some(Self::Link),
-            41 => Some(Self::Linkat),
-            42 => Some(Self::Chmod),
-            43 => Some(Self::Fchmod),
-            44 => Some(Self::Fchmodat),
-            45 => Some(Self::Chown),
-            46 => Some(Self::Fchown),
-            47 => Some(Self::Fchownat),
-            48 => Some(Self::Truncate),
-            49 => Some(Self::Ftruncate),
-            50 => Some(Self::Mount),
-            51 => Some(Self::Umount2),
-            52 => Some(Self::Sendto),
-            53 => Some(Self::Recvfrom),
-            54 => Some(Self::Dup),
-            55 => Some(Self::Dup2),
-            56 => Some(Self::Dup3),
-            57 => Some(Self::Fcntl),
-            58 => Some(Self::Pread64),
-            59 => Some(Self::Pwrite64),
-            60 => Some(Self::Readv),
-            61 => Some(Self::Writev),
-            62 => Some(Self::Mmap),
-            63 => Some(Self::Sendfile),
-            64 => Some(Self::Splice),
-            100 => Some(Self::PacketIngress),
-            101 => Some(Self::PacketEgress),
-            200 => Some(Self::LsmFileOpen),
-            201 => Some(Self::LsmTaskKill),
-            202 => Some(Self::LsmBpf),
-            203 => Some(Self::LsmPtraceAccessCheck),
-            204 => Some(Self::LsmInodeUnlink),
-            205 => Some(Self::LsmInodeRename),
-            206 => Some(Self::LsmTaskFixSetuid),
-            220 => Some(Self::ProcessStart),
-            221 => Some(Self::ProcessFork),
-            222 => Some(Self::ProcessExit),
-            223 => Some(Self::SignalGenerate),
-            224 => Some(Self::ExecView),
-            240 => Some(Self::UsdtTrainingShellV3),
-            241 => Some(Self::UsdtTrainingPeerV1),
-            242 => Some(Self::UsdtTrainingShellV3CaptureError),
-            _ => None,
-        }
-    }
+    /// Retired wire IDs that must stay unknown and must never be reused.
+    pub const RESERVED: &'static [u8] = &[
+        // Reserved: 225 (removed exec stdio), 226 (removed fork-file scan),
+        // 227 (removed Bash internal-function probes). Never reuse these wire IDs.
+        225, 226, 227,
+    ];
 }
 
 // ── Event Headers ────────────────────────────────────────────────────────────
@@ -1068,74 +1020,18 @@ mod tests {
     /// This guarantees the BPF-side kind byte and userspace parser agree.
     #[test]
     fn event_kind_roundtrip_all_variants() {
-        let all_variants = [
-            EventKind::TtyRead,
-            EventKind::TtyWrite,
-            EventKind::Execve,
-            EventKind::Execveat,
-            EventKind::RawSyscall,
-            EventKind::Openat,
-            EventKind::Read,
-            EventKind::Write,
-            EventKind::Connect,
-            EventKind::Bind,
-            EventKind::Listen,
-            EventKind::Socket,
-            EventKind::Clone,
-            EventKind::Clone3,
-            EventKind::Chdir,
-            EventKind::Fchdir,
-            EventKind::Unlink,
-            EventKind::Unlinkat,
-            EventKind::Rename,
-            EventKind::Renameat2,
-            EventKind::Mkdir,
-            EventKind::Mkdirat,
-            EventKind::Rmdir,
-            EventKind::Symlink,
-            EventKind::Symlinkat,
-            EventKind::Link,
-            EventKind::Linkat,
-            EventKind::Chmod,
-            EventKind::Fchmod,
-            EventKind::Fchmodat,
-            EventKind::Chown,
-            EventKind::Fchown,
-            EventKind::Fchownat,
-            EventKind::Truncate,
-            EventKind::Ftruncate,
-            EventKind::Mount,
-            EventKind::Umount2,
-            EventKind::Sendto,
-            EventKind::Recvfrom,
-            EventKind::Dup,
-            EventKind::Dup2,
-            EventKind::Dup3,
-            EventKind::Fcntl,
-            EventKind::Pread64,
-            EventKind::Pwrite64,
-            EventKind::Readv,
-            EventKind::Writev,
-            EventKind::Mmap,
-            EventKind::Sendfile,
-            EventKind::Splice,
-            EventKind::PacketIngress,
-            EventKind::PacketEgress,
-            EventKind::LsmFileOpen,
-            EventKind::LsmTaskKill,
-            EventKind::LsmBpf,
-            EventKind::LsmPtraceAccessCheck,
-            EventKind::LsmInodeUnlink,
-            EventKind::LsmInodeRename,
-            EventKind::LsmTaskFixSetuid,
-            EventKind::ProcessStart,
-            EventKind::ProcessFork,
-            EventKind::ProcessExit,
-            EventKind::SignalGenerate,
-            EventKind::ExecView,
-        ];
+        for byte in 0..=u8::MAX {
+            if let Some(variant) = EventKind::from_u8(byte) {
+                assert!(
+                    EventKind::ALL.contains(&variant),
+                    "Decoded EventKind::{:?} (u8={}) is missing from the variant list",
+                    variant,
+                    byte,
+                );
+            }
+        }
 
-        for variant in &all_variants {
+        for variant in EventKind::ALL {
             let byte = *variant as u8;
             let recovered = EventKind::from_u8(byte);
             assert_eq!(
@@ -1151,89 +1047,35 @@ mod tests {
     /// Unknown u8 values must return None, not panic.
     #[test]
     fn event_kind_unknown_returns_none() {
-        // Test values that are not assigned to any variant
-        // Removed experimental wire IDs stay unknown rather than aliasing a new event.
-        for byte in [4, 5, 9, 11, 19, 65, 99, 102, 150, 199, 207, 225, 226, 227, 255] {
-            assert_eq!(
-                EventKind::from_u8(byte),
-                None,
-                "Expected None for unassigned kind byte {}",
+        for byte in 0..=u8::MAX {
+            if !EventKind::ALL.iter().any(|&variant| variant as u8 == byte) {
+                assert_eq!(
+                    EventKind::from_u8(byte),
+                    None,
+                    "Expected None for unassigned kind byte {}",
+                    byte,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn event_kind_reserved_and_all_are_disjoint() {
+        for &byte in EventKind::RESERVED {
+            assert!(
+                !EventKind::ALL.iter().any(|&variant| variant as u8 == byte),
+                "Reserved wire ID {} is assigned to an EventKind",
                 byte,
             );
+            assert_eq!(EventKind::from_u8(byte), None);
         }
     }
 
     /// All variant discriminants must be unique (no collisions).
     #[test]
     fn event_kind_discriminants_unique() {
-        let all_variants = [
-            EventKind::TtyRead,
-            EventKind::TtyWrite,
-            EventKind::Execve,
-            EventKind::Execveat,
-            EventKind::RawSyscall,
-            EventKind::Openat,
-            EventKind::Read,
-            EventKind::Write,
-            EventKind::Connect,
-            EventKind::Bind,
-            EventKind::Listen,
-            EventKind::Socket,
-            EventKind::Clone,
-            EventKind::Clone3,
-            EventKind::Chdir,
-            EventKind::Fchdir,
-            EventKind::Unlink,
-            EventKind::Unlinkat,
-            EventKind::Rename,
-            EventKind::Renameat2,
-            EventKind::Mkdir,
-            EventKind::Mkdirat,
-            EventKind::Rmdir,
-            EventKind::Symlink,
-            EventKind::Symlinkat,
-            EventKind::Link,
-            EventKind::Linkat,
-            EventKind::Chmod,
-            EventKind::Fchmod,
-            EventKind::Fchmodat,
-            EventKind::Chown,
-            EventKind::Fchown,
-            EventKind::Fchownat,
-            EventKind::Truncate,
-            EventKind::Ftruncate,
-            EventKind::Mount,
-            EventKind::Umount2,
-            EventKind::Sendto,
-            EventKind::Recvfrom,
-            EventKind::Dup,
-            EventKind::Dup2,
-            EventKind::Dup3,
-            EventKind::Fcntl,
-            EventKind::Pread64,
-            EventKind::Pwrite64,
-            EventKind::Readv,
-            EventKind::Writev,
-            EventKind::Mmap,
-            EventKind::Sendfile,
-            EventKind::Splice,
-            EventKind::PacketIngress,
-            EventKind::PacketEgress,
-            EventKind::LsmFileOpen,
-            EventKind::LsmTaskKill,
-            EventKind::LsmBpf,
-            EventKind::LsmPtraceAccessCheck,
-            EventKind::LsmInodeUnlink,
-            EventKind::LsmInodeRename,
-            EventKind::LsmTaskFixSetuid,
-            EventKind::ProcessStart,
-            EventKind::ProcessFork,
-            EventKind::ProcessExit,
-            EventKind::SignalGenerate,
-            EventKind::ExecView,
-        ];
         let mut seen = [false; 256];
-        for v in &all_variants {
+        for v in EventKind::ALL {
             let b = *v as u8;
             assert!(!seen[b as usize], "Duplicate discriminant: {}", b);
             seen[b as usize] = true;
