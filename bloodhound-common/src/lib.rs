@@ -1135,6 +1135,17 @@ mod tests {
             EventKind::ExecView,
         ];
 
+        for byte in 0..=u8::MAX {
+            if let Some(variant) = EventKind::from_u8(byte) {
+                assert!(
+                    all_variants.contains(&variant),
+                    "Decoded EventKind::{:?} (u8={}) is missing from the variant list",
+                    variant,
+                    byte,
+                );
+            }
+        }
+
         for variant in &all_variants {
             let byte = *variant as u8;
             let recovered = EventKind::from_u8(byte);
