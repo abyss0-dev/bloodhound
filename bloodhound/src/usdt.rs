@@ -182,6 +182,23 @@ pub struct Selection {
     pub enabled: bool,
 }
 
+#[derive(Debug)]
+pub enum SelectionRejected {
+    UnknownCollector(String),
+    Malformed(String),
+}
+
+impl std::fmt::Display for SelectionRejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownCollector(id) => write!(f, "unknown registered collector {id:?}"),
+            Self::Malformed(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for SelectionRejected {}
+
 /// Reject repeated IDs, including enabled/disabled conflicts, before attachment.
 /// Otherwise a later failed attempt could overwrite an already-true availability.
 pub fn validate_selections(selections: &[Selection]) -> Result<()> {
@@ -213,10 +230,9 @@ pub fn selection_failure_diagnostic(path: &Path, error: &anyhow::Error) -> Behav
         .ok()
         .and_then(|text| configured_collector_id(&text))
         .unwrap_or_else(|| "configuration".to_owned());
-    let reason = if format!("{error:#}").contains("unknown registered collector") {
-        ReasonCode::UnknownCollector
-    } else {
-        ReasonCode::AbiIncompatible
+    let reason = match error.downcast_ref::<SelectionRejected>() {
+        Some(SelectionRejected::UnknownCollector(_)) => ReasonCode::UnknownCollector,
+        Some(SelectionRejected::Malformed(_)) | None => ReasonCode::AbiIncompatible,
     };
     diagnostic(&configured_id, reason, None, crate::clock::monotonic_now_ns())
 }
@@ -239,7 +255,7 @@ fn configured_collector_id(text: &str) -> Option<String> {
     })
 }
 
-pub fn parse_selection(text: &str) -> Result<Selection> {
+pub fn parse_selection(text: &str) -> Result<Selection, SelectionRejected> {
     let mut collector_id = None;
     let mut enabled = None;
 
@@ -253,46 +269,46 @@ pub fn parse_selection(text: &str) -> Result<Selection> {
         }
         let (key, value) = line
             .split_once('=')
-            .ok_or_else(|| anyhow!("line {} is not key = value", line_no + 1))?;
+            .ok_or_else(|| SelectionRejected::Malformed(format!("line {} is not key = value", line_no + 1)))?;
         let key = key.trim();
         let value = value.trim();
         match key {
             "collector" => {
                 if collector_id.is_some() {
-                    bail!("collector is declared more than once");
+                    return Err(SelectionRejected::Malformed("collector is declared more than once".into()));
                 }
                 let value = value
                     .strip_prefix('"')
                     .and_then(|value| value.strip_suffix('"'))
-                    .ok_or_else(|| anyhow!("collector must be a quoted registered ID"))?;
+                    .ok_or_else(|| SelectionRejected::Malformed("collector must be a quoted registered ID".into()))?;
                 if value.is_empty() || value.chars().any(|ch| matches!(ch, '/' | '\\' | '\0')) {
-                    bail!("collector must be a registered ID");
+                    return Err(SelectionRejected::Malformed("collector must be a registered ID".into()));
                 }
                 collector_id = Some(value.to_owned());
             }
             "enabled" => {
                 if enabled.is_some() {
-                    bail!("enabled is declared more than once");
+                    return Err(SelectionRejected::Malformed("enabled is declared more than once".into()));
                 }
                 enabled = Some(match value {
                     "true" => true,
                     "false" => false,
-                    _ => bail!("enabled must be true or false"),
+                    _ => return Err(SelectionRejected::Malformed("enabled must be true or false".into())),
                 });
             }
             // In particular this rejects bpf object paths, native code paths,
             // offsets, provider/probe overrides, argument definitions and field
             // mappings. Do not add a permissive catch-all here.
-            _ => bail!("configuration key {key:?} is not permitted"),
+            _ => return Err(SelectionRejected::Malformed(format!("configuration key {key:?} is not permitted"))),
         }
     }
 
     let selection = Selection {
-        collector_id: collector_id.ok_or_else(|| anyhow!("missing collector"))?,
-        enabled: enabled.ok_or_else(|| anyhow!("missing enabled"))?,
+        collector_id: collector_id.ok_or_else(|| SelectionRejected::Malformed("missing collector".into()))?,
+        enabled: enabled.ok_or_else(|| SelectionRejected::Malformed("missing enabled".into()))?,
     };
     if collector(&selection.collector_id).is_none() {
-        bail!("unknown registered collector {:?}", selection.collector_id);
+        return Err(SelectionRejected::UnknownCollector(selection.collector_id));
     }
     Ok(selection)
 }
@@ -1215,7 +1231,7 @@ mod tests {
             let source = format!(
                 "collector = \"training-shell-v3\"\nenabled = true\n{forbidden} = \"no\"\n"
             );
-            let error = parse_selection(&source).unwrap_err();
+            let error = parse_selection(&source).unwrap_err().into();
             let path = std::env::temp_dir().join(format!(
                 "bloodhound-usdt-selection-{forbidden}-{}",
                 std::process::id()
@@ -1280,6 +1296,40 @@ mod tests {
         let args = event.args.unwrap();
         assert_eq!(args["collector_id"], "not-built-in");
         assert_eq!(args["reason_code"], "unknown_collector");
+    }
+
+    #[test]
+    fn selection_failure_diagnostic_keeps_the_id_after_an_earlier_malformed_line() {
+        let path = std::env::temp_dir().join(format!(
+            "bloodhound-usdt-unknown registered collector-{}-{}.toml",
+            std::process::id(),
+            crate::clock::monotonic_now_ns(),
+        ));
+        for first_line in ["not key value", "unknown registered collector = true"] {
+            fs::write(&path, format!("{first_line}\ncollector = \"training-shell-v3\"\nenabled = true\n")).unwrap();
+            let error = load_selection(&path).unwrap_err();
+            let event = selection_failure_diagnostic(&path, &error);
+            let args = event.args.unwrap();
+            assert_eq!(args["collector_id"], TRAINING_SHELL_V3_ID);
+            assert_eq!(args["reason_code"], "abi_incompatible");
+            assert_eq!(args.as_object().unwrap().len(), 2);
+        }
+        fs::remove_file(&path).unwrap();
+    }
+
+    #[test]
+    fn selection_failure_diagnostic_keeps_io_errors_abi_incompatible() {
+        let path = std::env::temp_dir().join(format!(
+            "bloodhound-usdt-missing-unknown registered collector-{}-{}.toml",
+            std::process::id(),
+            crate::clock::monotonic_now_ns(),
+        ));
+        let error = load_selection(&path).unwrap_err();
+        assert!(error.downcast_ref::<io::Error>().is_some());
+        let args = selection_failure_diagnostic(&path, &error).args.unwrap();
+        assert_eq!(args["collector_id"], "configuration");
+        assert_eq!(args["reason_code"], "abi_incompatible");
+        assert_eq!(args.as_object().unwrap().len(), 2);
     }
 
     #[test]
