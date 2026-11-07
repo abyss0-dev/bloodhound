@@ -403,7 +403,7 @@ emitted before the next raw-derived event.
 Ring-buffer drops and deserialization rejection are separate causes. Either
 makes the cumulative run prefix incomplete. Later intervals with no new loss
 do not claim recovery; consumers apply their own explicit recovery semantics.
-# Openat acquisition status (capture version 1)
+### Openat acquisition status (capture version 1)
 
 Execve/execveat completeness is specified separately by
 [the #33 exec capture contract](exec-capture.md). Filesystem method recognition
@@ -444,11 +444,13 @@ describe the poll, not a missing operation, and do not identify affected actors.
 
 This notification is distinct from ring-buffer drops and deserialize rejection.
 It covers openat entry metadata/scratch acquisition, entry-map insertion, exit
-metadata/assembly acquisition, and pending invocations removed at task exit.
-Path-read failure is represented on the event; unsuccessful FD-identity reads
-are represented by identity status. The counter does not certify unsupported
-paths or detect every FD-table race. A missing entry with no recorded entry
-(for example, tracing attached during an in-flight syscall) is not counted.
+metadata/assembly acquisition (including oversize payload assembly and `bpf_memcpy`
+failure at exit, which are counted under `exit_capture_failed`), and pending
+invocations removed at task exit. Path-read failure is represented on the event;
+unsuccessful FD-identity reads are represented by identity status. The counter
+does not certify unsupported paths or detect every FD-table race. A missing entry
+with no recorded entry (for example, tracing attached during an in-flight syscall)
+is not counted.
 
 `DIAGNOSTIC/exec.collection` reports the same kind of loss for `execve` /
 `execveat`, with the same fields, polling and shutdown behavior, and
@@ -459,6 +461,41 @@ Entry and exit are paired by the calling task, not by PID/TID, so an exec from a
 non-leader thread keeps its pairing after the kernel hands it the leader PID.
 A failed return-value read still releases the pending entry and is reported as
 `exit_capture_failed`.
+
+`DIAGNOSTIC/syscall.collection` reports pre-ring-buffer collection loss for
+Tier-2 rich and path syscalls (excluding `openat` and `execve`/`execveat`, which
+retain their dedicated scopes), with `reason_code`, `failure_count_delta`,
+`failure_count_total`, `scope: syscall`, `sampling: userspace_poll`, and sticky
+`run_prefix_incomplete: true`. Counts are polled periodically (once per second)
+and once after kernel production stops during graceful shutdown. Their timestamps
+describe the userspace poll, not the missing operation, and do not identify
+affected actors or processes.
+
+Under the workspace contract (§2.4.3), Bloodhound owns the reason names for the
+`syscall` scope. The producer-owned reasons in `bloodhound_common::SYSCALL_FAILURE_REASONS`
+are:
+- `entry_capture_failed`: Syscall entry context/argument read failure or per-CPU scratch buffer acquisition failure.
+- `entry_save_failed`: Map insertion failure when storing in-flight entry state in `RICH_ENTRY_MAP` or `PATH_ENTRY_MAP` (e.g., map capacity reached or `NO_PREALLOC` memory allocation failure).
+- `exit_capture_failed`: Exit tracepoint argument read failure, assembly scratch acquisition failure, oversized payload assembly, or variable-length `bpf_memcpy` failure after a recorded entry was found.
+- `invocation_interrupted`: Pending invocation entry removed during lifecycle exit cleanup (`sched_process_exit`) when a thread terminates before reaching syscall exit.
+- `entry_cleanup_failed`: Map deletion error when removing a recorded entry from `RICH_ENTRY_MAP` or `PATH_ENTRY_MAP`, indicating correlation-state integrity loss.
+
+In addition, the userspace monitor reports `counter_read_failed` with null counts
+(`failure_count_delta: null`, `failure_count_total: null`, never fabricated zeroes)
+when the kernel BPF counter map cannot be read. In downstream observer health mapping
+([observer-connection row 116](https://github.com/abyss0-dev/workspace/blob/99d751b90f8520a62c428d2012d018c6100a30ad/docs/spec/tracer/observer-connection.md#5-loss-accounting-and-health-mapping)),
+`counter_read_failed` takes explicit precedence over the `.collection` name-suffix rule
+(row 115): it transitions `CAPTURE` health to sticky `INDETERMINATE/COLLECTOR_FAILURE`,
+whereas ordinary `.collection` loss transitions to sticky `INDETERMINATE/EVENT_LOSS`.
+
+Invocations already in flight when tracing attaches have no recorded entry in the
+in-flight maps and are not counted as failures. Map removal of an unrecorded or
+already-removed entry returns `-ENOENT` (`-2`), which is tolerated and not counted.
+Interrupted-invocation accounting requires a recorded entry; lifecycle cleanup
+increments `invocation_interrupted` only when a saved entry is found for the exiting
+thread. Ring-buffer overflow is represented strictly in `DROP_COUNT` / `HEARTBEAT` drop
+counters and is never counted on collection scope counters (`emit_varlen` reports
+pre-emission assembly success independently of ring-buffer acceptance).
 
 ### Exec-entry filesystem view
 
