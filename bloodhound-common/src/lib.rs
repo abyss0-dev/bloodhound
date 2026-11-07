@@ -1011,6 +1011,7 @@ pub const BITMAP_SIZE: usize = 512;
 
 #[cfg(test)]
 mod tests {
+    extern crate std;
     use super::*;
     use core::mem;
 
@@ -1203,6 +1204,30 @@ mod tests {
                 nr,
                 BITMAP_SIZE,
             );
+        }
+    }
+
+    #[test]
+    fn tier2_numbers_are_unique_and_leave_tier1_only_calls_visible() {
+        for (i, nr) in TIER2_SYSCALLS.iter().enumerate() {
+            assert!(!TIER2_SYSCALLS[..i].contains(nr));
+            assert!(![NR_EXIT_GROUP, 3, 60].contains(nr)); // close, exit
+        }
+    }
+
+    // Migration oracle: freeze the pre-refactor loader attach set before moving it.
+    #[test]
+    fn previous_loader_attach_set() {
+        let loader = include_str!("../../bloodhound/src/loader.rs");
+        let list = loader.split("let tier2_syscalls:").nth(1).unwrap();
+        let list = list.split("];" ).next().unwrap();
+        let actual: std::collections::BTreeSet<_> = list.lines()
+            .filter_map(|line| line.trim().strip_prefix("(\""))
+            .map(|line| line.split('"').next().unwrap()).collect();
+        let expected: std::collections::BTreeSet<_> = "openat read write connect bind listen socket clone clone3 chdir fchdir unlink unlinkat rename renameat2 mkdir mkdirat rmdir symlink symlinkat link linkat chmod fchmod fchmodat chown fchown fchownat truncate ftruncate mount umount2 sendto recvfrom dup dup2 dup3 pread64 pwrite64 readv writev mmap".split_whitespace().collect();
+        assert_eq!(actual, expected);
+        for name in ["fcntl", "sendfile", "splice"] {
+            assert!(loader.contains(&std::format!("\"tier2.{name}\"")));
         }
     }
 
