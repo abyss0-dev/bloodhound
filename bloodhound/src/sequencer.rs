@@ -55,16 +55,11 @@ impl<W: Write> Sequencer<W> {
                 return self.write(&diagnostic);
             }
         };
-        let event = decoded.event;
-
-        for precursor in self
-            .lifecycle
-            .before_observation(&event, decoded.lifecycle_seed_authority)
-        {
+        for precursor in self.lifecycle.before_observation(&decoded) {
             self.write(&precursor)?;
         }
-        self.write(&event)?;
-        for followup in self.lifecycle.after(&event) {
+        self.write(&decoded.event)?;
+        for followup in self.lifecycle.after(&decoded) {
             self.write(&followup)?;
         }
         Ok(())

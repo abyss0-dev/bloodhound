@@ -11,32 +11,14 @@ use std::collections::{HashMap, HashSet};
 use serde_json::json;
 
 use crate::deserializer::{
-    process_start_args, BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer,
+    process_start_args, BehaviorEvent, DecodedBehaviorEvent, EventClass, EventHeaderJson,
+    EventTypeJson, IdentityDiagnosticSource, IdentityGap, Layer, LifecycleMarker,
     LifecycleSeedAuthority, ProcessRefJson,
 };
 
 pub struct LifecycleSynthesizer {
     active: HashMap<u32, ProcessRefJson>,
     identity_diagnostics: HashSet<IdentityDiagnosticSource>,
-}
-
-#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
-enum IdentityDiagnosticSource {
-    EventHeader,
-    ForkParent,
-    TaskKillTarget,
-    SignalGenerateTarget,
-}
-
-impl IdentityDiagnosticSource {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::EventHeader => "event_header",
-            Self::ForkParent => "process_fork.parent_ref",
-            Self::TaskKillTarget => "task_kill.target_ref",
-            Self::SignalGenerateTarget => "signal_generate.target_ref",
-        }
-    }
 }
 
 impl LifecycleSynthesizer {
@@ -49,19 +31,16 @@ impl LifecycleSynthesizer {
 
     /// Emit a process_start before the first observed event for a process that
     /// existed before the kernel fork hook was attached.
-    pub fn before_observation(
-        &mut self,
-        event: &BehaviorEvent,
-        seed_authority: LifecycleSeedAuthority,
-    ) -> Vec<BehaviorEvent> {
+    pub fn before_observation(&mut self, decoded: &DecodedBehaviorEvent) -> Vec<BehaviorEvent> {
+        let event = &decoded.event;
         let mut emitted = Vec::new();
-        if let Some(source) = unavailable_identity_source(event) {
-            if self.identity_diagnostics.insert(source) {
-                emitted.push(make_identity_diagnostic(event, source));
+        if let Some(gap) = decoded.identity_gap {
+            if self.identity_diagnostics.insert(gap.source) {
+                emitted.push(make_identity_diagnostic(event, gap));
             }
         }
 
-        if seed_authority == LifecycleSeedAuthority::NonAuthoritative {
+        if decoded.lifecycle_seed_authority == LifecycleSeedAuthority::NonAuthoritative {
             return emitted;
         }
 
@@ -69,7 +48,7 @@ impl LifecycleSynthesizer {
             return emitted;
         };
 
-        if event.event.event_type == EventClass::Lifecycle && event.event.name == "process_start" {
+        if decoded.marker == Some(LifecycleMarker::Start) {
             self.active.insert(process_ref.tgid, process_ref);
             return emitted;
         }
@@ -83,14 +62,15 @@ impl LifecycleSynthesizer {
     }
 
     #[cfg(test)]
-    fn before(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
-        self.before_observation(event, LifecycleSeedAuthority::Authoritative)
+    fn before(&mut self, decoded: &DecodedBehaviorEvent) -> Vec<BehaviorEvent> {
+        self.before_observation(decoded)
     }
 
     /// Kernel hooks already emitted fork/exit. Userspace only releases its
     /// bounded active-process entry after the matching whole-group exit.
-    pub fn after(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
-        if event.event.event_type == EventClass::Lifecycle && event.event.name == "process_exit" {
+    pub fn after(&mut self, decoded: &DecodedBehaviorEvent) -> Vec<BehaviorEvent> {
+        let event = &decoded.event;
+        if decoded.marker == Some(LifecycleMarker::Exit) {
             if let Some(process_ref) = event.header.process_ref {
                 if self.active.get(&process_ref.tgid) == Some(&process_ref) {
                     self.active.remove(&process_ref.tgid);
@@ -101,54 +81,7 @@ impl LifecycleSynthesizer {
     }
 }
 
-fn unavailable_identity_source(event: &BehaviorEvent) -> Option<IdentityDiagnosticSource> {
-    let args = event.args.as_ref();
-    if event.event.event_type == EventClass::Lifecycle
-        && event.event.name == "process_fork"
-        && args.and_then(|value| value.get("parent_ref")).is_none()
-    {
-        return Some(IdentityDiagnosticSource::ForkParent);
-    }
-    if event.event.name == "task_kill"
-        && args.and_then(|value| value.get("target_ref")).is_none()
-    {
-        return Some(IdentityDiagnosticSource::TaskKillTarget);
-    }
-    if event.event.name == "signal_generate"
-        && args.and_then(|value| value.get("target_ref")).is_none()
-    {
-        return Some(IdentityDiagnosticSource::SignalGenerateTarget);
-    }
-    if event.header.pid != 0
-        && event.header.process_ref.is_none()
-        && !matches!(
-            event.event.event_type,
-            EventClass::Packet | EventClass::Heartbeat | EventClass::Diagnostic
-        )
-    {
-        return Some(IdentityDiagnosticSource::EventHeader);
-    }
-    None
-}
-
-fn make_identity_diagnostic(
-    triggering: &BehaviorEvent,
-    source: IdentityDiagnosticSource,
-) -> BehaviorEvent {
-    let observed_tgid = if matches!(
-        source,
-        IdentityDiagnosticSource::TaskKillTarget
-            | IdentityDiagnosticSource::SignalGenerateTarget
-    ) {
-        triggering
-            .args
-            .as_ref()
-            .and_then(|args| args.get("target_pid"))
-            .and_then(|value| value.as_u64())
-            .unwrap_or(0)
-    } else {
-        u64::from(triggering.header.pid)
-    };
+fn make_identity_diagnostic(triggering: &BehaviorEvent, gap: IdentityGap) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson {
             auid: triggering.header.auid,
@@ -163,8 +96,8 @@ fn make_identity_diagnostic(
         proc: None,
         args: Some(json!({
             "reason_code": "stable_process_ref_unavailable",
-            "source": source.as_str(),
-            "observed_tgid": observed_tgid,
+            "source": gap.source.as_str(),
+            "observed_tgid": gap.observed_tgid,
         })),
         return_code: None,
     }
@@ -199,37 +132,53 @@ mod tests {
     use crate::deserializer::{NamespaceSnapshotJson, TaskContext};
     use bloodhound_common::{NsSnapshot, NS_SLOTS, NS_STATUS_COMPLETE};
 
-    fn event(pid: u32, start_boottime_ns: u64, event_type: EventClass, name: &'static str) -> BehaviorEvent {
-        BehaviorEvent {
-            header: EventHeaderJson {
-                timestamp: 1,
-                auid: 1000,
-                sessionid: 1,
-                pid,
-                ppid: None,
-                comm: "t".to_string(),
-                process_ref: Some(ProcessRefJson {
-                    tgid: pid,
-                    start_boottime_ns,
-                }),
-                task: Some(TaskContext {
-                    tid: pid,
-                    ns: NamespaceSnapshotJson::from(&NsSnapshot {
-                        inum: [7; NS_SLOTS],
-                        status: [NS_STATUS_COMPLETE; NS_SLOTS],
-                        _pad: 0,
+    fn event(
+        pid: u32,
+        start_boottime_ns: u64,
+        event_type: EventClass,
+        name: &'static str,
+    ) -> DecodedBehaviorEvent {
+        DecodedBehaviorEvent {
+            marker: None,
+            identity_gap: None,
+            lifecycle_seed_authority: LifecycleSeedAuthority::Authoritative,
+            event: BehaviorEvent {
+                header: EventHeaderJson {
+                    timestamp: 1,
+                    auid: 1000,
+                    sessionid: 1,
+                    pid,
+                    ppid: None,
+                    comm: "t".to_string(),
+                    process_ref: Some(ProcessRefJson {
+                        tgid: pid,
+                        start_boottime_ns,
                     }),
-                }),
+                    task: Some(TaskContext {
+                        tid: pid,
+                        ns: NamespaceSnapshotJson::from(&NsSnapshot {
+                            inum: [7; NS_SLOTS],
+                            status: [NS_STATUS_COMPLETE; NS_SLOTS],
+                            _pad: 0,
+                        }),
+                    }),
+                },
+                event: EventTypeJson {
+                    event_type,
+                    name: name.into(),
+                    layer: Layer::Behavior,
+                },
+                proc: None,
+                args: None,
+                return_code: None,
             },
-            event: EventTypeJson {
-                event_type,
-                name: name.into(),
-                layer: Layer::Behavior,
-            },
-            proc: None,
-            args: None,
-            return_code: None,
         }
+    }
+
+    fn marked(pid: u32, start_boottime_ns: u64, marker: LifecycleMarker) -> DecodedBehaviorEvent {
+        let mut decoded = event(pid, start_boottime_ns, EventClass::Lifecycle, "opaque");
+        decoded.marker = Some(marker);
+        decoded
     }
 
     #[test]
@@ -239,7 +188,11 @@ mod tests {
         let start = life.before(&triggering).remove(0);
         insta::assert_snapshot!("synthesized_process_start_bytes", serde_json::to_string(&start).unwrap());
         let mut unknown = event(43, 0, EventClass::Tracepoint, "openat");
-        unknown.header.process_ref = None;
+        unknown.event.header.process_ref = None;
+        unknown.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::EventHeader,
+            observed_tgid: 43,
+        });
         let diagnostic = life.before(&unknown).remove(0);
         insta::assert_snapshot!("process_identity_bytes", serde_json::to_string(&diagnostic).unwrap());
     }
@@ -247,7 +200,7 @@ mod tests {
     #[test]
     fn synthesized_start_never_copies_proc_enrichment() {
         let mut triggering = event(std::process::id(), 100, EventClass::Tracepoint, "openat");
-        triggering.proc = Some(crate::deserializer::ProcInfo {
+        triggering.event.proc = Some(crate::deserializer::ProcInfo {
             main_executable: Some("/untrusted/exe".into()),
             cwd: Some("/untrusted/cwd".into()),
             tty: Some("/dev/pts/42".into()),
@@ -255,7 +208,10 @@ mod tests {
         let mut life = LifecycleSynthesizer::new();
         let start = life.before(&triggering).remove(0);
         assert!(start.proc.is_none());
-        assert_eq!(start.header.process_ref, triggering.header.process_ref);
+        assert_eq!(
+            start.header.process_ref,
+            triggering.event.header.process_ref
+        );
         assert!(start.header.task.is_none());
     }
 
@@ -291,7 +247,7 @@ mod tests {
     #[test]
     fn kernel_start_is_not_duplicated() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, EventClass::Lifecycle, "process_start");
+        let start = marked(42, 100, LifecycleMarker::Start);
         assert!(life.before(&start).is_empty());
         assert!(life
             .before(&event(42, 100, EventClass::Tracepoint, "openat"))
@@ -310,19 +266,17 @@ mod tests {
     #[test]
     fn signal_generation_after_exit_does_not_resurrect_the_source() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, EventClass::Lifecycle, "process_start");
+        let start = marked(42, 100, LifecycleMarker::Start);
         assert!(life.before(&start).is_empty());
 
-        let exit = event(42, 100, EventClass::Lifecycle, "process_exit");
+        let exit = marked(42, 100, LifecycleMarker::Exit);
         assert!(life.before(&exit).is_empty());
         assert!(life.after(&exit).is_empty());
 
         let mut generated = event(42, 100, EventClass::Tracepoint, "signal_generate");
-        generated.args = Some(json!({
-            "target_ref": { "tgid": 7, "start_boottime_ns": 70 }
-        }));
+        generated.lifecycle_seed_authority = LifecycleSeedAuthority::NonAuthoritative;
         assert!(life
-            .before_observation(&generated, LifecycleSeedAuthority::NonAuthoritative)
+            .before_observation(&generated)
             .is_empty());
 
         assert_eq!(
@@ -336,9 +290,9 @@ mod tests {
         let mut life = LifecycleSynthesizer::new();
         let first = event(42, 100, EventClass::Tracepoint, "openat");
         life.before(&first);
-        life.after(&event(42, 200, EventClass::Lifecycle, "process_exit"));
+        life.after(&marked(42, 200, LifecycleMarker::Exit));
         assert!(life.before(&first).is_empty());
-        life.after(&event(42, 100, EventClass::Lifecycle, "process_exit"));
+        life.after(&marked(42, 100, LifecycleMarker::Exit));
         assert_eq!(life.before(&first).len(), 1);
     }
 
@@ -346,7 +300,11 @@ mod tests {
     fn event_without_process_identity_is_not_given_a_provisional_pid_identity() {
         let mut life = LifecycleSynthesizer::new();
         let mut ev = event(42, 100, EventClass::Tracepoint, "openat");
-        ev.header.process_ref = None;
+        ev.event.header.process_ref = None;
+        ev.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::EventHeader,
+            observed_tgid: 42,
+        });
         let emitted = life.before(&ev);
         assert_eq!(emitted.len(), 1);
         assert_eq!(emitted[0].event.event_type, EventClass::Diagnostic);
@@ -359,11 +317,11 @@ mod tests {
     fn unavailable_fork_parent_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
         let mut fork = event(42, 100, EventClass::Lifecycle, "process_fork");
-        fork.header.process_ref = None;
-        fork.args = Some(json!({
-            "child_ref": { "tgid": 43, "start_boottime_ns": 200 },
-            "clone_flags": ["0x0"]
-        }));
+        fork.event.header.process_ref = None;
+        fork.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::ForkParent,
+            observed_tgid: 42,
+        });
 
         let emitted = life.before(&fork);
         assert_eq!(emitted.len(), 1);
@@ -377,10 +335,13 @@ mod tests {
     #[test]
     fn unavailable_task_kill_target_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, EventClass::Lifecycle, "process_start");
+        let start = marked(42, 100, LifecycleMarker::Start);
         life.before(&start);
         let mut task_kill = event(42, 100, EventClass::Lsm, "task_kill");
-        task_kill.args = Some(json!({ "target_pid": 43, "signal": 0 }));
+        task_kill.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::TaskKillTarget,
+            observed_tgid: 43,
+        });
 
         let emitted = life.before(&task_kill);
         assert_eq!(emitted.len(), 1);
@@ -395,16 +356,66 @@ mod tests {
     }
 
     #[test]
+    fn typed_facts_not_json_names_control_lifecycle() {
+        let mut life = LifecycleSynthesizer::new();
+        let misleading = event(42, 100, EventClass::Lifecycle, "process_start");
+        assert_eq!(
+            life.before(&misleading).len(),
+            1,
+            "name alone is not a start marker"
+        );
+        let misleading_exit = event(42, 100, EventClass::Lifecycle, "process_exit");
+        life.after(&misleading_exit);
+        assert!(
+            life.before(&misleading).is_empty(),
+            "name alone must not release identity"
+        );
+        let syscall = event(42, 100, EventClass::Syscall, "task_kill");
+        assert!(
+            life.before(&syscall).is_empty(),
+            "name alone is not a target gap"
+        );
+    }
+
+    #[test]
+    fn diagnostic_uses_typed_target_before_authority_and_start_checks() {
+        let mut life = LifecycleSynthesizer::new();
+        let mut decoded = event(42, 100, EventClass::Tracepoint, "opaque");
+        decoded.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::SignalGenerateTarget,
+            observed_tgid: 43,
+        });
+        // Deliberately inconsistent JSON must not become a second fact source.
+        decoded.event.args = Some(json!({ "target_pid": 999, "target_ref": {} }));
+        decoded.lifecycle_seed_authority = LifecycleSeedAuthority::NonAuthoritative;
+        let emitted = life.before(&decoded);
+        assert_eq!(emitted.len(), 1);
+        assert_eq!(emitted[0].args.as_ref().unwrap()["observed_tgid"], 43);
+        assert!(life.before(&decoded).is_empty());
+
+        decoded.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::TaskKillTarget,
+            observed_tgid: 0,
+        });
+        decoded.lifecycle_seed_authority = LifecycleSeedAuthority::Authoritative;
+        let emitted = life.before(&decoded);
+        assert_eq!(emitted.len(), 2);
+        assert_eq!(emitted[0].event.name, "process.identity");
+        assert_eq!(emitted[0].args.as_ref().unwrap()["observed_tgid"], 0);
+        assert_eq!(emitted[1].event.name, "process_start");
+        assert!(life.before(&decoded).is_empty());
+    }
+
+    #[test]
     fn unavailable_signal_generate_target_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, EventClass::Lifecycle, "process_start");
+        let start = marked(42, 100, LifecycleMarker::Start);
         life.before(&start);
         let mut signal = event(42, 100, EventClass::Tracepoint, "signal_generate");
-        signal.args = Some(json!({
-            "target_pid": 43,
-            "signal": 15,
-            "result": "delivered"
-        }));
+        signal.identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::SignalGenerateTarget,
+            observed_tgid: 43,
+        });
 
         let emitted = life.before(&signal);
         assert_eq!(emitted.len(), 1);

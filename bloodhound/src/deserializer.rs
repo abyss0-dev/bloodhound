@@ -26,9 +26,42 @@ pub enum LifecycleSeedAuthority {
     NonAuthoritative,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleMarker {
+    Start,
+    Exit,
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+pub enum IdentityDiagnosticSource {
+    EventHeader,
+    ForkParent,
+    TaskKillTarget,
+    SignalGenerateTarget,
+}
+
+impl IdentityDiagnosticSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::EventHeader => "event_header",
+            Self::ForkParent => "process_fork.parent_ref",
+            Self::TaskKillTarget => "task_kill.target_ref",
+            Self::SignalGenerateTarget => "signal_generate.target_ref",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdentityGap {
+    pub source: IdentityDiagnosticSource,
+    pub observed_tgid: u32,
+}
+
 pub struct DecodedBehaviorEvent {
     pub event: BehaviorEvent,
     pub lifecycle_seed_authority: LifecycleSeedAuthority,
+    pub marker: Option<LifecycleMarker>,
+    pub identity_gap: Option<IdentityGap>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -184,9 +217,9 @@ pub fn deserialize_with_authority(data: &[u8]) -> Result<DecodedBehaviorEvent> {
     let kind_byte = data[0];
     let kind = EventKind::from_u8(kind_byte);
 
-    let event = match kind {
+    let (event, identity_gap) = match kind {
         Some(EventKind::PacketIngress) | Some(EventKind::PacketEgress) => {
-            deserialize_packet(data)
+            deserialize_packet(data).map(|event| (event, None))
         }
         Some(k) => deserialize_process_event(data, k),
         None => bail!("Unknown event kind: {}", kind_byte),
@@ -204,10 +237,19 @@ pub fn deserialize_with_authority(data: &[u8]) -> Result<DecodedBehaviorEvent> {
     Ok(DecodedBehaviorEvent {
         event,
         lifecycle_seed_authority,
+        marker: match kind {
+            Some(EventKind::ProcessStart) => Some(LifecycleMarker::Start),
+            Some(EventKind::ProcessExit) => Some(LifecycleMarker::Exit),
+            _ => None,
+        },
+        identity_gap,
     })
 }
 
-fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEvent> {
+fn deserialize_process_event(
+    data: &[u8],
+    kind: EventKind,
+) -> Result<(BehaviorEvent, Option<IdentityGap>)> {
     if data.len() < EventHeader::SIZE {
         bail!("Event data too short for header");
     }
@@ -232,6 +274,7 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         }),
     };
 
+    let mut identity_gap = None;
     let Payload {
         event,
         args,
@@ -297,26 +340,42 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::Sendfile => parse_sendfile_splice(payload, "sendfile")?,
         EventKind::Splice => parse_sendfile_splice(payload, "splice")?,
         EventKind::LsmFileOpen => parse_lsm_simple(payload, "file_open")?,
-        EventKind::LsmTaskKill => parse_lsm_task_kill(payload)?,
+        EventKind::LsmTaskKill => parse_lsm_task_kill(payload, &mut identity_gap)?,
         EventKind::LsmBpf => parse_lsm_bpf(payload)?,
         EventKind::LsmPtraceAccessCheck => parse_lsm_ptrace(payload)?,
         EventKind::LsmInodeUnlink => parse_lsm_simple(payload, "inode_unlink")?,
         EventKind::LsmInodeRename => parse_lsm_simple(payload, "inode_rename")?,
         EventKind::LsmTaskFixSetuid => parse_lsm_setuid(payload)?,
         EventKind::ProcessStart => parse_process_start(payload, header_json.process_ref)?,
-        EventKind::ProcessFork => parse_process_fork(payload)?,
+        EventKind::ProcessFork => parse_process_fork(payload, header.pid, &mut identity_gap)?,
         EventKind::ProcessExit => parse_process_exit(payload)?,
-        EventKind::SignalGenerate => parse_signal_generate(payload)?,
+        EventKind::SignalGenerate => parse_signal_generate(payload, &mut identity_gap)?,
         _ => bail!("Unexpected event kind in process event"),
     };
 
-    Ok(BehaviorEvent {
-        header: header_json,
-        event,
-        proc: None, // Filled by enricher
-        args,
-        return_code,
-    })
+    // Payload-specific gaps take precedence over the source header gap.
+    let identity_gap = identity_gap.or_else(|| {
+        (header_json.pid != 0
+            && header_json.process_ref.is_none()
+            && !matches!(
+                event.event_type,
+                EventClass::Heartbeat | EventClass::Diagnostic
+            ))
+        .then_some(IdentityGap {
+            source: IdentityDiagnosticSource::EventHeader,
+            observed_tgid: header_json.pid,
+        })
+    });
+    Ok((
+        BehaviorEvent {
+            header: header_json,
+            event,
+            proc: None, // Filled by enricher
+            args,
+            return_code,
+        },
+        identity_gap,
+    ))
 }
 
 fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
@@ -754,7 +813,11 @@ fn parse_process_start(payload: &[u8], process_ref: Option<ProcessRefJson>) -> R
     })
 }
 
-fn parse_process_fork(payload: &[u8]) -> Result<Payload> {
+fn parse_process_fork(
+    payload: &[u8],
+    observed_tgid: u32,
+    identity_gap: &mut Option<IdentityGap>,
+) -> Result<Payload> {
     if payload.len() < ProcessForkPayload::SIZE {
         bail!("process_fork payload too short");
     }
@@ -768,6 +831,11 @@ fn parse_process_fork(payload: &[u8]) -> Result<Payload> {
                 "start_boottime_ns": p.parent_start_boottime_ns,
             }),
         );
+    } else {
+        *identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::ForkParent,
+            observed_tgid,
+        });
     }
     if p.child_tgid != 0 && p.child_start_boottime_ns != 0 {
         args.insert(
@@ -1131,7 +1199,7 @@ fn parse_lsm_simple(payload: &[u8], name: &'static str) -> Result<Payload> {
     })
 }
 
-fn parse_lsm_task_kill(payload: &[u8]) -> Result<Payload> {
+fn parse_lsm_task_kill(payload: &[u8], identity_gap: &mut Option<IdentityGap>) -> Result<Payload> {
     if payload.len() < LsmTaskKillPayload::SIZE {
         bail!("LSM task_kill payload too short");
     }
@@ -1148,6 +1216,11 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<Payload> {
                 "start_boottime_ns": tk.target_start_boottime_ns,
             }),
         );
+    } else {
+        *identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::TaskKillTarget,
+            observed_tgid: tk.target_pid,
+        });
     }
 
     Ok(Payload {
@@ -1161,7 +1234,7 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<Payload> {
     })
 }
 
-fn parse_signal_generate(payload: &[u8]) -> Result<Payload> {
+fn parse_signal_generate(payload: &[u8], identity_gap: &mut Option<IdentityGap>) -> Result<Payload> {
     if payload.len() < SignalGeneratePayload::SIZE {
         bail!("signal_generate payload too short");
     }
@@ -1190,6 +1263,11 @@ fn parse_signal_generate(payload: &[u8]) -> Result<Payload> {
                 "start_boottime_ns": generated.target_start_boottime_ns,
             }),
         );
+    } else {
+        *identity_gap = Some(IdentityGap {
+            source: IdentityDiagnosticSource::SignalGenerateTarget,
+            observed_tgid: generated.target_tgid,
+        });
     }
 
     Ok(Payload {
@@ -2011,6 +2089,175 @@ mod tests {
             decoded.lifecycle_seed_authority,
             LifecycleSeedAuthority::Authoritative
         );
+    }
+
+    #[test]
+    fn decoder_identity_gaps_follow_reference_omission_and_preserve_precedence() {
+        // Exercise each reason for omitting a stable reference, with and
+        // without a simultaneous header gap.
+        for (tgid, start) in [(0, 77), (100, 0), (0, 0), (100, 77)] {
+            for header_start in [0, 99] {
+                let cases = [
+                    (
+                        EventKind::ProcessFork,
+                        payload_bytes(&ProcessForkPayload {
+                            parent_tgid: tgid,
+                            child_tgid: 4321,
+                            parent_start_boottime_ns: start,
+                            child_start_boottime_ns: 88,
+                            clone_flags: 0,
+                        }),
+                        IdentityDiagnosticSource::ForkParent,
+                        "parent_ref",
+                        1234,
+                    ),
+                    (
+                        EventKind::LsmTaskKill,
+                        payload_bytes(&LsmTaskKillPayload {
+                            target_pid: tgid,
+                            signal: 9,
+                            target_start_boottime_ns: start,
+                            return_code: 0,
+                            _pad: 0,
+                        }),
+                        IdentityDiagnosticSource::TaskKillTarget,
+                        "target_ref",
+                        tgid,
+                    ),
+                    (
+                        EventKind::SignalGenerate,
+                        payload_bytes(&SignalGeneratePayload {
+                            target_tgid: tgid,
+                            signal: 15,
+                            target_start_boottime_ns: start,
+                            group: 0,
+                            result: SIGNAL_RESULT_DELIVERED,
+                        }),
+                        IdentityDiagnosticSource::SignalGenerateTarget,
+                        "target_ref",
+                        tgid,
+                    ),
+                ];
+                for (kind, payload, source, key, observed_tgid) in cases {
+                    let header = EventHeader {
+                        process_start_boottime_ns: header_start,
+                        ..make_event_header(kind)
+                    };
+                    let mut raw = header_bytes(&header);
+                    raw.extend_from_slice(&payload);
+                    let decoded = deserialize_with_authority(&raw).unwrap();
+                    let missing = tgid == 0 || start == 0;
+                    assert_eq!(
+                        decoded.event.args.as_ref().unwrap().get(key).is_none(),
+                        missing
+                    );
+                    let expected = if missing {
+                        Some(IdentityGap {
+                            source,
+                            observed_tgid,
+                        })
+                    } else if header_start == 0 {
+                        Some(IdentityGap {
+                            source: IdentityDiagnosticSource::EventHeader,
+                            observed_tgid: 1234,
+                        })
+                    } else {
+                        None
+                    };
+                    assert_eq!(decoded.identity_gap, expected, "{kind:?}");
+                    assert_eq!(decoded.marker, None);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decoder_markers_and_header_gaps_are_independent() {
+        for pid in [0, 1234] {
+            for start in [0, 99] {
+                for (kind, payload, marker) in [
+                    (
+                        EventKind::ProcessStart,
+                        vec![],
+                        Some(LifecycleMarker::Start),
+                    ),
+                    (
+                        EventKind::ProcessExit,
+                        payload_bytes(&ProcessExitPayload {
+                            raw_status: 0,
+                            _pad: 0,
+                        }),
+                        Some(LifecycleMarker::Exit),
+                    ),
+                    (
+                        EventKind::RawSyscall,
+                        payload_bytes(&RawSyscallPayload {
+                            syscall_nr: 62,
+                            args: [0; 6],
+                            return_code: 0,
+                        }),
+                        None,
+                    ),
+                ] {
+                    let header = EventHeader {
+                        pid,
+                        process_start_boottime_ns: start,
+                        ..make_event_header(kind)
+                    };
+                    let mut raw = header_bytes(&header);
+                    raw.extend_from_slice(&payload);
+                    let decoded = deserialize_with_authority(&raw).unwrap();
+                    assert_eq!(decoded.marker, marker);
+                    assert_eq!(
+                        decoded.identity_gap,
+                        (pid != 0 && start == 0).then_some(IdentityGap {
+                            source: IdentityDiagnosticSource::EventHeader,
+                            observed_tgid: pid,
+                        })
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn decoded_collector_diagnostic_does_not_report_a_header_identity_gap() {
+        let header = EventHeader {
+            process_start_boottime_ns: 0,
+            ..make_event_header(EventKind::UsdtTrainingShellV3CaptureError)
+        };
+        let payload = UsdtTrainingShellCaptureErrorPayload {
+            attach_point_id: 1,
+            field_id: 3,
+            read_error_code: 1,
+            _pad: [0; 2],
+        };
+        let mut raw = header_bytes(&header);
+        raw.extend_from_slice(&payload_bytes(&payload));
+        let decoded = deserialize_with_authority(&raw).unwrap();
+        assert_eq!(decoded.event.event.event_type, EventClass::Diagnostic);
+        assert_eq!(decoded.identity_gap, None);
+        assert_eq!(decoded.marker, None);
+    }
+
+    #[test]
+    fn packets_have_no_lifecycle_or_identity_facts() {
+        for kind in [EventKind::PacketIngress, EventKind::PacketEgress] {
+            let header = PacketEventHeader {
+                kind: kind as u8,
+                _pad: [0; 3],
+                timestamp_ns: 1,
+                ifindex: 1,
+                data_len: 0,
+            };
+            let decoded = deserialize_with_authority(&payload_bytes(&header)).unwrap();
+            assert_eq!(decoded.marker, None);
+            assert_eq!(decoded.identity_gap, None);
+            assert_eq!(
+                decoded.lifecycle_seed_authority,
+                LifecycleSeedAuthority::NonAuthoritative
+            );
+        }
     }
 
     #[test]
