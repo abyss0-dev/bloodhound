@@ -722,6 +722,9 @@ fn parse_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Resul
     }
     let path = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const PathPayload) };
     let var_data = &payload[PathPayload::SIZE..];
+    if capture.version == 1 && capture.secondary != 0 {
+        bail!("Single-path capture secondary must be zero");
+    }
     if capture.version == 1 && path.path_len as usize != var_data.len() {
         bail!("Path capture length does not match record");
     }
@@ -2004,7 +2007,7 @@ mod tests {
             ] {
                 let mut data = path_capture_record(two, b"/one", b"/two");
                 let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
-                header.capture = HeaderCapture { version, primary: code, secondary: code };
+                header.capture = HeaderCapture { version, primary: code, secondary: if two { code } else { 0 } };
                 data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
                 let args = deserialize(&data).unwrap().args.unwrap();
                 assert_eq!(args["path_capture_version"], version);
@@ -2026,6 +2029,19 @@ mod tests {
         } else {
             let payload = PathPayload { path_len: first.len() as u16, _pad: [0; 2], return_code: -1 };
             build_event_with_vardata(EventKind::Chdir, &payload, first)
+        }
+    }
+
+    #[test]
+    fn single_path_v1_rejects_nonzero_secondary() {
+        for secondary in 1..=u8::MAX {
+            let mut data = path_capture_record(false, b"a", b"");
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture {
+                version: 1, primary: CaptureStatus::Complete as u8, secondary,
+            };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            assert!(deserialize(&data).is_err(), "accepted secondary={secondary}");
         }
     }
 
@@ -2053,7 +2069,7 @@ mod tests {
         ] {
             let mut data = path_capture_record(two, first, second);
             let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
-            header.capture = HeaderCapture { version: 1, primary: primary as u8, secondary: secondary as u8 };
+            header.capture = HeaderCapture { version: 1, primary: primary as u8, secondary: if two { secondary as u8 } else { 0 } };
             data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
             let args = deserialize(&data).unwrap().args.unwrap();
             assert_eq!(args[if two { "path1_status" } else { "path_status" }], expected1);
@@ -2068,7 +2084,7 @@ mod tests {
                 let mut data = path_capture_record(two, b"one", b"two");
                 let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
                 header.capture = HeaderCapture { version: 1,
-                    primary: CaptureStatus::Complete as u8, secondary: CaptureStatus::Complete as u8 };
+                    primary: CaptureStatus::Complete as u8, secondary: if two { CaptureStatus::Complete as u8 } else { 0 } };
                 data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
                 if extra { data.push(0); } else { data.pop(); }
                 assert!(deserialize(&data).is_err());
