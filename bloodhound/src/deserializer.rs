@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use anyhow::{bail, Context, Result};
 use serde::Serialize;
 
@@ -115,12 +117,47 @@ pub struct ProcessRefJson {
     pub start_boottime_ns: u64,
 }
 
+/// Source classes in the canonical `docs/schema.json` event.type contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum EventClass {
+    Syscall,
+    Tty,
+    Packet,
+    // Part of the wire contract even though no current producer emits it.
+    #[allow(dead_code)]
+    Kprobe,
+    Tracepoint,
+    Lsm,
+    Meta,
+    Lifecycle,
+    Heartbeat,
+    Usdt,
+    Diagnostic,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Layer {
+    Intent,
+    Tooling,
+    Behavior,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct EventTypeJson {
     #[serde(rename = "type")]
-    pub event_type: String,
-    pub name: String,
-    pub layer: String,
+    pub event_type: EventClass,
+    pub name: Cow<'static, str>,
+    pub layer: Layer,
+}
+
+/// Collector-decoded event metadata and arguments, before header enrichment.
+#[derive(Debug)]
+pub struct Payload {
+    pub event: EventTypeJson,
+    pub args: Option<serde_json::Value>,
+    pub return_code: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -195,7 +232,11 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         }),
     };
 
-    let (event_type, name, layer, mut args, return_code) = match kind {
+    let Payload {
+        event,
+        args,
+        return_code,
+    } = match kind {
         EventKind::TtyRead => parse_tty(payload, "tty_read", header.capture)?,
         EventKind::TtyWrite => parse_tty(payload, "tty_write", header.capture)?,
         EventKind::UsdtTrainingShellV3
@@ -262,26 +303,16 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
         EventKind::LsmInodeUnlink => parse_lsm_simple(payload, "inode_unlink")?,
         EventKind::LsmInodeRename => parse_lsm_simple(payload, "inode_rename")?,
         EventKind::LsmTaskFixSetuid => parse_lsm_setuid(payload)?,
-        EventKind::ProcessStart => parse_process_start(payload)?,
+        EventKind::ProcessStart => parse_process_start(payload, header_json.process_ref)?,
         EventKind::ProcessFork => parse_process_fork(payload)?,
         EventKind::ProcessExit => parse_process_exit(payload)?,
         EventKind::SignalGenerate => parse_signal_generate(payload)?,
         _ => bail!("Unexpected event kind in process event"),
     };
 
-    if kind == EventKind::ProcessStart {
-        if let Some(process_ref) = header_json.process_ref {
-            args = Some(serde_json::json!({ "process_ref": process_ref }));
-        }
-    }
-
     Ok(BehaviorEvent {
         header: header_json,
-        event: EventTypeJson {
-            event_type,
-            name,
-            layer,
-        },
+        event,
         proc: None, // Filled by enricher
         args,
         return_code,
@@ -313,9 +344,9 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
         // Historical offline capture; no live correlation.
         header: EventHeaderJson::unattributed(pkt_header.timestamp_ns),
         event: EventTypeJson {
-            event_type: "PACKET".to_string(),
-            name: name.to_string(),
-            layer: "behavior".to_string(),
+            event_type: EventClass::Packet,
+            name: name.into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(args),
@@ -327,7 +358,7 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
 
 use base64::Engine;
 
-fn parse_tty(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_tty(payload: &[u8], name: &'static str, capture: HeaderCapture) -> Result<Payload> {
     if payload.len() < TtyPayload::SIZE {
         bail!("TTY payload too short");
     }
@@ -373,11 +404,19 @@ fn parse_tty(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(Stri
     let args = serde_json::json!({
         "data": encoded, "tty_capture_version": capture.version, "data_status": status,
     });
-    Ok(("TTY".into(), name.into(), "intent".into(), Some(args), None))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tty,
+            name: name.into(),
+            layer: Layer::Intent,
+        },
+        args: Some(args),
+        return_code: None,
+    })
 }
 
 
-fn parse_execve(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_execve(payload: &[u8], name: &'static str, capture: HeaderCapture) -> Result<Payload> {
     if payload.len() < ExecvePayload::SIZE {
         bail!("Execve payload too short");
     }
@@ -421,24 +460,18 @@ fn parse_execve(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(S
         "argv_status": argv_status, "filename_status": filename_status,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "tooling".into(),
-        Some(args),
-        Some(execve.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Tooling,
+        },
+        args: Some(args),
+        return_code: Some(execve.return_code as i64),
+    })
 }
 
-fn parse_exec_view(
-    payload: &[u8],
-) -> Result<(
-    String,
-    String,
-    String,
-    Option<serde_json::Value>,
-    Option<i64>,
-)> {
+fn parse_exec_view(payload: &[u8]) -> Result<Payload> {
     if payload.len() != ExecViewPayload::SIZE {
         bail!("invalid exec view payload length");
     }
@@ -473,16 +506,18 @@ fn parse_exec_view(
         args["mount_namespace"] = view.mount_namespace.into();
         args["root_mount_id"] = view.root_mount_id.into();
     }
-    Ok((
-        "TRACEPOINT".into(),
-        "exec_view".into(),
-        "behavior".into(),
-        Some(args),
-        None,
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "exec_view".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: None,
+    })
 }
 
-fn parse_raw_syscall(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_raw_syscall(payload: &[u8]) -> Result<Payload> {
     if payload.len() < RawSyscallPayload::SIZE {
         bail!("Raw syscall payload too short");
     }
@@ -493,16 +528,18 @@ fn parse_raw_syscall(payload: &[u8]) -> Result<(String, String, String, Option<s
         "raw_args": [raw.args[0], raw.args[1], raw.args[2], raw.args[3], raw.args[4], raw.args[5]],
     });
 
-    Ok((
-        "SYSCALL".into(),
-        raw.syscall_nr.to_string(),
-        "behavior".into(),
-        Some(args),
-        Some(raw.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Syscall,
+            name: raw.syscall_nr.to_string().into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(raw.return_code),
+    })
 }
 
-fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_openat(payload: &[u8]) -> Result<Payload> {
     if payload.len() < OpenatPayload::SIZE {
         bail!("Openat payload too short");
     }
@@ -558,16 +595,18 @@ fn parse_openat(payload: &[u8]) -> Result<(String, String, String, Option<serde_
         obj.insert("ino".into(), serde_json::json!(openat.ino));
     }
 
-    Ok((
-        "TRACEPOINT".into(),
-        "openat".into(),
-        "behavior".into(),
-        Some(args),
-        Some(openat.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "openat".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(openat.return_code as i64),
+    })
 }
 
-fn parse_read_write(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_read_write(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < ReadWritePayload::SIZE {
         bail!("ReadWrite payload too short");
     }
@@ -587,16 +626,18 @@ fn parse_read_write(payload: &[u8], name: &str) -> Result<(String, String, Strin
         "requested_size": rw.requested_size,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(rw.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(rw.return_code),
+    })
 }
 
-fn parse_connect_bind(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_connect_bind(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < ConnectBindPayload::SIZE {
         bail!("ConnectBind payload too short");
     }
@@ -616,16 +657,18 @@ fn parse_connect_bind(payload: &[u8], name: &str) -> Result<(String, String, Str
         "addr": addr,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(cb.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(cb.return_code as i64),
+    })
 }
 
-fn parse_listen(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_listen(payload: &[u8]) -> Result<Payload> {
     if payload.len() < ListenPayload::SIZE {
         bail!("Listen payload too short");
     }
@@ -636,16 +679,18 @@ fn parse_listen(payload: &[u8]) -> Result<(String, String, String, Option<serde_
         "backlog": listen.backlog,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        "listen".into(),
-        "behavior".into(),
-        Some(args),
-        Some(listen.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "listen".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(listen.return_code as i64),
+    })
 }
 
-fn parse_socket(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_socket(payload: &[u8]) -> Result<Payload> {
     if payload.len() < SocketPayload::SIZE {
         bail!("Socket payload too short");
     }
@@ -657,16 +702,18 @@ fn parse_socket(payload: &[u8]) -> Result<(String, String, String, Option<serde_
         "protocol": sock.protocol,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        "socket".into(),
-        "behavior".into(),
-        Some(args),
-        Some(sock.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "socket".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(sock.return_code as i64),
+    })
 }
 
-fn parse_clone(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_clone(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < ClonePayload::SIZE {
         bail!("Clone payload too short");
     }
@@ -677,23 +724,37 @@ fn parse_clone(payload: &[u8], name: &str) -> Result<(String, String, String, Op
         "flags": flags,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(clone.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(clone.return_code),
+    })
 }
 
-fn parse_process_start(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+pub fn process_start_args(process_ref: Option<ProcessRefJson>) -> Option<serde_json::Value> {
+    process_ref.map(|process_ref| serde_json::json!({ "process_ref": process_ref }))
+}
+
+fn parse_process_start(payload: &[u8], process_ref: Option<ProcessRefJson>) -> Result<Payload> {
     if !payload.is_empty() {
         bail!("process_start payload must be empty");
     }
-    Ok(("LIFECYCLE".into(), "process_start".into(), "behavior".into(), None, None))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lifecycle,
+            name: "process_start".into(),
+            layer: Layer::Behavior,
+        },
+        args: process_start_args(process_ref),
+        return_code: None,
+    })
 }
 
-fn parse_process_fork(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_process_fork(payload: &[u8]) -> Result<Payload> {
     if payload.len() < ProcessForkPayload::SIZE {
         bail!("process_fork payload too short");
     }
@@ -718,16 +779,18 @@ fn parse_process_fork(payload: &[u8]) -> Result<(String, String, String, Option<
         );
     }
     args.insert("clone_flags".into(), serde_json::json!(decode_clone_flags(p.clone_flags)));
-    Ok((
-        "LIFECYCLE".into(),
-        "process_fork".into(),
-        "behavior".into(),
-        Some(serde_json::Value::Object(args)),
-        None,
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lifecycle,
+            name: "process_fork".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(serde_json::Value::Object(args)),
+        return_code: None,
+    })
 }
 
-fn parse_process_exit(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_process_exit(payload: &[u8]) -> Result<Payload> {
     if payload.len() < ProcessExitPayload::SIZE {
         bail!("process_exit payload too short");
     }
@@ -747,7 +810,15 @@ fn parse_process_exit(payload: &[u8]) -> Result<(String, String, String, Option<
             "raw_status": p.raw_status,
         })
     };
-    Ok(("LIFECYCLE".into(), "process_exit".into(), "behavior".into(), Some(args), None))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lifecycle,
+            name: "process_exit".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: None,
+    })
 }
 
 fn path_capture_status(version: u8, code: u8, data: &[u8]) -> Result<&'static str> {
@@ -763,7 +834,7 @@ fn path_capture_status(version: u8, code: u8, data: &[u8]) -> Result<&'static st
     })
 }
 
-fn parse_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_path_event(payload: &[u8], name: &'static str, capture: HeaderCapture) -> Result<Payload> {
     if payload.len() < PathPayload::SIZE {
         bail!("Path payload too short");
     }
@@ -784,16 +855,18 @@ fn parse_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Resul
         "path_status": path_capture_status(capture.version, capture.primary, &var_data[..path_len])?,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(path.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(path.return_code as i64),
+    })
 }
 
-fn parse_fd_event(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_fd_event(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < FdPayload::SIZE {
         bail!("Fd payload too short");
     }
@@ -803,16 +876,18 @@ fn parse_fd_event(payload: &[u8], name: &str) -> Result<(String, String, String,
         "fd": fd.fd,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(fd.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(fd.return_code as i64),
+    })
 }
 
-fn parse_two_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_two_path_event(payload: &[u8], name: &'static str, capture: HeaderCapture) -> Result<Payload> {
     if payload.len() < TwoPathPayload::SIZE {
         bail!("TwoPath payload too short");
     }
@@ -837,16 +912,18 @@ fn parse_two_path_event(payload: &[u8], name: &str, capture: HeaderCapture) -> R
         "path2_status": path_capture_status(capture.version, capture.secondary, &var_data[p2_start..p2_start + p2_len])?,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(tp.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(tp.return_code as i64),
+    })
 }
 
-fn parse_sendto_recvfrom(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_sendto_recvfrom(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < SendtoRecvfromPayload::SIZE {
         bail!("SendtoRecvfrom payload too short");
     }
@@ -868,19 +945,18 @@ fn parse_sendto_recvfrom(payload: &[u8], name: &str) -> Result<(String, String, 
         "size": sr.size,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(sr.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(sr.return_code),
+    })
 }
 
-fn parse_dup(
-    payload: &[u8],
-    name: &str,
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_dup(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < DupPayload::SIZE {
         bail!("Dup payload too short");
     }
@@ -892,19 +968,18 @@ fn parse_dup(
         "cloexec": d.cloexec != 0,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(d.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(d.return_code),
+    })
 }
 
-fn parse_pread_pwrite(
-    payload: &[u8],
-    name: &str,
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_pread_pwrite(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < PreadPwritePayload::SIZE {
         bail!("PreadPwrite payload too short");
     }
@@ -925,19 +1000,18 @@ fn parse_pread_pwrite(
         "offset": p.offset,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(p.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(p.return_code),
+    })
 }
 
-fn parse_readv_writev(
-    payload: &[u8],
-    name: &str,
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_readv_writev(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < ReadvWritevPayload::SIZE {
         bail!("ReadvWritev payload too short");
     }
@@ -959,18 +1033,18 @@ fn parse_readv_writev(
         "iov_truncated": p.iov_truncated != 0,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(p.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(p.return_code),
+    })
 }
 
-fn parse_mmap(
-    payload: &[u8],
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_mmap(payload: &[u8]) -> Result<Payload> {
     if payload.len() < MmapPayload::SIZE {
         bail!("Mmap payload too short");
     }
@@ -989,19 +1063,18 @@ fn parse_mmap(
         obj.insert("ino".into(), serde_json::Value::from(p.ino));
     }
 
-    Ok((
-        "TRACEPOINT".into(),
-        "mmap".into(),
-        "behavior".into(),
-        Some(args),
-        Some(p.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "mmap".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(p.return_code),
+    })
 }
 
-fn parse_sendfile_splice(
-    payload: &[u8],
-    name: &str,
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_sendfile_splice(payload: &[u8], name: &'static str) -> Result<Payload> {
     if payload.len() < SendfileSplicePayload::SIZE {
         bail!("SendfileSplice payload too short");
     }
@@ -1018,13 +1091,15 @@ fn parse_sendfile_splice(
         "size": p.size,
     });
 
-    Ok((
-        "TRACEPOINT".into(),
-        name.into(),
-        "behavior".into(),
-        Some(args),
-        Some(p.return_code),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(p.return_code),
+    })
 }
 
 fn fd_type_to_str(t: u8) -> &'static str {
@@ -1037,7 +1112,7 @@ fn fd_type_to_str(t: u8) -> &'static str {
     }
 }
 
-fn parse_lsm_simple(payload: &[u8], name: &str) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_lsm_simple(payload: &[u8], name: &'static str) -> Result<Payload> {
     let return_code = if payload.len() >= 8 {
         let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmFileOpenPayload) };
         Some(p.return_code as i64)
@@ -1045,16 +1120,18 @@ fn parse_lsm_simple(payload: &[u8], name: &str) -> Result<(String, String, Strin
         None
     };
 
-    Ok((
-        "LSM".into(),
-        name.into(),
-        "behavior".into(),
-        None,
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lsm,
+            name: name.into(),
+            layer: Layer::Behavior,
+        },
+        args: None,
         return_code,
-    ))
+    })
 }
 
-fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_lsm_task_kill(payload: &[u8]) -> Result<Payload> {
     if payload.len() < LsmTaskKillPayload::SIZE {
         bail!("LSM task_kill payload too short");
     }
@@ -1073,18 +1150,18 @@ fn parse_lsm_task_kill(payload: &[u8]) -> Result<(String, String, String, Option
         );
     }
 
-    Ok((
-        "LSM".into(),
-        "task_kill".into(),
-        "behavior".into(),
-        Some(serde_json::Value::Object(args)),
-        Some(tk.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lsm,
+            name: "task_kill".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(serde_json::Value::Object(args)),
+        return_code: Some(tk.return_code as i64),
+    })
 }
 
-fn parse_signal_generate(
-    payload: &[u8],
-) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_signal_generate(payload: &[u8]) -> Result<Payload> {
     if payload.len() < SignalGeneratePayload::SIZE {
         bail!("signal_generate payload too short");
     }
@@ -1115,16 +1192,18 @@ fn parse_signal_generate(
         );
     }
 
-    Ok((
-        "TRACEPOINT".into(),
-        "signal_generate".into(),
-        "behavior".into(),
-        Some(serde_json::Value::Object(args)),
-        None,
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Tracepoint,
+            name: "signal_generate".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(serde_json::Value::Object(args)),
+        return_code: None,
+    })
 }
 
-fn parse_lsm_bpf(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_lsm_bpf(payload: &[u8]) -> Result<Payload> {
     if payload.len() < LsmBpfPayload::SIZE {
         bail!("LSM bpf payload too short");
     }
@@ -1134,16 +1213,18 @@ fn parse_lsm_bpf(payload: &[u8]) -> Result<(String, String, String, Option<serde
         "cmd": bpf.cmd,
     });
 
-    Ok((
-        "LSM".into(),
-        "bpf".into(),
-        "behavior".into(),
-        Some(args),
-        Some(bpf.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lsm,
+            name: "bpf".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(bpf.return_code as i64),
+    })
 }
 
-fn parse_lsm_ptrace(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_lsm_ptrace(payload: &[u8]) -> Result<Payload> {
     if payload.len() < LsmPtracePayload::SIZE {
         bail!("LSM ptrace payload too short");
     }
@@ -1153,16 +1234,18 @@ fn parse_lsm_ptrace(payload: &[u8]) -> Result<(String, String, String, Option<se
         "target_pid": pt.target_pid,
     });
 
-    Ok((
-        "LSM".into(),
-        "ptrace_access_check".into(),
-        "behavior".into(),
-        Some(args),
-        Some(pt.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lsm,
+            name: "ptrace_access_check".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(pt.return_code as i64),
+    })
 }
 
-fn parse_lsm_setuid(payload: &[u8]) -> Result<(String, String, String, Option<serde_json::Value>, Option<i64>)> {
+fn parse_lsm_setuid(payload: &[u8]) -> Result<Payload> {
     if payload.len() < LsmSetuidPayload::SIZE {
         bail!("LSM setuid payload too short");
     }
@@ -1175,13 +1258,15 @@ fn parse_lsm_setuid(payload: &[u8]) -> Result<(String, String, String, Option<se
         "new_gid": su.new_gid,
     });
 
-    Ok((
-        "LSM".into(),
-        "task_fix_setuid".into(),
-        "behavior".into(),
-        Some(args),
-        Some(su.return_code as i64),
-    ))
+    Ok(Payload {
+        event: EventTypeJson {
+            event_type: EventClass::Lsm,
+            name: "task_fix_setuid".into(),
+            layer: Layer::Behavior,
+        },
+        args: Some(args),
+        return_code: Some(su.return_code as i64),
+    })
 }
 
 // ── Utility functions ────────────────────────────────────────────────────────
@@ -1304,6 +1389,29 @@ mod tests {
     use super::*;
     use std::mem;
 
+    #[test]
+    fn event_class_serialization_matches_the_wire_schema() {
+        let classes = [
+            EventClass::Syscall,
+            EventClass::Tty,
+            EventClass::Packet,
+            EventClass::Kprobe,
+            EventClass::Tracepoint,
+            EventClass::Lsm,
+            EventClass::Meta,
+            EventClass::Lifecycle,
+            EventClass::Heartbeat,
+            EventClass::Usdt,
+            EventClass::Diagnostic,
+        ];
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../docs/schema.json")).unwrap();
+        assert_eq!(
+            serde_json::to_value(classes).unwrap(),
+            schema["properties"]["event"]["properties"]["type"]["enum"],
+        );
+    }
+
     // ── Test helpers: construct raw byte buffers as BPF would produce ────
 
     fn make_event_header(kind: EventKind) -> EventHeader {
@@ -1419,10 +1527,10 @@ mod tests {
             status: 1,
             _pad: [0; 2],
         };
-        let (_, name, _, args, result) = parse_exec_view(&payload_bytes(&payload)).unwrap();
-        let args = args.unwrap();
-        assert_eq!(name, "exec_view");
-        assert_eq!(result, None);
+        let decoded = parse_exec_view(&payload_bytes(&payload)).unwrap();
+        let args = decoded.args.unwrap();
+        assert_eq!(decoded.event.name, "exec_view");
+        assert_eq!(decoded.return_code, None);
         assert_eq!(args["view_status"], "complete");
         assert_eq!(args["root_dev_major"], 259);
         assert_eq!(args["root_dev_minor"], 513);
@@ -1441,7 +1549,7 @@ mod tests {
             };
             let args = parse_exec_view(&payload_bytes(&payload))
                 .unwrap()
-                .3
+                .args
                 .unwrap();
             assert_eq!(args["view_status"], expected);
             assert!(args.get("root_inode").is_none());
@@ -1456,7 +1564,7 @@ mod tests {
         };
         let args = parse_exec_view(&payload_bytes(&payload))
             .unwrap()
-            .3
+            .args
             .unwrap();
         assert_eq!(args["view_status"], "unknown");
         assert!(args.get("root_inode").is_none());
@@ -1641,9 +1749,9 @@ mod tests {
             return_code: 0,
         };
         let event = deserialize(&build_event(EventKind::RawSyscall, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "SYSCALL");
+        assert_eq!(event.event.event_type, EventClass::Syscall);
         assert_eq!(event.event.name, "100"); // syscall_nr as string
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
         assert_eq!(event.return_code, Some(0));
     }
 
@@ -1655,9 +1763,9 @@ mod tests {
             return_code: 0,
         };
         let event = deserialize(&build_event(EventKind::Execve, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.event_type, EventClass::Tracepoint);
         assert_eq!(event.event.name, "execve");
-        assert_eq!(event.event.layer, "tooling");
+        assert_eq!(event.event.layer, Layer::Tooling);
     }
 
     #[test]
@@ -1668,27 +1776,27 @@ mod tests {
             return_code: 0,
         };
         let event = deserialize(&build_event(EventKind::Execveat, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.event_type, EventClass::Tracepoint);
         assert_eq!(event.event.name, "execveat");
-        assert_eq!(event.event.layer, "tooling");
+        assert_eq!(event.event.layer, Layer::Tooling);
     }
 
     #[test]
     fn tty_read_classification() {
         let payload = TtyPayload { data_len: 0, _pad: [0; 2] };
         let event = deserialize(&build_event(EventKind::TtyRead, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TTY");
+        assert_eq!(event.event.event_type, EventClass::Tty);
         assert_eq!(event.event.name, "tty_read");
-        assert_eq!(event.event.layer, "intent");
+        assert_eq!(event.event.layer, Layer::Intent);
     }
 
     #[test]
     fn tty_write_classification() {
         let payload = TtyPayload { data_len: 0, _pad: [0; 2] };
         let event = deserialize(&build_event(EventKind::TtyWrite, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TTY");
+        assert_eq!(event.event.event_type, EventClass::Tty);
         assert_eq!(event.event.name, "tty_write");
-        assert_eq!(event.event.layer, "intent");
+        assert_eq!(event.event.layer, Layer::Intent);
     }
 
     #[test]
@@ -1698,9 +1806,9 @@ mod tests {
             dirfd: 0, dev: 0, ino: 0,
         };
         let event = deserialize(&build_event(EventKind::Openat, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.event_type, EventClass::Tracepoint);
         assert_eq!(event.event.name, "openat");
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
     }
 
     #[test]
@@ -1709,9 +1817,9 @@ mod tests {
             family: 2, port: 80, addr_v4: 0, addr_v6: [0; 16], return_code: 0,
         };
         let event = deserialize(&build_event(EventKind::Connect, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.event_type, EventClass::Tracepoint);
         assert_eq!(event.event.name, "connect");
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
     }
 
     #[test]
@@ -1727,11 +1835,29 @@ mod tests {
     fn process_start_carries_the_header_identity() {
         let header = make_event_header(EventKind::ProcessStart);
         let event = deserialize(&header_bytes(&header)).unwrap();
-        assert_eq!(event.event.event_type, "LIFECYCLE");
+        assert_eq!(event.event.event_type, EventClass::Lifecycle);
         assert_eq!(event.event.name, "process_start");
         assert_eq!(event.args, Some(serde_json::json!({
             "process_ref": { "tgid": 1234, "start_boottime_ns": 99 }
         })));
+    }
+
+    #[test]
+    fn process_start_without_header_identity_omits_args() {
+        let header = EventHeader {
+            process_start_boottime_ns: 0,
+            ..make_event_header(EventKind::ProcessStart)
+        };
+        let event = deserialize(&header_bytes(&header)).unwrap();
+        assert!(event.args.is_none());
+        assert!(serde_json::to_value(event).unwrap().get("args").is_none());
+    }
+
+    #[test]
+    fn process_start_rejects_nonempty_payload() {
+        let mut data = header_bytes(&make_event_header(EventKind::ProcessStart));
+        data.push(0);
+        assert!(deserialize(&data).is_err());
     }
 
     #[test]
@@ -1787,9 +1913,9 @@ mod tests {
             return_code: -1, _pad: 0,
         };
         let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "LSM");
+        assert_eq!(event.event.event_type, EventClass::Lsm);
         assert_eq!(event.event.name, "task_kill");
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
         assert_eq!(event.args.unwrap()["target_ref"]["start_boottime_ns"], 77);
     }
 
@@ -1818,9 +1944,9 @@ mod tests {
             result: SIGNAL_RESULT_DELIVERED,
         };
         let event = deserialize(&build_event(EventKind::SignalGenerate, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "TRACEPOINT");
+        assert_eq!(event.event.event_type, EventClass::Tracepoint);
         assert_eq!(event.event.name, "signal_generate");
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
         assert_eq!(event.header.process_ref.unwrap().tgid, 1234);
         assert_eq!(event.args, Some(serde_json::json!({
             "target_pid": 4321,
@@ -1891,7 +2017,7 @@ mod tests {
     fn lsm_bpf_classification() {
         let payload = LsmBpfPayload { cmd: 5, return_code: -1 };
         let event = deserialize(&build_event(EventKind::LsmBpf, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "LSM");
+        assert_eq!(event.event.event_type, EventClass::Lsm);
         assert_eq!(event.event.name, "bpf");
     }
 
@@ -1901,7 +2027,7 @@ mod tests {
             old_uid: 1000, new_uid: 0, old_gid: 1000, new_gid: 0, return_code: 0,
         };
         let event = deserialize(&build_event(EventKind::LsmTaskFixSetuid, &payload)).unwrap();
-        assert_eq!(event.event.event_type, "LSM");
+        assert_eq!(event.event.event_type, EventClass::Lsm);
         assert_eq!(event.event.name, "task_fix_setuid");
     }
 
@@ -2466,9 +2592,9 @@ mod tests {
         buf.extend_from_slice(&raw_pkt);
 
         let event = deserialize(&buf).unwrap();
-        assert_eq!(event.event.event_type, "PACKET");
+        assert_eq!(event.event.event_type, EventClass::Packet);
         assert_eq!(event.event.name, "ingress");
-        assert_eq!(event.event.layer, "behavior");
+        assert_eq!(event.event.layer, Layer::Behavior);
 
         let args = event.args.unwrap();
         let decoded = base64::engine::general_purpose::STANDARD
@@ -2638,7 +2764,7 @@ mod golden_tests {
         assert_eq!((padded[1..].as_ptr() as usize) % 8, 1);
 
         let event = deserialize(&padded[1..]).unwrap();
-        assert_eq!(event.event.event_type, "SYSCALL");
+        assert_eq!(event.event.event_type, EventClass::Syscall);
         assert_eq!(event.event.name, "39");
     }
 
@@ -2664,7 +2790,7 @@ mod golden_tests {
         assert_eq!((padded[1..].as_ptr() as usize) % 8, 1);
 
         let event = deserialize(&padded[1..]).unwrap();
-        assert_eq!(event.event.event_type, "PACKET");
+        assert_eq!(event.event.event_type, EventClass::Packet);
         assert_eq!(event.event.name, "egress");
         assert_eq!(event.header.timestamp, 5_000_000_000);
     }

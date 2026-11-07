@@ -11,7 +11,8 @@ use std::collections::{HashMap, HashSet};
 use serde_json::json;
 
 use crate::deserializer::{
-    BehaviorEvent, EventHeaderJson, EventTypeJson, LifecycleSeedAuthority, ProcessRefJson,
+    process_start_args, BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer,
+    LifecycleSeedAuthority, ProcessRefJson,
 };
 
 pub struct LifecycleSynthesizer {
@@ -68,7 +69,7 @@ impl LifecycleSynthesizer {
             return emitted;
         };
 
-        if event.event.event_type == "LIFECYCLE" && event.event.name == "process_start" {
+        if event.event.event_type == EventClass::Lifecycle && event.event.name == "process_start" {
             self.active.insert(process_ref.tgid, process_ref);
             return emitted;
         }
@@ -89,7 +90,7 @@ impl LifecycleSynthesizer {
     /// Kernel hooks already emitted fork/exit. Userspace only releases its
     /// bounded active-process entry after the matching whole-group exit.
     pub fn after(&mut self, event: &BehaviorEvent) -> Vec<BehaviorEvent> {
-        if event.event.event_type == "LIFECYCLE" && event.event.name == "process_exit" {
+        if event.event.event_type == EventClass::Lifecycle && event.event.name == "process_exit" {
             if let Some(process_ref) = event.header.process_ref {
                 if self.active.get(&process_ref.tgid) == Some(&process_ref) {
                     self.active.remove(&process_ref.tgid);
@@ -102,7 +103,7 @@ impl LifecycleSynthesizer {
 
 fn unavailable_identity_source(event: &BehaviorEvent) -> Option<IdentityDiagnosticSource> {
     let args = event.args.as_ref();
-    if event.event.event_type == "LIFECYCLE"
+    if event.event.event_type == EventClass::Lifecycle
         && event.event.name == "process_fork"
         && args.and_then(|value| value.get("parent_ref")).is_none()
     {
@@ -121,8 +122,8 @@ fn unavailable_identity_source(event: &BehaviorEvent) -> Option<IdentityDiagnost
     if event.header.pid != 0
         && event.header.process_ref.is_none()
         && !matches!(
-            event.event.event_type.as_str(),
-            "PACKET" | "HEARTBEAT" | "DIAGNOSTIC"
+            event.event.event_type,
+            EventClass::Packet | EventClass::Heartbeat | EventClass::Diagnostic
         )
     {
         return Some(IdentityDiagnosticSource::EventHeader);
@@ -155,9 +156,9 @@ fn make_identity_diagnostic(
             ..EventHeaderJson::unattributed(triggering.header.timestamp)
         },
         event: EventTypeJson {
-            event_type: "DIAGNOSTIC".into(),
+            event_type: EventClass::Diagnostic,
             name: "process.identity".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(json!({
@@ -173,12 +174,12 @@ fn make_process_start(triggering: &BehaviorEvent, process_ref: ProcessRefJson) -
     BehaviorEvent {
         header: clone_header(&triggering.header),
         event: EventTypeJson {
-            event_type: "LIFECYCLE".into(),
+            event_type: EventClass::Lifecycle,
             name: "process_start".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
-        args: Some(json!({ "process_ref": process_ref })),
+        args: process_start_args(Some(process_ref)),
         return_code: None,
     }
 }
@@ -198,7 +199,7 @@ mod tests {
     use crate::deserializer::{NamespaceSnapshotJson, TaskContext};
     use bloodhound_common::{NsSnapshot, NS_SLOTS, NS_STATUS_COMPLETE};
 
-    fn event(pid: u32, start_boottime_ns: u64, event_type: &str, name: &str) -> BehaviorEvent {
+    fn event(pid: u32, start_boottime_ns: u64, event_type: EventClass, name: &'static str) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
                 timestamp: 1,
@@ -221,9 +222,9 @@ mod tests {
                 }),
             },
             event: EventTypeJson {
-                event_type: event_type.to_string(),
-                name: name.to_string(),
-                layer: "behavior".to_string(),
+                event_type,
+                name: name.into(),
+                layer: Layer::Behavior,
             },
             proc: None,
             args: None,
@@ -234,10 +235,10 @@ mod tests {
     #[test]
     fn synthesized_lifecycle_bytes() {
         let mut life = LifecycleSynthesizer::new();
-        let triggering = event(42, 100, "TRACEPOINT", "openat");
+        let triggering = event(42, 100, EventClass::Tracepoint, "openat");
         let start = life.before(&triggering).remove(0);
         insta::assert_snapshot!("synthesized_process_start_bytes", serde_json::to_string(&start).unwrap());
-        let mut unknown = event(43, 0, "TRACEPOINT", "openat");
+        let mut unknown = event(43, 0, EventClass::Tracepoint, "openat");
         unknown.header.process_ref = None;
         let diagnostic = life.before(&unknown).remove(0);
         insta::assert_snapshot!("process_identity_bytes", serde_json::to_string(&diagnostic).unwrap());
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn synthesized_start_never_copies_proc_enrichment() {
-        let mut triggering = event(std::process::id(), 100, "TRACEPOINT", "openat");
+        let mut triggering = event(std::process::id(), 100, EventClass::Tracepoint, "openat");
         triggering.proc = Some(crate::deserializer::ProcInfo {
             main_executable: Some("/untrusted/exe".into()),
             cwd: Some("/untrusted/cwd".into()),
@@ -262,12 +263,12 @@ mod tests {
     fn pid_reuse_is_keyed_by_kernel_process_identity() {
         let mut life = LifecycleSynthesizer::new();
         assert_eq!(
-            life.before(&event(42, 100, "TRACEPOINT", "openat")).len(),
+            life.before(&event(42, 100, EventClass::Tracepoint, "openat")).len(),
             1
         );
-        assert_eq!(life.before(&event(42, 100, "TRACEPOINT", "read")).len(), 0);
+        assert_eq!(life.before(&event(42, 100, EventClass::Tracepoint, "read")).len(), 0);
         assert_eq!(
-            life.before(&event(42, 200, "TRACEPOINT", "openat")).len(),
+            life.before(&event(42, 200, EventClass::Tracepoint, "openat")).len(),
             1
         );
     }
@@ -276,7 +277,7 @@ mod tests {
     fn short_lived_process_start_uses_header_identity_without_procfs() {
         let mut life = LifecycleSynthesizer::new();
         let start = life
-            .before(&event(999_999_999, 123_456, "TRACEPOINT", "openat"))
+            .before(&event(999_999_999, 123_456, EventClass::Tracepoint, "openat"))
             .remove(0);
         let args = start.args.unwrap();
         assert_eq!(args["process_ref"]["tgid"], 999_999_999);
@@ -290,10 +291,10 @@ mod tests {
     #[test]
     fn kernel_start_is_not_duplicated() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, "LIFECYCLE", "process_start");
+        let start = event(42, 100, EventClass::Lifecycle, "process_start");
         assert!(life.before(&start).is_empty());
         assert!(life
-            .before(&event(42, 100, "TRACEPOINT", "openat"))
+            .before(&event(42, 100, EventClass::Tracepoint, "openat"))
             .is_empty());
     }
 
@@ -301,22 +302,22 @@ mod tests {
     fn raw_clone_and_exit_group_do_not_synthesize_lifecycle() {
         let mut life = LifecycleSynthesizer::new();
         assert!(life
-            .after(&event(42, 100, "TRACEPOINT", "clone"))
+            .after(&event(42, 100, EventClass::Tracepoint, "clone"))
             .is_empty());
-        assert!(life.after(&event(42, 100, "SYSCALL", "231")).is_empty());
+        assert!(life.after(&event(42, 100, EventClass::Syscall, "231")).is_empty());
     }
 
     #[test]
     fn signal_generation_after_exit_does_not_resurrect_the_source() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, "LIFECYCLE", "process_start");
+        let start = event(42, 100, EventClass::Lifecycle, "process_start");
         assert!(life.before(&start).is_empty());
 
-        let exit = event(42, 100, "LIFECYCLE", "process_exit");
+        let exit = event(42, 100, EventClass::Lifecycle, "process_exit");
         assert!(life.before(&exit).is_empty());
         assert!(life.after(&exit).is_empty());
 
-        let mut generated = event(42, 100, "TRACEPOINT", "signal_generate");
+        let mut generated = event(42, 100, EventClass::Tracepoint, "signal_generate");
         generated.args = Some(json!({
             "target_ref": { "tgid": 7, "start_boottime_ns": 70 }
         }));
@@ -325,7 +326,7 @@ mod tests {
             .is_empty());
 
         assert_eq!(
-            life.before(&event(42, 100, "TRACEPOINT", "openat")).len(),
+            life.before(&event(42, 100, EventClass::Tracepoint, "openat")).len(),
             1
         );
     }
@@ -333,22 +334,22 @@ mod tests {
     #[test]
     fn exit_releases_only_the_matching_process_instance() {
         let mut life = LifecycleSynthesizer::new();
-        let first = event(42, 100, "TRACEPOINT", "openat");
+        let first = event(42, 100, EventClass::Tracepoint, "openat");
         life.before(&first);
-        life.after(&event(42, 200, "LIFECYCLE", "process_exit"));
+        life.after(&event(42, 200, EventClass::Lifecycle, "process_exit"));
         assert!(life.before(&first).is_empty());
-        life.after(&event(42, 100, "LIFECYCLE", "process_exit"));
+        life.after(&event(42, 100, EventClass::Lifecycle, "process_exit"));
         assert_eq!(life.before(&first).len(), 1);
     }
 
     #[test]
     fn event_without_process_identity_is_not_given_a_provisional_pid_identity() {
         let mut life = LifecycleSynthesizer::new();
-        let mut ev = event(42, 100, "TRACEPOINT", "openat");
+        let mut ev = event(42, 100, EventClass::Tracepoint, "openat");
         ev.header.process_ref = None;
         let emitted = life.before(&ev);
         assert_eq!(emitted.len(), 1);
-        assert_eq!(emitted[0].event.event_type, "DIAGNOSTIC");
+        assert_eq!(emitted[0].event.event_type, EventClass::Diagnostic);
         assert_eq!(emitted[0].event.name, "process.identity");
         assert_eq!(emitted[0].args.as_ref().unwrap()["source"], "event_header");
         assert!(life.before(&ev).is_empty(), "diagnostic must be bounded");
@@ -357,7 +358,7 @@ mod tests {
     #[test]
     fn unavailable_fork_parent_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
-        let mut fork = event(42, 100, "LIFECYCLE", "process_fork");
+        let mut fork = event(42, 100, EventClass::Lifecycle, "process_fork");
         fork.header.process_ref = None;
         fork.args = Some(json!({
             "child_ref": { "tgid": 43, "start_boottime_ns": 200 },
@@ -376,9 +377,9 @@ mod tests {
     #[test]
     fn unavailable_task_kill_target_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, "LIFECYCLE", "process_start");
+        let start = event(42, 100, EventClass::Lifecycle, "process_start");
         life.before(&start);
-        let mut task_kill = event(42, 100, "LSM", "task_kill");
+        let mut task_kill = event(42, 100, EventClass::Lsm, "task_kill");
         task_kill.args = Some(json!({ "target_pid": 43, "signal": 0 }));
 
         let emitted = life.before(&task_kill);
@@ -396,9 +397,9 @@ mod tests {
     #[test]
     fn unavailable_signal_generate_target_emits_one_bounded_diagnostic() {
         let mut life = LifecycleSynthesizer::new();
-        let start = event(42, 100, "LIFECYCLE", "process_start");
+        let start = event(42, 100, EventClass::Lifecycle, "process_start");
         life.before(&start);
-        let mut signal = event(42, 100, "TRACEPOINT", "signal_generate");
+        let mut signal = event(42, 100, EventClass::Tracepoint, "signal_generate");
         signal.args = Some(json!({
             "target_pid": 43,
             "signal": 15,

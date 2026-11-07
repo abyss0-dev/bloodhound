@@ -48,9 +48,9 @@ impl<W: Write> Serializer<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deserializer::{EventHeaderJson, EventTypeJson};
+    use crate::deserializer::{EventClass, EventHeaderJson, EventTypeJson, Layer};
 
-    fn make_event(name: &str) -> BehaviorEvent {
+    fn make_event(name: &'static str) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson {
                 timestamp: 1,
@@ -63,9 +63,9 @@ mod tests {
                 task: None,
             },
             event: EventTypeJson {
-                event_type: "TRACEPOINT".to_string(),
-                name: name.to_string(),
-                layer: "behavior".to_string(),
+                event_type: EventClass::Tracepoint,
+                name: name.into(),
+                layer: Layer::Behavior,
             },
             proc: None,
             args: None,

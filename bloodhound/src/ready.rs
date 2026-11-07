@@ -5,7 +5,7 @@ use std::os::unix::fs::MetadataExt;
 
 use serde_json::json;
 
-use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
+use crate::deserializer::{BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer};
 
 const NSFS_MAGIC: i64 = 0x6e73_6673;
 const NAMESPACE_FILE: &str = "/proc/self/ns/net";
@@ -63,9 +63,9 @@ pub fn ready_event(
     BehaviorEvent {
         header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
-            event_type: "META".into(),
+            event_type: EventClass::Meta,
             name: "bloodhound_ready".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(json!({

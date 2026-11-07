@@ -6,15 +6,16 @@ use tokio::sync::{mpsc, oneshot};
 use std::time::Duration;
 
 use crate::clock::monotonic_now_ns;
-use crate::deserializer::{BehaviorEvent, EventHeaderJson, EventTypeJson};
+use crate::deserializer::{BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer};
 use crate::sequencer::SequencedInput;
 
 fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>, timestamp: u64) -> BehaviorEvent {
     BehaviorEvent {
         header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
-            event_type: "DIAGNOSTIC".into(), name: format!("{scope}.collection"),
-            layer: "behavior".into(),
+            event_type: EventClass::Diagnostic,
+            name: format!("{scope}.collection").into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(json!({
@@ -85,9 +86,9 @@ mod tests {
     fn tty_collection_reports_loss_without_operation_identity_or_ring_drops() {
         for reason in bloodhound_common::TTY_FAILURE_REASONS {
             let event = diagnostic("tty", reason, Some(2), Some(5), 1);
-            assert_eq!(event.event.event_type, "DIAGNOSTIC");
+            assert_eq!(event.event.event_type, EventClass::Diagnostic);
             assert_eq!(event.event.name, "tty.collection");
-            assert_eq!(event.event.layer, "behavior");
+            assert_eq!(event.event.layer, Layer::Behavior);
             assert!(event.header.process_ref.is_none());
             assert!(event.header.task.is_none());
             assert!(event.proc.is_none());
@@ -116,9 +117,9 @@ mod tests {
     fn raw_syscall_collection_reports_loss_without_operation_identity() {
         for reason in bloodhound_common::RAW_SYSCALL_FAILURE_REASONS {
             let event = diagnostic("raw_syscall", reason, Some(2), Some(5), 1);
-            assert_eq!(event.event.event_type, "DIAGNOSTIC");
+            assert_eq!(event.event.event_type, EventClass::Diagnostic);
             assert_eq!(event.event.name, "raw_syscall.collection");
-            assert_eq!(event.event.layer, "behavior");
+            assert_eq!(event.event.layer, Layer::Behavior);
             assert!(event.header.process_ref.is_none());
             assert!(event.header.task.is_none());
             assert!(event.return_code.is_none());
@@ -141,9 +142,9 @@ mod tests {
     fn syscall_collection_reports_loss_without_claiming_operation_identity() {
         for reason in bloodhound_common::SYSCALL_FAILURE_REASONS {
             let event = diagnostic("syscall", reason, Some(2), Some(5), 1);
-            assert_eq!(event.event.event_type, "DIAGNOSTIC");
+            assert_eq!(event.event.event_type, EventClass::Diagnostic);
             assert_eq!(event.event.name, "syscall.collection");
-            assert_eq!(event.event.layer, "behavior");
+            assert_eq!(event.event.layer, Layer::Behavior);
             assert!(event.header.process_ref.is_none());
             assert!(event.header.task.is_none());
             assert!(event.return_code.is_none());
@@ -158,7 +159,7 @@ mod tests {
     #[test]
     fn syscall_unreadable_counter_is_unknown_not_zero() {
         let event = diagnostic("syscall", "counter_read_failed", None, None, 1);
-        assert_eq!(event.event.event_type, "DIAGNOSTIC");
+        assert_eq!(event.event.event_type, EventClass::Diagnostic);
         assert_eq!(event.event.name, "syscall.collection");
         assert!(event.header.process_ref.is_none());
         assert_eq!(event.args.unwrap(), json!({

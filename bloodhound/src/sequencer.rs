@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::clock::monotonic_now_ns;
-use crate::deserializer::{self, BehaviorEvent, EventHeaderJson, EventTypeJson};
+use crate::deserializer::{self, BehaviorEvent, EventClass, EventHeaderJson, EventTypeJson, Layer};
 use crate::lifecycle::LifecycleSynthesizer;
 use crate::serializer::Serializer;
 
@@ -86,9 +86,9 @@ fn deserialize_rejection_diagnostic(total: u64, timestamp: u64) -> BehaviorEvent
     BehaviorEvent {
         header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
-            event_type: "DIAGNOSTIC".into(),
+            event_type: EventClass::Diagnostic,
             name: "stream.health".into(),
-            layer: "behavior".into(),
+            layer: Layer::Behavior,
         },
         proc: None,
         args: Some(json!({
@@ -231,13 +231,13 @@ mod tests {
         }
     }
 
-    fn synthesized(name: &str, timestamp: u64) -> BehaviorEvent {
+    fn synthesized(name: &'static str, timestamp: u64) -> BehaviorEvent {
         BehaviorEvent {
             header: EventHeaderJson::unattributed(timestamp),
             event: EventTypeJson {
-                event_type: "DIAGNOSTIC".into(),
+                event_type: EventClass::Diagnostic,
                 name: name.into(),
-                layer: "behavior".into(),
+                layer: Layer::Behavior,
             },
             proc: None,
             args: None,
@@ -252,7 +252,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(8);
         let synthesized_tx = tx.clone();
         let mut heartbeat = synthesized("heartbeat", 1);
-        heartbeat.event.event_type = "HEARTBEAT".into();
+        heartbeat.event.event_type = EventClass::Heartbeat;
         synthesized_tx
             .send(SequencedInput::Synthesized(Box::new(heartbeat)))
             .await
