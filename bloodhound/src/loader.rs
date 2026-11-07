@@ -334,15 +334,13 @@ fn attach_tracepoint_pair(
     exit: (&str, &str),
     report: &mut AttachReport,
 ) -> Result<()> {
-    // Install the consumer before the producer: an enter captured before its
-    // exit hook exists can survive until task exit and falsely report an
-    // invocation_interrupted collection loss (notably for openat).
-    let exit_link = attach_tracepoint(bpf, exit.0, category, exit.1, report)?;
-    if let Err(error) = attach_tracepoint(bpf, enter.0, category, enter.1, report) {
-        let program: &mut TracePoint = bpf.program_mut(exit.0).unwrap().try_into()?;
+    // Temporarily restore producer-first ordering to test the final E2E oracle.
+    let enter_link = attach_tracepoint(bpf, enter.0, category, enter.1, report)?;
+    if let Err(error) = attach_tracepoint(bpf, exit.0, category, exit.1, report) {
+        let program: &mut TracePoint = bpf.program_mut(enter.0).unwrap().try_into()?;
         program
-            .detach(exit_link)
-            .context("rolling back syscall exit hook after enter attachment failed")?;
+            .detach(enter_link)
+            .context("rolling back syscall enter hook after exit attachment failed")?;
         report.probes -= 1;
         return Err(error);
     }
