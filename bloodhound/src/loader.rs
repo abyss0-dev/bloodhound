@@ -141,10 +141,21 @@ pub fn load_and_attach(
     })?;
 
     info!("Attaching Layer 3 Tier 2: rich syscalls...");
-    for syscall in TIER2 {
-        if syscall.dedup == Dedup::OptIn && !args.enable_rich_sendfile {
-            continue;
-        }
+    let selected_tier2: Vec<_> = TIER2
+        .iter()
+        .filter(|syscall| syscall.dedup != Dedup::OptIn || args.enable_rich_sendfile)
+        .collect();
+    // Report the plan independently of attachment outcomes so readiness can be
+    // checked for missing keys without maintaining another syscall list.
+    let selected_keys: Vec<_> = selected_tier2
+        .iter()
+        .map(|syscall| format!("tier2.{}", syscall.name))
+        .collect();
+    eprintln!(
+        "BPF Tier-2 selection: {}",
+        serde_json::to_string(&selected_keys)?
+    );
+    for syscall in selected_tier2 {
         let name = syscall.name;
         if try_attach_syscall_pair(
             &mut bpf,
@@ -219,10 +230,6 @@ pub fn load_and_attach(
             usdt::attach_selected(&mut bpf, selection, &mut usdt_links, &mut report)
         })
         .collect();
-    eprintln!(
-        "BPF attachment report: {}",
-        serde_json::to_string(&report.keys)?
-    );
     info!("BPF attachment attempts complete");
     Ok((bpf, usdt_diagnostics, usdt_links, report))
 }

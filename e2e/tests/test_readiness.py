@@ -11,16 +11,15 @@ NON_TIER2_KEYS = REQUIRED | {"exec.execveat", "tty.write", "tty.read", "tty.read
 
 def assert_attached_matches_loader(daemon, attached):
     reports = [
-        json.loads(line.split("BPF attachment report: ", 1)[1])
+        json.loads(line.split("BPF Tier-2 selection: ", 1)[1])
         for line in daemon.stderr().splitlines()
-        if line.startswith("BPF attachment report: ")
+        if line.startswith("BPF Tier-2 selection: ")
     ]
     assert len(reports) == 1, daemon.stderr()
-    assert set(attached) == set(reports[0])
-    assert attached == reports[0]
     tier2 = {key for key in attached if key.startswith("tier2.")}
+    assert tier2 == set(reports[0])
     assert tier2
-    assert all(attached[key] is True for key in tier2)
+    assert all(attached[key] is True for key in tier2), daemon.stderr()
     assert set(attached) - tier2 == NON_TIER2_KEYS
 
 

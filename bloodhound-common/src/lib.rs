@@ -1268,9 +1268,11 @@ pub const TIER2: &[Tier2] = &[
         dedup: Dedup::NoDedup,
     },
     // Disabled by default (issue #9); raw capture remains until explicitly enabled.
+    // x86_64 syscall 40 dispatches sys_sendfile64 (SYSCALL_DEFINE4(sendfile64)),
+    // so the kernel tracepoint is sendfile64 while the public event stays sendfile.
     Tier2 {
         name: "sendfile",
-        tracepoint: "sendfile",
+        tracepoint: "sendfile64",
         nr: NR_SENDFILE,
         dedup: Dedup::OptIn,
     },
@@ -1512,6 +1514,8 @@ mod tests {
         assert_eq!((umount.name, umount.tracepoint), ("umount2", "umount"));
         let policy = |nr| TIER2.iter().find(|syscall| syscall.nr == nr).unwrap().dedup;
         assert_eq!(policy(NR_FCNTL), Dedup::NoDedup);
+        let sendfile = TIER2.iter().find(|syscall| syscall.nr == NR_SENDFILE).unwrap();
+        assert_eq!((sendfile.name, sendfile.tracepoint), ("sendfile", "sendfile64"));
         assert_eq!(policy(NR_SENDFILE), Dedup::OptIn);
         assert_eq!(policy(NR_SPLICE), Dedup::OptIn);
     }
