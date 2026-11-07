@@ -64,8 +64,8 @@ pub struct PathEntry {
 // Preallocating ~8.3 KB per entry at 10,240 slots would reserve ~85 MB even
 // when idle. These syscall tracepoints and sched_process_exit (not NMI hooks)
 // can use NO_PREALLOC so value storage scales with in-flight invocations.
-// Allocation under memory pressure can now fail at insertion; accounting for
-// that loss is deferred to the later path capture-failure contract.
+// Allocation under memory pressure can fail at insertion; SYSCALL_FAILURES
+// accounts for that loss.
 #[map]
 pub static PATH_ENTRY_MAP: HashMap<u64, PathEntry> =
     HashMap::with_max_entries(SYSCALL_ENTRY_MAP_SIZE, BPF_F_NO_PREALLOC);
@@ -104,6 +104,32 @@ pub static EXEC_FAILURES: PerCpuArray<u64> =
 pub unsafe fn exec_failure(reason: u32) {
     if let Some(counter) = EXEC_FAILURES.get_ptr_mut(reason) {
         *counter = (*counter).wrapping_add(1);
+    }
+}
+
+/// Detected Tier-2 rich/path loss, excluding exec and openat.
+#[map]
+pub static SYSCALL_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(SYSCALL_FAILURE_COUNT, 0);
+
+#[inline(always)]
+pub unsafe fn syscall_failure(reason: u32) {
+    if let Some(counter) = SYSCALL_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn syscall_save(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::save_outcome(result) {
+        syscall_failure(reason);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn syscall_cleanup(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::cleanup_outcome(result) {
+        syscall_failure(reason);
     }
 }
 

@@ -108,12 +108,19 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         crate::maps::openat_failure(bloodhound_common::OPENAT_INVOCATION_INTERRUPTED);
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
     }
-    // try_exit_path and try_exit_two_path can return on a failed context read
-    // before removing the saved entry. Reclaim those path bytes before PID
-    // reuse. Ordinary fatal-signal delivery is not a skipped syscall exit:
-    // Linux 6.8 kernel/entry/common.c traces sys_exit before return-to-user
-    // signal handling.
-    let _ = crate::maps::PATH_ENTRY_MAP.remove(&tid);
+    // Reclaim only recorded invocations: an invocation already in flight at
+    // attach has no entry and must not be reported as interrupted. Ordinary
+    // fatal-signal delivery is not a skipped syscall exit: Linux 6.8
+    // kernel/entry/common.c traces sys_exit before return-to-user signal
+    // handling, so those entries have already been removed here.
+    if crate::maps::PATH_ENTRY_MAP.get(&tid).is_some() {
+        crate::maps::syscall_failure(bloodhound_common::SYSCALL_INVOCATION_INTERRUPTED);
+        crate::maps::syscall_cleanup(crate::maps::PATH_ENTRY_MAP.remove(&tid));
+    }
+    if crate::maps::RICH_ENTRY_MAP.get(&tid).is_some() {
+        crate::maps::syscall_failure(bloodhound_common::SYSCALL_INVOCATION_INTERRUPTED);
+        crate::maps::syscall_cleanup(crate::maps::RICH_ENTRY_MAP.remove(&tid));
+    }
     // Same for an exec that never reached sys_exit; a later task may reuse
     // this task_struct address.
     let task_key = aya_ebpf::helpers::bpf_get_current_task() as u64;

@@ -382,7 +382,9 @@ fn try_attach_syscall_pair(
     let complete = match attach_syscall_pair(bpf, name, tracepoint_name, report) {
         Ok(()) => true,
         Err(e) => {
-            warn!("Failed to attach syscall pair {name}: {e:#}");
+            // Optional collectors must not disappear silently when no log
+            // filter is configured; readiness exposes failure, not its cause.
+            eprintln!("Failed to attach syscall pair {name}: {e:#}");
             false
         }
     };
