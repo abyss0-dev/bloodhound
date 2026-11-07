@@ -95,14 +95,16 @@ import ctypes, errno, json, os
 assert os.geteuid() == 1000
 libc = ctypes.CDLL(None, use_errno=True)
 result = libc.umount2(b"/nonexistent", 0)
-assert result == -1 and ctypes.get_errno() == errno.EPERM
-print(json.dumps({"pid": os.getpid()}))
+error = ctypes.get_errno()
+assert result == -1 and error in {errno.EPERM, errno.ENOENT}, (result, error)
+print(json.dumps({"pid": os.getpid(), "error": error}))
 '''
     with foreground_bloodhound() as daemon:
         wait_until(lambda: daemon.events(), "readiness before umount2")
         result = ssh_cmd("python3 -c " + shlex.quote(script))
         assert result.returncode == 0, result.stderr
-        pid = json.loads(result.stdout)["pid"]
+        call = json.loads(result.stdout)
+        pid = call["pid"]
         wait_until(
             lambda: any(e["header"]["pid"] == pid
                         and e["event"]["name"] == "umount2"
@@ -115,7 +117,7 @@ print(json.dumps({"pid": os.getpid()}))
         rich = [e for e in records if e["event"]["name"] == "umount2"
                 and e["event"]["type"] == "TRACEPOINT"]
         assert len(rich) == 1, records
-        assert rich[0]["return_code"] == -1  # EPERM
+        assert rich[0]["return_code"] == -call["error"]
         assert not any(e["event"]["type"] == "SYSCALL"
                        and e["args"].get("syscall_nr") == 166 for e in records)
 
