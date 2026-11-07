@@ -73,7 +73,7 @@ class TestShutdown:
 
     def test_sigterm_produces_clean_exit(
         self, ssh_cmd, bloodhound_events, wait_for_events,
-        wait_for_bloodhound_attachment,
+        wait_for_bloodhound_attachment, start_bloodhound,
     ):
         """Check the stopped invocation, not a restarted daemon or old journal."""
         wait_for_bloodhound_attachment()
@@ -102,6 +102,5 @@ class TestShutdown:
             assert events, "No events found after shutdown"
             assert events[-1]["event"]["type"] == "HEARTBEAT"
         finally:
-            restored = ssh_cmd("systemctl start bloodhound", user="root")
-            assert restored.returncode == 0, restored.stderr
+            start_bloodhound()
             wait_for_bloodhound_attachment()

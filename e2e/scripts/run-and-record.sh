@@ -92,7 +92,15 @@ echo "✅ bloodhound daemon is active"
 
 # ── 3. Clear old log (fresh recording) ──────────────────────────────
 sshpass -p root ssh -o StrictHostKeyChecking=no -p "${SSH_PORT}" \
-    root@localhost "systemctl stop bloodhound; truncate -s0 /var/log/bloodhound.ndjson; systemctl start bloodhound"
+    root@localhost "{
+        systemctl stop bloodhound &&
+        truncate -s0 /var/log/bloodhound.ndjson &&
+        systemctl start bloodhound && systemctl is-active --quiet bloodhound;
+    } || {
+        systemctl status bloodhound --no-pager;
+        journalctl -u bloodhound -n 200 --no-pager;
+        exit 1;
+    }"
 sleep 2
 
 # ── 4. Run user script line-by-line via interactive SSH ──────────────

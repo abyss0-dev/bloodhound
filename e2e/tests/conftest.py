@@ -8,6 +8,8 @@ import time
 import pexpect
 import pytest
 
+from helpers import assert_service_command_succeeded
+
 
 def pytest_addoption(parser):
     parser.addoption("--ssh-port", default="2222", help="SSH port for VM")
@@ -62,6 +64,20 @@ def ssh_cmd(ssh_config):
 
 
 @pytest.fixture
+def start_bloodhound(ssh_cmd):
+    """Start the service and assert it is active, with systemd failure evidence."""
+
+    def start():
+        result = ssh_cmd(
+            "systemctl start bloodhound && systemctl is-active --quiet bloodhound",
+            user="root",
+        )
+        assert_service_command_succeeded(ssh_cmd, result)
+
+    return start
+
+
+@pytest.fixture
 def wait_for_bloodhound_attachment(ssh_cmd, wait_until):
     """Wait for attachment in the current service invocation, not an old PID."""
 
@@ -88,7 +104,9 @@ def wait_for_bloodhound_attachment(ssh_cmd, wait_until):
 
 
 @pytest.fixture
-def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_attachment):
+def foreground_bloodhound(
+    ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_attachment, start_bloodhound,
+):
     """Run a standalone daemon with isolated output; always restore the service."""
 
     @contextmanager
@@ -165,11 +183,7 @@ def foreground_bloodhound(ssh_config, ssh_cmd, tmp_path, wait_for_bloodhound_att
                 if process is not None and process.poll() is None:
                     process.kill()
                     process.wait(timeout=5)
-                restored = ssh_cmd(
-                    "systemctl start bloodhound && systemctl is-active --quiet bloodhound",
-                    user="root",
-                )
-                assert restored.returncode == 0, restored.stderr
+                start_bloodhound()
                 wait_for_bloodhound_attachment()
 
     return run
