@@ -63,7 +63,7 @@ graph TD
 | QEMU/KVM        | Required for E2E tests         |
 
 > [!IMPORTANT]
-> **Development environment**: Linux or WSL2 is required for building and
+> **Development environment**: Linux is required for building and
 > running E2E tests. The eBPF daemon depends on `CONFIG_AUDIT` (for
 > `loginuid`/`auid` tracking) and KVM acceleration, neither of which is
 > available on macOS. Docker-based builds (`make build-docker`) work on
