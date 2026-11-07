@@ -664,8 +664,12 @@ unsafe fn try_exit_two_path(ctx: &TracePointContext) -> Result<u32, i64> {
     let pid_tgid = bpf_get_current_pid_tgid();
     let entry = match PATH_ENTRY_MAP.get(&pid_tgid) { Some(e) => e, None => return Ok(0) };
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
-    let p1 = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
-    let p2 = (entry.path2_len as usize).min(MAX_PATH_SIZE - 1);
+    // read_path stores at most MAX_PATH_SIZE - 1 bytes. Masking preserves
+    // those lengths and keeps their bounds visible after LLVM spills/reloads
+    // across the checked copy helpers (min() can lose the verifier's bound).
+    const { assert!(MAX_PATH_SIZE.is_power_of_two()); }
+    let p1 = (entry.path1_len as usize) & (MAX_PATH_SIZE - 1);
+    let p2 = (entry.path2_len as usize) & (MAX_PATH_SIZE - 1);
     let payload = TwoPathPayload { path1_len: p1 as u16, path2_len: p2 as u16, return_code: ret as i32 };
     let asm = match ASSEMBLY_BUF.get_ptr_mut(0) { Some(s) => s, None => return Err(-1) };
     let dst = &mut (*asm).buf;
