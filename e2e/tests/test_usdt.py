@@ -9,7 +9,7 @@ from contextlib import contextmanager
 
 import pytest
 
-from helpers import assert_event_exists, validate_all_events
+from helpers import assert_event_exists, python_command, validate_all_events
 
 
 SHELL_TARGET = "/opt/bloodhound/usdt-fixtures/training-shell-v3"
@@ -74,7 +74,7 @@ def replace_usdt_target(ssh_cmd, fresh_bloodhound_events):
             "systemctl stop bloodhound; "
             "install -m 0644 -o root -g root /dev/null /var/log/bloodhound.ndjson; "
             "cp \"$target\" \"$backup\"; "
-            f"cp {replacement} \"$target\"; "
+            f'if test {replacement} != "$target"; then cp {replacement} "$target"; fi; '
             "systemctl start bloodhound",
             user="root",
         )
@@ -188,6 +188,79 @@ class TestTrustedUsdtCollectors:
         }
         assert event["args"]["semantic_flags"] == ["SELF_PID_EXPANDED"]
         assert event["args"]["exit_status"] == 0
+
+    @pytest.mark.parametrize(
+        "replacement,fixture",
+        [
+            (SHELL_TARGET, SHELL_TARGET),
+            (SHELL_TARGET, "/opt/bloodhound/usdt-fixtures/training-peer-v1"),
+            ("/opt/bloodhound/usdt-fixtures/training-shell-v3-unreadable", SHELL_TARGET),
+        ],
+        ids=["shell-completion", "peer", "shell-capture-error"],
+    )
+    def test_non_target_auid_emits_neither_usdt_nor_collector_diagnostic(
+        self,
+        ssh_cmd,
+        replace_usdt_target,
+        wait_for_matching_events,
+        wait_for_usdt_daemon,
+        replacement,
+        fixture,
+    ):
+        target = ssh_cmd("cat /proc/self/loginuid")
+        assert target.returncode == 0, target.stderr
+        target_auid = int(target.stdout.strip())
+        with replace_usdt_target(replacement) as fresh_events:
+            wait_for_usdt_daemon()
+            _assert_collector_attached(ssh_cmd, "training-shell-v3")
+            _assert_collector_attached(ssh_cmd, "training-peer-v1")
+            result = ssh_cmd(
+                python_command(
+                    "import os; "
+                    "from pathlib import Path; "
+                    "auid = int(Path('/proc/self/loginuid').read_text()); "
+                    f"assert auid != {target_auid}, auid; "
+                    "print(os.getpid(), auid, flush=True); "
+                    f"os.execv({fixture!r}, [{fixture!r}])"
+                ),
+                user="root",
+            )
+            assert result.returncode == 0, result.stderr
+            excluded_pid, excluded_auid = map(int, result.stdout.split())
+            assert excluded_auid != target_auid
+
+            # A later target-AUID hit proves attachment and drains the shared
+            # ring buffer before absence is judged, without a fixed sleep.
+            sentinel = ssh_cmd(
+                "echo $$; exec /opt/bloodhound/usdt-fixtures/training-peer-v1"
+            )
+            assert sentinel.returncode == 0, sentinel.stderr
+            sentinel_pid = int(sentinel.stdout.strip())
+            events = wait_for_matching_events(
+                fresh_events,
+                lambda candidate: any(
+                    event.get("event", {}).get("type") == "USDT"
+                    and event["header"]["pid"] == sentinel_pid
+                    for event in candidate
+                ),
+                "target-AUID peer event after the excluded fixture execution",
+            )
+            validate_all_events(events)
+            usdt_events = [
+                event for event in events
+                if event.get("event", {}).get("type") == "USDT"
+            ]
+            assert len(usdt_events) == 1, usdt_events
+            assert usdt_events[0]["header"]["pid"] == sentinel_pid
+            assert usdt_events[0]["header"]["auid"] == target_auid
+            assert not any(
+                event.get("header", {}).get("pid") == excluded_pid
+                and event.get("event", {}).get("type") == "USDT"
+                for event in events
+            )
+            assert not any(
+                event.get("event") == COLLECTOR_DIAGNOSTIC for event in events
+            ), events
 
     def test_independent_peer_collector_emits_its_own_event_shape(
         self,
