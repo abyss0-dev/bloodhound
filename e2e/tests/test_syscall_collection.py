@@ -11,6 +11,11 @@ def test_rich_and_path_workload_has_no_syscall_collection_loss(
 import ctypes, json, os, tempfile
 libc = ctypes.CDLL(None, use_errno=True)
 assert libc.syscall(186) == os.getpid()  # gettid: Tier 1, main thread
+child = os.fork()
+if child == 0:
+    libc.syscall(60, 0)  # exit (not exit_group) has no sys_exit
+    os._exit(99)
+assert os.waitpid(child, 0)[1] == 0
 with tempfile.TemporaryDirectory(prefix="bh-syscall-collection-") as root:
     oldpath, newpath = root + "/source", root + "/destination"
     with open(oldpath, "wb+") as source, tempfile.TemporaryFile() as target:
@@ -59,5 +64,8 @@ with tempfile.TemporaryDirectory(prefix="bh-syscall-collection-") as root:
         rename = next(e for e in records if e["event"]["name"] == "rename")
         assert rename["args"]["oldpath"] == call["oldpath"]
         assert rename["args"]["newpath"] == call["newpath"]
+        assert any(e["header"]["pid"] != call["pid"]
+                   and e["event"]["type"] == "SYSCALL"
+                   and e["args"].get("syscall_nr") == 60 for e in events), events
         assert not any(e["event"]["name"] in {"syscall.collection", "raw_syscall.collection"}
                        for e in events), events
