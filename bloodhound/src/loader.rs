@@ -19,6 +19,17 @@ pub struct AttachReport {
 }
 
 impl AttachReport {
+    pub(crate) fn record_tty_attach(
+        &mut self,
+        key: &str,
+        attached: bool,
+        tty_offsets: Option<&[u32; 3]>,
+    ) {
+        // Attached hooks cannot emit TTY events without classification offsets.
+        self.keys
+            .insert(key.into(), attached && tty_offsets.is_some());
+    }
+
     fn pair(&mut self, key: &str, enter: bool, exit: bool) -> bool {
         let complete = enter && exit;
         self.keys.insert(key.into(), complete);
@@ -312,16 +323,16 @@ pub fn load_and_attach(
     //   hooking `n_tty_write` instead.
     //   Similarly, `tty_read` → `n_tty_read` for the read path.
     let ok = try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write", &mut report);
-    report.keys.insert("tty.write".into(), ok);
+    report.record_tty_attach("tty.write", ok, offsets.tty.as_ref());
     let ok = try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read", &mut report);
-    report.keys.insert("tty.read".into(), ok);
+    report.record_tty_attach("tty.read", ok, offsets.tty.as_ref());
     // kretprobe on n_tty_read: captures the bytes that were actually
     // written into the userspace buffer during the call. Without this
     // attach, only metadata (no `data` field) is emitted for tty_read.
     // Aya's KProbe wrapper handles both kprobe and kretprobe via the
     // `kind` discriminator set by the `#[kretprobe]` macro.
     let ok = try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read", &mut report);
-    report.keys.insert("tty.read_ret".into(), ok);
+    report.record_tty_attach("tty.read_ret", ok, offsets.tty.as_ref());
 
     if args.enable_lsm {
         info!("Attaching opt-in LSM hooks...");
