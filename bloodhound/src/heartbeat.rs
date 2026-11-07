@@ -6,13 +6,9 @@
 //! mark an interval as *undecidable* when drops occur — they either
 //! trust every gap or treat every correlation as unsound.
 //!
-//! This module emits a lightweight synthesized event every N seconds
-//! carrying:
-//!
-//! - `drop_count_delta`  — drops recorded since the previous heartbeat
-//! - `drop_count_total`  — cumulative drops since daemon startup
-//! - `events_emitted_delta` — events written to stdout in the interval
-//! - `gap_detected`      — convenience flag (== `drop_count_delta > 0`)
+//! Keep the field contract in `docs/output-schema.md`, section
+//! `event.type HEARTBEAT`, so consumers have one reference for interpreting
+//! loss intervals rather than a second field list that can drift.
 //!
 //! The emission path is userspace-only. Events are pushed through an
 //! mpsc channel and serialised by the main processing loop alongside
