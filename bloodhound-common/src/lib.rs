@@ -540,103 +540,6 @@ impl TwoPathPayload {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
-pub struct ChmodPayload {
-    pub mode: u32,
-    pub path_len: u16,
-    pub _pad: [u8; 2],
-    pub return_code: i32,
-    // Followed by: path bytes (path_len)
-}
-
-impl ChmodPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct FchmodPayload {
-    pub fd: u32,
-    pub mode: u32,
-    pub return_code: i32,
-}
-
-impl FchmodPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct ChownPayload {
-    pub uid: u32,
-    pub gid: u32,
-    pub path_len: u16,
-    pub _pad: [u8; 2],
-    pub return_code: i32,
-    // Followed by: path bytes
-}
-
-impl ChownPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct FchownPayload {
-    pub fd: u32,
-    pub uid: u32,
-    pub gid: u32,
-    pub return_code: i32,
-}
-
-impl FchownPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct TruncatePayload {
-    pub length: u64,
-    pub path_len: u16,
-    pub _pad: [u8; 2],
-    pub return_code: i32,
-    // Followed by: path bytes
-}
-
-impl TruncatePayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct FtruncatePayload {
-    pub fd: u32,
-    pub _pad2: [u8; 4],
-    pub length: u64,
-    pub return_code: i64,
-}
-
-impl FtruncatePayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct MountPayload {
-    pub source_len: u16,
-    pub target_len: u16,
-    pub fstype_len: u16,
-    pub _pad: [u8; 2],
-    pub return_code: i32,
-    pub _pad2: [u8; 4],
-    // Followed by: source, target, fstype bytes
-}
-
-impl MountPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
 pub struct SendtoRecvfromPayload {
     pub fd: u32,
     pub family: u16,
@@ -671,20 +574,6 @@ pub struct ListenPayload {
 }
 
 impl ListenPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct Umount2Payload {
-    pub flags: u32,
-    pub path_len: u16,
-    pub _pad: [u8; 2],
-    pub return_code: i32,
-    // Followed by: path bytes
-}
-
-impl Umount2Payload {
     pub const SIZE: usize = core::mem::size_of::<Self>();
 }
 
@@ -1454,14 +1343,6 @@ mod tests {
         );
         assert_eq!(PathPayload::SIZE, mem::size_of::<PathPayload>());
         assert_eq!(TwoPathPayload::SIZE, mem::size_of::<TwoPathPayload>());
-        assert_eq!(ChmodPayload::SIZE, mem::size_of::<ChmodPayload>());
-        assert_eq!(FchmodPayload::SIZE, mem::size_of::<FchmodPayload>());
-        assert_eq!(ChownPayload::SIZE, mem::size_of::<ChownPayload>());
-        assert_eq!(FchownPayload::SIZE, mem::size_of::<FchownPayload>());
-        assert_eq!(TruncatePayload::SIZE, mem::size_of::<TruncatePayload>());
-        assert_eq!(FtruncatePayload::SIZE, mem::size_of::<FtruncatePayload>());
-        assert_eq!(MountPayload::SIZE, mem::size_of::<MountPayload>());
-        assert_eq!(Umount2Payload::SIZE, mem::size_of::<Umount2Payload>());
         assert_eq!(
             SendtoRecvfromPayload::SIZE,
             mem::size_of::<SendtoRecvfromPayload>()

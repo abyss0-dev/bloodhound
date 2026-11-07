@@ -1,4 +1,3 @@
-#![allow(unused)]
 use aya_ebpf::{
     bindings::BPF_F_NO_PREALLOC,
     macros::map,
@@ -255,17 +254,6 @@ pub static EXCLUSION_BITMAP: Array<u32> = Array::with_max_entries(BITMAP_SIZE as
 /// Tier 2 bitmap: syscall NR → 1 means handled by Tier 2 (skip in Tier 1)
 #[map]
 pub static TIER2_BITMAP: Array<u32> = Array::with_max_entries(BITMAP_SIZE as u32, 0);
-
-// ── Daemon Path (for LSM hooks) ─────────────────────────────────────────────
-
-#[repr(C)]
-pub struct DaemonPath {
-    pub len: u16,
-    pub path: [u8; 256],
-}
-
-#[map]
-pub static DAEMON_PATH: Array<DaemonPath> = Array::with_max_entries(1, 0);
 
 // Shared, non-LRU: eviction would let a second exiting thread claim again.
 #[map]
