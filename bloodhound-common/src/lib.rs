@@ -44,6 +44,12 @@ pub const SYSCALL_FAILURE_REASONS: [&str; 5] = [
 ];
 pub const SYSCALL_FAILURE_COUNT: u32 = SYSCALL_FAILURE_REASONS.len() as u32;
 
+/// Tier-1 raw capture has the same reachable failures and uses the shared
+/// `SYSCALL_*` reason indices and syscall_collection outcome policies.
+/// Counters remain separate from Tier-2 capture.
+pub const RAW_SYSCALL_FAILURE_REASONS: [&str; 5] = SYSCALL_FAILURE_REASONS;
+pub const RAW_SYSCALL_FAILURE_COUNT: u32 = RAW_SYSCALL_FAILURE_REASONS.len() as u32;
+
 pub const OPENAT_ENTRY_CAPTURE_FAILED: u32 = 0;
 pub const OPENAT_ENTRY_SAVE_FAILED: u32 = 1;
 pub const OPENAT_EXIT_CAPTURE_FAILED: u32 = 2;

@@ -133,6 +133,32 @@ pub unsafe fn syscall_cleanup(result: Result<(), i64>) {
     }
 }
 
+/// Detected Tier-1 raw syscall loss, using the shared syscall reason indices.
+#[map]
+pub static RAW_SYSCALL_FAILURES: PerCpuArray<u64> =
+    PerCpuArray::with_max_entries(RAW_SYSCALL_FAILURE_COUNT, 0);
+
+#[inline(always)]
+pub unsafe fn raw_syscall_failure(reason: u32) {
+    if let Some(counter) = RAW_SYSCALL_FAILURES.get_ptr_mut(reason) {
+        *counter = (*counter).wrapping_add(1);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn raw_syscall_save(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::save_outcome(result) {
+        raw_syscall_failure(reason);
+    }
+}
+
+#[inline(always)]
+pub unsafe fn raw_syscall_cleanup(result: Result<(), i64>) {
+    if let Some(reason) = syscall_collection::cleanup_outcome(result) {
+        raw_syscall_failure(reason);
+    }
+}
+
 // ── Per-CPU Scratch Buffers ──────────────────────────────────────────────────
 
 /// Scratch buffer for reading variable-length data in BPF programs.
