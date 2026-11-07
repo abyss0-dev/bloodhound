@@ -60,18 +60,15 @@ observability. Each hook is attempted independently and reported in `args.attach
 
 ## Daemon Identification Strategy
 
-DECIDED: Two-layer identification for LSM hook whitelisting.
+The daemon is identified solely by its PID (`DAEMON_PID`), stored in a BPF global
+variable at startup. LSM hooks check `bpf_get_current_pid_tgid()` against this
+stored PID for filtering and self-protection.
 
-1. **Primary (fast):** Daemon PID stored in a BPF global variable at
-   startup. All LSM hooks first check `bpf_get_current_pid_tgid()`
-   against the stored PID for fast-path filtering.
+Secondary verification via binary path (such as `bpf_d_path`) is intentionally
+not implemented (deliberate absence); the daemon is identified exclusively by PID.
+Consequently, PID reuse following a crash before restart is a known limitation.
 
-2. **Secondary (robust):** LSM hooks that support `bpf_d_path()` (e.g.,
-   `file_open`, `inode_unlink`) additionally verify the target binary
-   path. This guards against PID recycling: if the daemon crashes and
-   the PID is reused by another process, path verification prevents
-   the impersonator from being whitelisted.
-
-The daemon PID global variable is updated on restart (systemd
-`Restart=always`). During the brief window between crash and restart,
-no daemon PID is active and LSM hooks block all matching operations.
+When the daemon is down or uninitialized (`DAEMON_PID == 0`), no process matches
+the daemon PID. LSM hooks do not deny operations in this state: enforcing hooks
+(`task_kill` and `ptrace_access_check`) allow matching operations with return
+code 0 rather than blocking them.

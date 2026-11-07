@@ -119,7 +119,7 @@ Then run the privileged E2E suite in the QEMU/KVM environment described in
 acceptance evidence: the test must execute the fixture and observe the expected
 fresh NDJSON event. Rejection tests must observe the expected bounded diagnostic.
 
-The `USDT Unit and Replay Tests` workflow runs on Takumi Runner. The full E2E
+USDT unit and replay tests run in `ci.yml` (`cargo test --workspace`) on Takumi Runner. The full E2E
 workflow runs on a GitHub-hosted runner because it requires KVM, which Takumi
 Runner does not provide as of 2026-08-01.
 

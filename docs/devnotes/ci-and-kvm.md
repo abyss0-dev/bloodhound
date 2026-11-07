@@ -26,7 +26,7 @@ Fail early when KVM is unavailable, and install the complete guest kernel-tool a
 
 - Some KVM failures occurred before pytest collection.
 - USDT unit/replay tests did not require KVM and passed independently.
-- `ci.yml` and `usdt.yml` use `takumi-runner`.
+- `ci.yml` uses `takumi-runner` (USDT unit and replay tests run in `cargo test --workspace`).
 - Only `e2e.yml` uses the GitHub-hosted `ubuntu-24.04` runner and accesses `/dev/kvm`.
 - Rootfs construction exposed missing kernel tools, HWE dependencies, and Jammy base packages in sequence.
 - Once the environment chain was explicit, the current branch passed CI, USDT unit/replay, and KVM E2E workflows.
