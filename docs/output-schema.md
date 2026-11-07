@@ -283,7 +283,7 @@ DECIDED: Used for Tier 1 raw_syscalls events. These carry `syscall_nr`
 `event.name` is the syscall number as a string (e.g., "83" for mkdir).
 `event.layer` is always `"behavior"`. Raw `exit` (60) and `exit_group` (231)
 are emitted at syscall entry because they never return through syscall exit;
-`args[0]` carries the exit status and `return_code` is 0 as a placeholder
+`raw_args[0]` carries the exit status and `return_code` is 0 as a placeholder
 that does not mean a returned value.
 
 ### event.type KPROBE
