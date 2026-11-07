@@ -1167,7 +1167,7 @@ fn fd_type_to_str(t: u8) -> &'static str {
 }
 
 fn parse_lsm_simple(payload: &[u8], name: &'static str) -> Result<Payload> {
-    let return_code = if payload.len() >= 8 {
+    let return_code = if payload.len() >= LsmFileOpenPayload::SIZE {
         let p = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmFileOpenPayload) };
         Some(p.return_code as i64)
     } else {
@@ -1273,17 +1273,13 @@ fn parse_lsm_bpf(payload: &[u8]) -> Result<Payload> {
     }
     let bpf = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmBpfPayload) };
 
-    let args = serde_json::json!({
-        "cmd": bpf.cmd,
-    });
-
     Ok(Payload {
         event: EventTypeJson {
             event_type: EventClass::Lsm,
             name: "bpf".into(),
             layer: Layer::Behavior,
         },
-        args: Some(args),
+        args: None,
         return_code: Some(bpf.return_code as i64),
     })
 }
@@ -1315,20 +1311,13 @@ fn parse_lsm_setuid(payload: &[u8]) -> Result<Payload> {
     }
     let su = unsafe { core::ptr::read_unaligned(payload.as_ptr() as *const LsmSetuidPayload) };
 
-    let args = serde_json::json!({
-        "old_uid": su.old_uid,
-        "new_uid": su.new_uid,
-        "old_gid": su.old_gid,
-        "new_gid": su.new_gid,
-    });
-
     Ok(Payload {
         event: EventTypeJson {
             event_type: EventClass::Lsm,
             name: "task_fix_setuid".into(),
             layer: Layer::Behavior,
         },
-        args: Some(args),
+        args: None,
         return_code: Some(su.return_code as i64),
     })
 }
@@ -2248,17 +2237,17 @@ mod tests {
 
     #[test]
     fn lsm_bpf_classification() {
-        let payload = LsmBpfPayload { cmd: 5, return_code: -1 };
+        let payload = LsmBpfPayload { return_code: -1 };
         let event = deserialize(&build_event(EventKind::LsmBpf, &payload)).unwrap();
         assert_eq!(event.event.event_type, EventClass::Lsm);
         assert_eq!(event.event.name, "bpf");
+        assert!(event.args.is_none());
+        assert_eq!(event.return_code, Some(-1));
     }
 
     #[test]
     fn lsm_setuid_classification() {
-        let payload = LsmSetuidPayload {
-            old_uid: 1000, new_uid: 0, old_gid: 1000, new_gid: 0, return_code: 0,
-        };
+        let payload = LsmSetuidPayload { return_code: 0 };
         let event = deserialize(&build_event(EventKind::LsmTaskFixSetuid, &payload)).unwrap();
         assert_eq!(event.event.event_type, EventClass::Lsm);
         assert_eq!(event.event.name, "task_fix_setuid");
@@ -2767,21 +2756,32 @@ mod tests {
         assert_eq!(event.return_code, Some(-1));
     }
 
-    /// LSM setuid must extract all uid/gid transition fields.
+    /// Uncaptured LSM credentials are absent, not fabricated zero-valued IDs.
     #[test]
-    fn lsm_setuid_extracts_transition() {
-        let payload = LsmSetuidPayload {
-            old_uid: 1000,
-            new_uid: 0,
-            old_gid: 1000,
-            new_gid: 0,
-            return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::LsmTaskFixSetuid, &payload)).unwrap();
+    fn lsm_setuid_reports_only_hook_decision() {
+        for return_code in [0, -1] {
+            let payload = LsmSetuidPayload { return_code };
+            let event = deserialize(&build_event(EventKind::LsmTaskFixSetuid, &payload)).unwrap();
 
-        let args = event.args.unwrap();
-        assert_eq!(args["old_uid"], 1000);
-        assert_eq!(args["new_uid"], 0);
+            assert!(event.args.is_none());
+            assert_eq!(event.return_code, Some(return_code as i64));
+        }
+    }
+
+    #[test]
+    fn lsm_path_hooks_report_only_hook_decision() {
+        for return_code in [0, -1] {
+            let events = [
+                build_event(EventKind::LsmFileOpen, &LsmFileOpenPayload { return_code }),
+                build_event(EventKind::LsmInodeUnlink, &LsmInodePayload { return_code }),
+                build_event(EventKind::LsmInodeRename, &LsmInodeRenamePayload { return_code }),
+            ];
+            for raw in events {
+                let event = deserialize(&raw).unwrap();
+                assert!(event.args.is_none());
+                assert_eq!(event.return_code, Some(return_code as i64));
+            }
+        }
     }
 
     /// Clone events must decode flags symbolically.

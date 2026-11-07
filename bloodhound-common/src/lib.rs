@@ -696,10 +696,7 @@ impl SendfileSplicePayload {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LsmFileOpenPayload {
-    pub path_len: u16,
-    pub _pad: [u8; 2],
     pub return_code: i32,
-    // Followed by: path bytes
 }
 
 impl LsmFileOpenPayload {
@@ -723,7 +720,6 @@ impl LsmTaskKillPayload {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LsmBpfPayload {
-    pub cmd: u32,
     pub return_code: i32,
 }
 
@@ -745,10 +741,7 @@ impl LsmPtracePayload {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LsmInodePayload {
-    pub path_len: u16,
-    pub _pad: [u8; 2],
     pub return_code: i32,
-    // Followed by: path bytes
 }
 
 impl LsmInodePayload {
@@ -758,10 +751,7 @@ impl LsmInodePayload {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LsmInodeRenamePayload {
-    pub old_path_len: u16,
-    pub new_path_len: u16,
     pub return_code: i32,
-    // Followed by: old_path, new_path bytes
 }
 
 impl LsmInodeRenamePayload {
@@ -771,10 +761,6 @@ impl LsmInodeRenamePayload {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct LsmSetuidPayload {
-    pub old_uid: u32,
-    pub new_uid: u32,
-    pub old_gid: u32,
-    pub new_gid: u32,
     pub return_code: i32,
 }
 

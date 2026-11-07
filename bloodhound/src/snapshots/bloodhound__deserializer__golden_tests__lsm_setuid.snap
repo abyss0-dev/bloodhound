@@ -3,12 +3,6 @@ source: bloodhound/src/deserializer.rs
 expression: to_json(& event)
 ---
 {
-  "args": {
-    "new_gid": 0,
-    "new_uid": 0,
-    "old_gid": 0,
-    "old_uid": 0
-  },
   "event": {
     "layer": "behavior",
     "name": "task_fix_setuid",

@@ -186,9 +186,9 @@ fn remaining_syscall_and_lsm_bytes() {
     family!(MmapPayload { fd: 7, prot: 3, flags: 2, _pad: [0; 4], length: 4096, offset: 0, dev: 8 << 20, ino: 99, return_code: 8192 }; Mmap);
     family!(SendfileSplicePayload { in_fd: 7, out_fd: 9, in_fd_type: 0, out_fd_type: 1, _pad: [0; 6], size: 42, return_code: 21 }; Sendfile, Splice);
     use bloodhound_common::{LsmFileOpenPayload, LsmInodePayload, LsmInodeRenamePayload};
-    family!(LsmFileOpenPayload { path_len: 0, _pad: [0; 2], return_code: 0 }; LsmFileOpen);
-    family!(LsmInodePayload { path_len: 0, _pad: [0; 2], return_code: 0 }; LsmInodeUnlink);
-    family!(LsmInodeRenamePayload { old_path_len: 0, new_path_len: 0, return_code: 0 }; LsmInodeRename);
+    family!(LsmFileOpenPayload { return_code: 0 }; LsmFileOpen);
+    family!(LsmInodePayload { return_code: 0 }; LsmInodeUnlink);
+    family!(LsmInodeRenamePayload { return_code: 0 }; LsmInodeRename);
 }
 
 #[test]
