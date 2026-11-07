@@ -997,11 +997,16 @@ pub const NR_MMAP: u64 = 9;
 pub const NR_SENDFILE: u64 = 40;
 pub const NR_SPLICE: u64 = 275;
 
-/// `exit_group` — emitted at sys_enter by Tier 1 raw capture because the
+/// `exit` — emitted at sys_enter by Tier 1 raw capture because the
 /// matching sys_exit tracepoint never fires (the task is gone by then). See
 /// `layer3_raw::try_raw_sys_enter` and the `process_exit` contract in
 /// `docs/output-schema.md`.
 pub const NR_EXIT: u64 = 60;
+
+/// `exit_group` — emitted at sys_enter by Tier 1 raw capture because the
+/// matching sys_exit tracepoint never fires (the task is gone by then). See
+/// `layer3_raw::try_raw_sys_enter` and the `process_exit` contract in
+/// `docs/output-schema.md`.
 pub const NR_EXIT_GROUP: u64 = 231;
 
 /// `fcntl` `cmd` values that perform fd duplication.

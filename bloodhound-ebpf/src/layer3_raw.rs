@@ -34,6 +34,9 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
     let nr: i64 = ctx.read_at(8).map_err(|_| -1i64)?;
     let nr = nr as u64;
 
+    // Out-of-range IDs are outside the bitmap-backed capture scope, not
+    // collection failures. For example, ptrace can set nr to -1 to skip a
+    // syscall; sys_enter can still observe it (cast above to u64::MAX).
     if nr >= BITMAP_SIZE as u64 {
         return Ok(0);
     }
