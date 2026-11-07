@@ -29,7 +29,7 @@ pub struct Sequencer<W: Write> {
 }
 
 impl<W: Write> Sequencer<W> {
-    pub fn new(_target_auid: u32, output: Serializer<W>, events_emitted: Arc<AtomicU64>) -> Self {
+    pub fn new(output: Serializer<W>, events_emitted: Arc<AtomicU64>) -> Self {
         Self {
             output,
             lifecycle: LifecycleSynthesizer::new(),
@@ -59,9 +59,7 @@ impl<W: Write> Sequencer<W> {
             self.write(&precursor)?;
         }
         self.write(&decoded.event)?;
-        for followup in self.lifecycle.after(&decoded) {
-            self.write(&followup)?;
-        }
+        self.lifecycle.release_exit(&decoded);
         Ok(())
     }
 
@@ -85,7 +83,6 @@ fn deserialize_rejection_diagnostic(total: u64, timestamp: u64) -> BehaviorEvent
             name: "stream.health".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(json!({
             "reason_code": "deserialize_rejected",
             "rejection_count_delta": 1,
@@ -187,7 +184,7 @@ mod tests {
         let emitted = Arc::new(AtomicU64::new(0));
         {
             let mut sequencer = Sequencer::new(
-                1000, Serializer::with_writer(&mut output), emitted.clone(),
+                Serializer::with_writer(&mut output), emitted.clone(),
             );
             for record in records {
                 sequencer.accept(SequencedInput::Raw(record)).unwrap();
@@ -222,7 +219,6 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let mut sequencer = Sequencer::new(
-                1000,
                 Serializer::with_writer(&mut bytes),
                 Arc::new(AtomicU64::new(0)),
             );
@@ -309,7 +305,6 @@ mod tests {
                 name: name.into(),
                 layer: Layer::Behavior,
             },
-            proc: None,
             args: None,
             return_code: None,
         }
@@ -344,7 +339,7 @@ mod tests {
         drop(tx);
         {
             let serializer = Serializer::with_writer(&mut bytes);
-            let mut sequencer = Sequencer::new(1000, serializer, emitted.clone());
+            let mut sequencer = Sequencer::new(serializer, emitted.clone());
             while let Some(input) = rx.recv().await {
                 sequencer.accept(input).unwrap();
             }
@@ -381,7 +376,7 @@ mod tests {
         let mut bytes = Vec::new();
         {
             let serializer = Serializer::with_writer(&mut bytes);
-            let mut sequencer = Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
+            let mut sequencer = Sequencer::new(serializer, Arc::new(AtomicU64::new(0)));
             sequencer.accept(SequencedInput::Raw(vec![])).unwrap();
             sequencer.accept(SequencedInput::Raw(vec![0xff])).unwrap();
             sequencer.flush().unwrap();
@@ -401,7 +396,7 @@ mod tests {
             let mut bytes = Vec::new();
             {
                 let serializer = Serializer::with_writer(&mut bytes);
-                let mut sequencer = Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
+                let mut sequencer = Sequencer::new(serializer, Arc::new(AtomicU64::new(0)));
                 sequencer.accept(SequencedInput::Raw(vec![])).unwrap();
                 sequencer.flush().unwrap();
             }
@@ -432,7 +427,7 @@ mod tests {
     #[test]
     fn stdout_failure_is_not_swallowed() {
         let serializer = Serializer::with_writer(FailingWriter);
-        let mut sequencer = Sequencer::new(1000, serializer, Arc::new(AtomicU64::new(0)));
+        let mut sequencer = Sequencer::new(serializer, Arc::new(AtomicU64::new(0)));
         let error = sequencer
             .accept(SequencedInput::Synthesized(Box::new(synthesized(
                 "event", 1,

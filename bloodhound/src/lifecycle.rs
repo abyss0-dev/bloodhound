@@ -68,7 +68,7 @@ impl LifecycleSynthesizer {
 
     /// Kernel hooks already emitted fork/exit. Userspace only releases its
     /// bounded active-process entry after the matching whole-group exit.
-    pub fn after(&mut self, decoded: &DecodedBehaviorEvent) -> Vec<BehaviorEvent> {
+    pub fn release_exit(&mut self, decoded: &DecodedBehaviorEvent) {
         let event = &decoded.event;
         if decoded.marker == Some(LifecycleMarker::Exit) {
             if let Some(process_ref) = event.header.process_ref {
@@ -77,7 +77,6 @@ impl LifecycleSynthesizer {
                 }
             }
         }
-        Vec::new()
     }
 }
 
@@ -93,7 +92,6 @@ fn make_identity_diagnostic(triggering: &BehaviorEvent, gap: IdentityGap) -> Beh
             name: "process.identity".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(json!({
             "reason_code": "stable_process_ref_unavailable",
             "source": gap.source.as_str(),
@@ -111,7 +109,6 @@ fn make_process_start(triggering: &BehaviorEvent, process_ref: ProcessRefJson) -
             name: "process_start".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: process_start_args(Some(process_ref)),
         return_code: None,
     }
@@ -168,7 +165,6 @@ mod tests {
                     name: name.into(),
                     layer: Layer::Behavior,
                 },
-                proc: None,
                 args: None,
                 return_code: None,
             },
@@ -195,24 +191,6 @@ mod tests {
         });
         let diagnostic = life.before(&unknown).remove(0);
         insta::assert_snapshot!("process_identity_bytes", serde_json::to_string(&diagnostic).unwrap());
-    }
-
-    #[test]
-    fn synthesized_start_never_copies_proc_enrichment() {
-        let mut triggering = event(std::process::id(), 100, EventClass::Tracepoint, "openat");
-        triggering.event.proc = Some(crate::deserializer::ProcInfo {
-            main_executable: Some("/untrusted/exe".into()),
-            cwd: Some("/untrusted/cwd".into()),
-            tty: Some("/dev/pts/42".into()),
-        });
-        let mut life = LifecycleSynthesizer::new();
-        let start = life.before(&triggering).remove(0);
-        assert!(start.proc.is_none());
-        assert_eq!(
-            start.header.process_ref,
-            triggering.event.header.process_ref
-        );
-        assert!(start.header.task.is_none());
     }
 
     #[test]
@@ -257,10 +235,11 @@ mod tests {
     #[test]
     fn raw_clone_and_exit_group_do_not_synthesize_lifecycle() {
         let mut life = LifecycleSynthesizer::new();
-        assert!(life
-            .after(&event(42, 100, EventClass::Tracepoint, "clone"))
-            .is_empty());
-        assert!(life.after(&event(42, 100, EventClass::Syscall, "231")).is_empty());
+        let observed = event(42, 100, EventClass::Tracepoint, "openat");
+        life.before(&observed);
+        life.release_exit(&event(42, 100, EventClass::Tracepoint, "clone"));
+        life.release_exit(&event(42, 100, EventClass::Syscall, "231"));
+        assert!(life.before(&observed).is_empty());
     }
 
     #[test]
@@ -271,7 +250,7 @@ mod tests {
 
         let exit = marked(42, 100, LifecycleMarker::Exit);
         assert!(life.before(&exit).is_empty());
-        assert!(life.after(&exit).is_empty());
+        life.release_exit(&exit);
 
         let mut generated = event(42, 100, EventClass::Tracepoint, "signal_generate");
         generated.lifecycle_seed_authority = LifecycleSeedAuthority::NonAuthoritative;
@@ -290,9 +269,9 @@ mod tests {
         let mut life = LifecycleSynthesizer::new();
         let first = event(42, 100, EventClass::Tracepoint, "openat");
         life.before(&first);
-        life.after(&marked(42, 200, LifecycleMarker::Exit));
+        life.release_exit(&marked(42, 200, LifecycleMarker::Exit));
         assert!(life.before(&first).is_empty());
-        life.after(&marked(42, 100, LifecycleMarker::Exit));
+        life.release_exit(&marked(42, 100, LifecycleMarker::Exit));
         assert_eq!(life.before(&first).len(), 1);
     }
 
@@ -365,7 +344,7 @@ mod tests {
             "name alone is not a start marker"
         );
         let misleading_exit = event(42, 100, EventClass::Lifecycle, "process_exit");
-        life.after(&misleading_exit);
+        life.release_exit(&misleading_exit);
         assert!(
             life.before(&misleading).is_empty(),
             "name alone must not release identity"

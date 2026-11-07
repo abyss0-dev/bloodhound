@@ -67,7 +67,6 @@ pub fn ready_event(
             name: "bloodhound_ready".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(json!({
             "probes_attached": report.probes,
             "attached": report.keys,

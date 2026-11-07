@@ -17,7 +17,6 @@ fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>,
             name: format!("{scope}.collection").into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(json!({
             "reason_code": reason, "failure_count_delta": delta,
             "failure_count_total": total, "run_prefix_incomplete": true,
@@ -86,12 +85,12 @@ mod tests {
     fn tty_collection_reports_loss_without_operation_identity_or_ring_drops() {
         for reason in bloodhound_common::TTY_FAILURE_REASONS {
             let event = diagnostic("tty", reason, Some(2), Some(5), 1);
+            assert!(serde_json::to_value(&event).unwrap().get("proc").is_none());
             assert_eq!(event.event.event_type, EventClass::Diagnostic);
             assert_eq!(event.event.name, "tty.collection");
             assert_eq!(event.event.layer, Layer::Behavior);
             assert!(event.header.process_ref.is_none());
             assert!(event.header.task.is_none());
-            assert!(event.proc.is_none());
             assert!(event.return_code.is_none());
             assert_eq!(event.args.unwrap(), json!({
                 "scope": "tty", "reason_code": reason,

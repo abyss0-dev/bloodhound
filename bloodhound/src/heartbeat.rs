@@ -120,7 +120,6 @@ pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64, t
             name: "heartbeat".into(),
             layer: Layer::Behavior,
         },
-        proc: None,
         args: Some(serde_json::Value::Object(args)),
         return_code: None,
     }
