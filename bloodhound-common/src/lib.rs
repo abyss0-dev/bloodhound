@@ -1,6 +1,7 @@
 #![no_std]
 
 pub mod exit_claim;
+pub mod syscall_collection;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -26,6 +27,21 @@ pub const EXEC_FAILURE_REASONS: [&str; 5] = [
     "invocation_interrupted",
     "entry_cleanup_failed",
 ];
+
+/// Raw syscall collection loss counters in the BPF `SYSCALL_FAILURES` map.
+pub const SYSCALL_ENTRY_CAPTURE_FAILED: u32 = 0;
+pub const SYSCALL_ENTRY_SAVE_FAILED: u32 = 1;
+pub const SYSCALL_EXIT_CAPTURE_FAILED: u32 = 2;
+pub const SYSCALL_INVOCATION_INTERRUPTED: u32 = 3;
+pub const SYSCALL_ENTRY_CLEANUP_FAILED: u32 = 4;
+pub const SYSCALL_FAILURE_REASONS: [&str; 5] = [
+    "entry_capture_failed",
+    "entry_save_failed",
+    "exit_capture_failed",
+    "invocation_interrupted",
+    "entry_cleanup_failed",
+];
+pub const SYSCALL_FAILURE_COUNT: u32 = SYSCALL_FAILURE_REASONS.len() as u32;
 
 pub const OPENAT_ENTRY_CAPTURE_FAILED: u32 = 0;
 pub const OPENAT_ENTRY_SAVE_FAILED: u32 = 1;
