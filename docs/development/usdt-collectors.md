@@ -34,7 +34,9 @@ The implementation is split across these ownership boundaries:
 
 | Area | Source | Responsibility |
 |---|---|---|
-| Selection and registry | `bloodhound/src/usdt.rs` | Reject unknown configuration, declare trusted target metadata, validate ELF notes, attach programs, decode collector payloads, and create diagnostics. |
+| Selection and registry | `bloodhound/src/usdt/registry.rs` | Reject unknown configuration, declare trusted target metadata, and create diagnostics. |
+| Target validation and attachment | `bloodhound/src/usdt/elf.rs`, `bloodhound/src/usdt/perf.rs`, `bloodhound/src/usdt/mod.rs` | Validate ELF notes, manage uprobe links, and orchestrate collector attachment. |
+| Collector decoding | `bloodhound/src/usdt/decode.rs` | Decode collector-owned payloads into canonical behavior event payloads. |
 | Startup integration | `bloodhound/src/main.rs`, `bloodhound/src/loader.rs` | Load selections, attach enabled collectors after the core BPF programs, keep links alive, and queue diagnostics. |
 | Kernel capture | `bloodhound-ebpf/src/usdt.rs` | Read the fixed USDT operand ABI, bound memory access, and emit collector-owned payloads. |
 | Shared wire ABI | `bloodhound-common/src/lib.rs` | Define event discriminants and `#[repr(C)]` payload structures shared by eBPF and userspace. |
@@ -47,8 +49,8 @@ Every collector change must preserve these properties:
 
 - The selection file remains deny-by-default and contains only `collector` and
   `enabled`.
-- Target path, architecture, Build ID, provider, probe, operands, field schema,
-  and attachment limit are compiled metadata.
+- Target path, architecture, Build ID, provider, probe, operands, and
+  attachment limit are compiled metadata.
 - Attachment happens only after the target architecture, Build ID, static note,
   exact operand string, and semaphore offset are validated.
 - Validation and attachment use the same open executable inode; a path
@@ -86,9 +88,9 @@ Treat a new collector as one vertical change through all layers:
    at entry before reading any argument or emitting. Use one compiled entry
    point per supported static location and reject unsafe required reads with a
    collector-owned capture-error payload.
-4. Register all trusted metadata in `bloodhound/src/usdt.rs`, map each static
-   location to its compiled program name, and add the decoder that produces the
-   canonical `BehaviorEvent`.
+4. Register all trusted metadata in `bloodhound/src/usdt/registry.rs`, map each
+   static location to its compiled program name, and add the decoder in
+   `bloodhound/src/usdt/decode.rs` that produces the canonical `BehaviorEvent`.
 5. Add a deterministic target under `e2e/fixtures/`, pin its Build ID in the
    fixture build, install it into the guest image, and add only the collector ID
    and enabled state under `e2e/config/usdt.d/`.
