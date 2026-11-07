@@ -1970,6 +1970,68 @@ mod tests {
         assert!(args.get("ino").is_none());
     }
 
+    #[test]
+    fn path_capture_status_contract() {
+        for two in [false, true] {
+            for (version, code, expected) in [
+                (0, 255, "unknown"), (1, 0, "complete"),
+                (1, 1, "truncated"), (1, 2, "read_error"),
+            ] {
+                let mut data = path_capture_record(two, b"/one", b"/two");
+                let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+                header.capture = HeaderCapture { version, primary: code, secondary: code };
+                data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+                let args = deserialize(&data).unwrap().args.unwrap();
+                assert_eq!(args["path_capture_version"], version);
+                if two {
+                    assert_eq!(args["path1_status"], expected);
+                    assert_eq!(args["path2_status"], expected);
+                } else {
+                    assert_eq!(args["path_status"], expected);
+                }
+            }
+        }
+    }
+
+    fn path_capture_record(two: bool, first: &[u8], second: &[u8]) -> Vec<u8> {
+        if two {
+            let payload = TwoPathPayload { path1_len: first.len() as u16,
+                path2_len: second.len() as u16, return_code: -1 };
+            build_event_with_vardata(EventKind::Rename, &payload, &[first, second].concat())
+        } else {
+            let payload = PathPayload { path_len: first.len() as u16, _pad: [0; 2], return_code: -1 };
+            build_event_with_vardata(EventKind::Chdir, &payload, first)
+        }
+    }
+
+    #[test]
+    fn path_capture_rejects_invalid_codes() {
+        for (two, primary, secondary) in [(false, 255, 0), (true, 255, 0), (true, 0, 255)] {
+            let mut data = path_capture_record(two, b"a", b"b");
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture { version: 1, primary, secondary };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            assert!(deserialize(&data).is_err());
+        }
+    }
+
+    #[test]
+    fn path_capture_invalid_encoding_and_order() {
+        for (two, first, second, primary, secondary, expected1, expected2) in [
+            (false, &b"\xff"[..], &b""[..], 0, 0, "invalid_encoding", "complete"),
+            (true, &b"\xff"[..], &b"ok"[..], 0, 2, "invalid_encoding", "read_error"),
+            (true, &b"ok"[..], &b"\xff"[..], 1, 0, "truncated", "invalid_encoding"),
+        ] {
+            let mut data = path_capture_record(two, first, second);
+            let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+            header.capture = HeaderCapture { version: 1, primary, secondary };
+            data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+            let args = deserialize(&data).unwrap().args.unwrap();
+            assert_eq!(args[if two { "path1_status" } else { "path_status" }], expected1);
+            if two { assert_eq!(args["path2_status"], expected2); }
+        }
+    }
+
     /// Path events (chdir, mkdir, unlink, etc.) must extract the path.
     #[test]
     fn path_event_extracts_path() {

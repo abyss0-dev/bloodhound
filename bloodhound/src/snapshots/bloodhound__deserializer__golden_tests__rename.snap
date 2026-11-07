@@ -5,7 +5,10 @@ expression: to_json(& event)
 {
   "args": {
     "newpath": "",
-    "oldpath": "!"
+    "oldpath": "!",
+    "path1_status": "unknown",
+    "path2_status": "unknown",
+    "path_capture_version": 0
   },
   "event": {
     "layer": "behavior",
