@@ -63,11 +63,11 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
         args[i] = ctx.read_at(16 + i * 8).map_err(|_| -1i64)?;
     }
 
-    // `exit_group` has no matching sys_exit tracepoint (the task is gone
+    // `exit` and `exit_group` have no matching sys_exit (the task is gone
     // by then), so emit the Tier 1 raw event at sys_enter. Skipping the
     // map insert also avoids leaking orphan entries in SYSCALL_ENTRY_MAP.
     // `args[0]` carries the exit status; return_code is a sentinel 0.
-    if nr == NR_EXIT_GROUP {
+    if nr == NR_EXIT || nr == NR_EXIT_GROUP {
         let payload = RawSyscallPayload {
             syscall_nr: nr,
             args,
