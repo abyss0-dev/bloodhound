@@ -7,7 +7,8 @@ use bloodhound_common::*;
 
 use crate::fd_ident::fd_to_dev_ino;
 use crate::filter::{get_task_info, should_trace};
-use crate::helpers::{emit_event, bpf_memcpy, increment_drop_count};
+use crate::helpers::{emit_event, bpf_memcpy};
+use crate::maps::{syscall_failure, syscall_save, syscall_cleanup};
 use crate::maps::{
     ASSEMBLY_BUF, OPENAT_ENTRY_MAP, OPENAT_TMP_BUF, PATH_ENTRY_MAP, PATH_TMP_BUF,
     RICH_ENTRY_MAP, SYSCALL_TMP_BUF,
@@ -20,9 +21,7 @@ use crate::maps::{
 unsafe fn emit_fixed<T: Sized>(header: &EventHeader, payload: &T) {
     let total = EventHeader::SIZE + core::mem::size_of::<T>();
     let mut buf = [0u8; 256];
-    if total > buf.len() {
-        return;
-    }
+    const { assert!(EventHeader::SIZE + core::mem::size_of::<T>() <= 256); }
     core::ptr::copy_nonoverlapping(
         header as *const EventHeader as *const u8,
         buf.as_mut_ptr(),
@@ -38,16 +37,16 @@ unsafe fn emit_fixed<T: Sized>(header: &EventHeader, payload: &T) {
 
 /// Emit event with variable-length data appended. Uses assembly buffer.
 #[inline(always)]
-unsafe fn emit_varlen<T: Sized>(header: &EventHeader, payload: &T, var_data: &[u8]) {
+unsafe fn emit_varlen<T: Sized>(header: &EventHeader, payload: &T, var_data: &[u8]) -> bool {
     let fixed = EventHeader::SIZE + core::mem::size_of::<T>();
     let total = fixed + var_data.len();
     let asm = match ASSEMBLY_BUF.get_ptr_mut(0) {
         Some(s) => s,
-        None => return,
+        None => return false,
     };
     let buf = &mut (*asm).buf;
     if total > buf.len() {
-        return;
+        return false;
     }
     core::ptr::copy_nonoverlapping(
         header as *const EventHeader as *const u8,
@@ -63,9 +62,34 @@ unsafe fn emit_varlen<T: Sized>(header: &EventHeader, payload: &T, var_data: &[u
         // ⚠️  BPF verifier constraint: MUST use bpf_memcpy for variable-length copies.
         // copy_nonoverlapping with var_data.len() (up to 4095) gets unrolled by LLVM
         // into thousands of load/store pairs, exceeding the 1M instruction limit.
-        bpf_memcpy(buf.as_mut_ptr().add(fixed), var_data.as_ptr(), var_data.len() as u32);
+        if !bpf_memcpy(buf.as_mut_ptr().add(fixed), var_data.as_ptr(), var_data.len() as u32) {
+            return false;
+        }
     }
+    // Ring-buffer failure belongs only to DROP_COUNT, not this scope.
     emit_event(&buf[..total]);
+    true
+}
+
+#[inline(always)]
+unsafe fn entry_result(result: Result<u32, i64>) -> u32 {
+    if result.is_err() {
+        syscall_failure(SYSCALL_ENTRY_CAPTURE_FAILED);
+    }
+    0
+}
+
+#[inline(always)]
+unsafe fn exit_result(result: Result<u32, i64>) -> u32 {
+    if result.is_err() {
+        // Exit helpers only fail after finding a recorded entry. An invocation
+        // already in flight at attach returns Ok without reporting loss.
+        syscall_failure(SYSCALL_EXIT_CAPTURE_FAILED);
+        let key = bpf_get_current_pid_tgid();
+        syscall_cleanup(RICH_ENTRY_MAP.remove(&key));
+        syscall_cleanup(PATH_ENTRY_MAP.remove(&key));
+    }
+    0
 }
 
 // ── Common tracepoint exit args ──────────────────────────────────────────────
@@ -154,8 +178,9 @@ unsafe fn try_sys_exit_openat(ctx: &TracePointContext) -> Result<u32, i64> {
         ino: dev_ino.ino,
     };
 
-    if ASSEMBLY_BUF.get_ptr_mut(0).is_none() { return Err(-1); }
-    emit_varlen(&entry.header, &payload, &entry.filename[..filename_len]);
+    if !emit_varlen(&entry.header, &payload, &entry.filename[..filename_len]) {
+        return Err(-1);
+    }
     let _ = OPENAT_ENTRY_MAP.remove(&pid_tgid);
     Ok(0)
 }
@@ -172,27 +197,19 @@ struct ReadWriteEntryData {
 
 #[tracepoint]
 pub fn sys_enter_read(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_enter_rw(&ctx, EventKind::Read as u8) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { entry_result(try_sys_enter_rw(&ctx, EventKind::Read as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_read(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_exit_rw(&ctx) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { exit_result(try_sys_exit_rw(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_write(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_enter_rw(&ctx, EventKind::Write as u8) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { entry_result(try_sys_enter_rw(&ctx, EventKind::Write as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_write(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_exit_rw(&ctx) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { exit_result(try_sys_exit_rw(&ctx)) }
 }
 
 unsafe fn try_sys_enter_rw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
@@ -208,7 +225,7 @@ unsafe fn try_sys_enter_rw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64
 
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -224,7 +241,7 @@ unsafe fn try_sys_enter_rw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64
         core::mem::size_of::<ReadWriteEntryData>(),
     );
     entry.data_len = core::mem::size_of::<ReadWriteEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -245,7 +262,7 @@ unsafe fn try_sys_exit_rw(ctx: &TracePointContext) -> Result<u32, i64> {
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -262,27 +279,19 @@ struct ConnBindData {
 
 #[tracepoint]
 pub fn sys_enter_connect(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_enter_sockaddr(&ctx, EventKind::Connect as u8) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { entry_result(try_sys_enter_sockaddr(&ctx, EventKind::Connect as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_connect(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_exit_sockaddr(&ctx) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { exit_result(try_sys_exit_sockaddr(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_bind(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_enter_sockaddr(&ctx, EventKind::Bind as u8) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { entry_result(try_sys_enter_sockaddr(&ctx, EventKind::Bind as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_bind(ctx: TracePointContext) -> u32 {
-    match unsafe { try_sys_exit_sockaddr(&ctx) } {
-        Ok(_) => 0, Err(_) => 0,
-    }
+    unsafe { exit_result(try_sys_exit_sockaddr(&ctx)) }
 }
 
 unsafe fn try_sys_enter_sockaddr(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
@@ -328,7 +337,7 @@ unsafe fn try_sys_enter_sockaddr(ctx: &TracePointContext, kind: u8) -> Result<u3
 
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -340,7 +349,7 @@ unsafe fn try_sys_enter_sockaddr(ctx: &TracePointContext, kind: u8) -> Result<u3
         core::mem::size_of::<ConnBindData>(),
     );
     entry.data_len = core::mem::size_of::<ConnBindData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -363,7 +372,7 @@ unsafe fn try_sys_exit_sockaddr(ctx: &TracePointContext) -> Result<u32, i64> {
     };
     emit_fixed(&entry.header, &payload);
 
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -375,11 +384,11 @@ struct ListenData { fd: u32, backlog: u32 }
 
 #[tracepoint]
 pub fn sys_enter_listen(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_listen(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { entry_result(try_enter_listen(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_listen(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_listen(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { exit_result(try_exit_listen(&ctx)) }
 }
 
 unsafe fn try_enter_listen(ctx: &TracePointContext) -> Result<u32, i64> {
@@ -390,7 +399,7 @@ unsafe fn try_enter_listen(ctx: &TracePointContext) -> Result<u32, i64> {
     let header = get_task_info(EventKind::Listen as u8);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -398,7 +407,7 @@ unsafe fn try_enter_listen(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed = ListenData { fd: fd as u32, backlog: backlog as u32 };
     core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<ListenData>());
     entry.data_len = core::mem::size_of::<ListenData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -409,7 +418,7 @@ unsafe fn try_exit_listen(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed: ListenData = core::ptr::read_unaligned(entry.data.as_ptr() as *const ListenData);
     let payload = ListenPayload { fd: ed.fd, backlog: ed.backlog, return_code: ret as i32 };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -421,11 +430,11 @@ struct SocketData { domain: u32, sock_type: u32, protocol: u32 }
 
 #[tracepoint]
 pub fn sys_enter_socket(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_socket(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { entry_result(try_enter_socket(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_socket(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_socket(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { exit_result(try_exit_socket(&ctx)) }
 }
 
 unsafe fn try_enter_socket(ctx: &TracePointContext) -> Result<u32, i64> {
@@ -437,7 +446,7 @@ unsafe fn try_enter_socket(ctx: &TracePointContext) -> Result<u32, i64> {
     let header = get_task_info(EventKind::Socket as u8);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -445,7 +454,7 @@ unsafe fn try_enter_socket(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed = SocketData { domain: domain as u32, sock_type: stype as u32, protocol: proto as u32 };
     core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<SocketData>());
     entry.data_len = core::mem::size_of::<SocketData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -456,7 +465,7 @@ unsafe fn try_exit_socket(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed: SocketData = core::ptr::read_unaligned(entry.data.as_ptr() as *const SocketData);
     let payload = SocketPayload { domain: ed.domain, sock_type: ed.sock_type, protocol: ed.protocol, return_code: ret as i32 };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -468,19 +477,19 @@ struct CloneData { flags: u64 }
 
 #[tracepoint]
 pub fn sys_enter_clone(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_clone(&ctx, EventKind::Clone as u8) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { entry_result(try_enter_clone(&ctx, EventKind::Clone as u8)) }
 }
 #[tracepoint]
 pub fn sys_enter_clone3(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_clone(&ctx, EventKind::Clone3 as u8) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { entry_result(try_enter_clone(&ctx, EventKind::Clone3 as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_clone(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_clone(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { exit_result(try_exit_clone(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_clone3(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_clone(&ctx) } { Ok(_) => 0, Err(_) => 0 }
+    unsafe { exit_result(try_exit_clone(&ctx)) }
 }
 
 unsafe fn try_enter_clone(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
@@ -497,7 +506,7 @@ unsafe fn try_enter_clone(ctx: &TracePointContext, kind: u8) -> Result<u32, i64>
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -505,7 +514,7 @@ unsafe fn try_enter_clone(ctx: &TracePointContext, kind: u8) -> Result<u32, i64>
     let ed = CloneData { flags };
     core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<CloneData>());
     entry.data_len = core::mem::size_of::<CloneData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -530,7 +539,7 @@ unsafe fn try_exit_clone(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed: CloneData = core::ptr::read_unaligned(entry.data.as_ptr() as *const CloneData);
     let payload = ClonePayload { flags: ed.flags, return_code: ret };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -548,11 +557,11 @@ unsafe fn enter_path_arg(ctx: &TracePointContext, kind: u8, path_arg: usize) -> 
     if !should_trace() { return Ok(0); }
     let pathname: u64 = ctx.read_at(16 + 8 * path_arg).map_err(|_| -1i64)?;
     let pid_tgid = bpf_get_current_pid_tgid();
-    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Ok(0) };
+    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Err(-1) };
     entry.header = get_task_info(kind);
     entry.path1_len = read_path(pathname, &mut entry.path1);
     entry.path2_len = 0;
-    let _ = PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0);
+    syscall_save(PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0));
     Ok(0)
 }
 
@@ -572,8 +581,10 @@ unsafe fn try_exit_path(ctx: &TracePointContext) -> Result<u32, i64> {
     let ret: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
     let path_len = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
     let payload = PathPayload { path_len: path_len as u16, _pad: [0; 2], return_code: ret as i32 };
-    emit_varlen(&entry.header, &payload, &entry.path1[..path_len]);
-    let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
+    if !emit_varlen(&entry.header, &payload, &entry.path1[..path_len]) {
+        return Err(-1);
+    }
+    syscall_cleanup(PATH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -590,7 +601,7 @@ unsafe fn try_enter_fd(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -598,7 +609,7 @@ unsafe fn try_enter_fd(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
     let ed = FdData { fd: fd as u32 };
     core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<FdData>());
     entry.data_len = core::mem::size_of::<FdData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -609,7 +620,7 @@ unsafe fn try_exit_fd(ctx: &TracePointContext) -> Result<u32, i64> {
     let ed: FdData = core::ptr::read_unaligned(entry.data.as_ptr() as *const FdData);
     let payload = FdPayload { fd: ed.fd, return_code: ret as i32 };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -641,11 +652,11 @@ unsafe fn try_enter_two_path(ctx: &TracePointContext, kind: TwoPathKind) -> Resu
     let path1_ptr: u64 = ctx.read_at(16 + 8 * path1_arg).map_err(|_| -1i64)?;
     let path2_ptr: u64 = ctx.read_at(16 + 8 * path2_arg).map_err(|_| -1i64)?;
     let pid_tgid = bpf_get_current_pid_tgid();
-    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Ok(0) };
+    let entry = match PATH_TMP_BUF.get_ptr_mut(0) { Some(p) => &mut *p, None => return Err(-1) };
     entry.header = get_task_info(kind as u8);
     entry.path1_len = read_path(path1_ptr, &mut entry.path1);
     entry.path2_len = read_path(path2_ptr, &mut entry.path2);
-    let _ = PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0);
+    syscall_save(PATH_ENTRY_MAP.insert(&pid_tgid, entry, 0));
     Ok(0)
 }
 
@@ -656,21 +667,21 @@ unsafe fn try_exit_two_path(ctx: &TracePointContext) -> Result<u32, i64> {
     let p1 = (entry.path1_len as usize).min(MAX_PATH_SIZE - 1);
     let p2 = (entry.path2_len as usize).min(MAX_PATH_SIZE - 1);
     let payload = TwoPathPayload { path1_len: p1 as u16, path2_len: p2 as u16, return_code: ret as i32 };
-    let asm = match ASSEMBLY_BUF.get_ptr_mut(0) { Some(s) => s, None => {
-        let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
-        return Ok(0);
-    } };
+    let asm = match ASSEMBLY_BUF.get_ptr_mut(0) { Some(s) => s, None => return Err(-1) };
     let dst = &mut (*asm).buf;
     let fixed = EventHeader::SIZE + core::mem::size_of::<TwoPathPayload>();
+    if fixed + p1 + p2 > dst.len() { return Err(-1); }
     core::ptr::copy_nonoverlapping(&entry.header as *const EventHeader as *const u8,
         dst.as_mut_ptr(), EventHeader::SIZE);
     core::ptr::copy_nonoverlapping(&payload as *const TwoPathPayload as *const u8,
         dst.as_mut_ptr().add(EventHeader::SIZE), core::mem::size_of::<TwoPathPayload>());
     // Assemble directly at final offsets: emit_varlen would overwrite its own input.
-    bpf_memcpy(dst.as_mut_ptr().add(fixed), entry.path1.as_ptr(), p1 as u32);
-    bpf_memcpy(dst.as_mut_ptr().add(fixed + p1), entry.path2.as_ptr(), p2 as u32);
+    if !bpf_memcpy(dst.as_mut_ptr().add(fixed), entry.path1.as_ptr(), p1 as u32)
+        || !bpf_memcpy(dst.as_mut_ptr().add(fixed + p1), entry.path2.as_ptr(), p2 as u32) {
+        return Err(-1);
+    }
     emit_event(&dst[..fixed + p1 + p2]);
-    let _ = PATH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(PATH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -704,7 +715,7 @@ unsafe fn try_enter_sendto_recvfrom(ctx: &TracePointContext, kind: u8) -> Result
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -712,7 +723,7 @@ unsafe fn try_enter_sendto_recvfrom(ctx: &TracePointContext, kind: u8) -> Result
     let ed = SendRecvData { fd: fd as u32, family, port, addr_v4, addr_v6, size: len };
     core::ptr::copy_nonoverlapping(&ed as *const _ as *const u8, entry.data.as_mut_ptr(), core::mem::size_of::<SendRecvData>());
     entry.data_len = core::mem::size_of::<SendRecvData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -723,62 +734,62 @@ unsafe fn try_exit_sendto_recvfrom(ctx: &TracePointContext) -> Result<u32, i64> 
     let ed: SendRecvData = core::ptr::read_unaligned(entry.data.as_ptr() as *const SendRecvData);
     let payload = SendtoRecvfromPayload { fd: ed.fd, family: ed.family, port: ed.port, addr_v4: ed.addr_v4, addr_v6: ed.addr_v6, size: ed.size, return_code: ret };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
 // ── All tracepoint entry points (path / fd / two-path / sendto-recvfrom) ─────
 
-#[tracepoint] pub fn sys_enter_chdir(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Chdir as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_chdir(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_fchdir(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Fchdir as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_fchdir(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_unlink(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Unlink as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_unlink(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_unlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Unlinkat as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_unlinkat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_rmdir(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Rmdir as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_rmdir(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_mkdir(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Mkdir as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_mkdir(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Mkdirat as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_mkdirat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Symlink) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_symlink(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Symlinkat) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_symlinkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Link) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_link(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Linkat) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_linkat(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Rename) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_rename(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Renameat2) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_renameat2(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_chmod(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Chmod as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_chmod(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_fchmod(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Fchmod as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_fchmod(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_fchmodat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Fchmodat as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_fchmodat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_chown(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Chown as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_chown(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_fchown(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Fchown as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_fchown(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_fchownat(c: TracePointContext) -> u32 { match unsafe { try_enter_at_path(&c, EventKind::Fchownat as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_fchownat(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_truncate(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Truncate as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_truncate(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_enter_fd(&c, EventKind::Ftruncate as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_ftruncate(c: TracePointContext) -> u32 { match unsafe { try_exit_fd(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { match unsafe { try_enter_two_path(&c, TwoPathKind::Mount) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_mount(c: TracePointContext) -> u32 { match unsafe { try_exit_two_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_umount2(c: TracePointContext) -> u32 { match unsafe { try_enter_path(&c, EventKind::Umount2 as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_umount2(c: TracePointContext) -> u32 { match unsafe { try_exit_path(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_sendto(c: TracePointContext) -> u32 { match unsafe { try_enter_sendto_recvfrom(&c, EventKind::Sendto as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_sendto(c: TracePointContext) -> u32 { match unsafe { try_exit_sendto_recvfrom(&c) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_enter_recvfrom(c: TracePointContext) -> u32 { match unsafe { try_enter_sendto_recvfrom(&c, EventKind::Recvfrom as u8) } { Ok(_)|Err(_) => 0 } }
-#[tracepoint] pub fn sys_exit_recvfrom(c: TracePointContext) -> u32 { match unsafe { try_exit_sendto_recvfrom(&c) } { Ok(_)|Err(_) => 0 } }
+#[tracepoint] pub fn sys_enter_chdir(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Chdir as u8)) } }
+#[tracepoint] pub fn sys_exit_chdir(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_fchdir(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_fd(&c, EventKind::Fchdir as u8)) } }
+#[tracepoint] pub fn sys_exit_fchdir(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_fd(&c)) } }
+#[tracepoint] pub fn sys_enter_unlink(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Unlink as u8)) } }
+#[tracepoint] pub fn sys_exit_unlink(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_unlinkat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_at_path(&c, EventKind::Unlinkat as u8)) } }
+#[tracepoint] pub fn sys_exit_unlinkat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_rmdir(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Rmdir as u8)) } }
+#[tracepoint] pub fn sys_exit_rmdir(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_mkdir(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Mkdir as u8)) } }
+#[tracepoint] pub fn sys_exit_mkdir(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_mkdirat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_at_path(&c, EventKind::Mkdirat as u8)) } }
+#[tracepoint] pub fn sys_exit_mkdirat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_symlink(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Symlink)) } }
+#[tracepoint] pub fn sys_exit_symlink(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_symlinkat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Symlinkat)) } }
+#[tracepoint] pub fn sys_exit_symlinkat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_link(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Link)) } }
+#[tracepoint] pub fn sys_exit_link(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_linkat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Linkat)) } }
+#[tracepoint] pub fn sys_exit_linkat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_rename(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Rename)) } }
+#[tracepoint] pub fn sys_exit_rename(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_renameat2(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Renameat2)) } }
+#[tracepoint] pub fn sys_exit_renameat2(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_chmod(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Chmod as u8)) } }
+#[tracepoint] pub fn sys_exit_chmod(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_fchmod(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_fd(&c, EventKind::Fchmod as u8)) } }
+#[tracepoint] pub fn sys_exit_fchmod(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_fd(&c)) } }
+#[tracepoint] pub fn sys_enter_fchmodat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_at_path(&c, EventKind::Fchmodat as u8)) } }
+#[tracepoint] pub fn sys_exit_fchmodat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_chown(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Chown as u8)) } }
+#[tracepoint] pub fn sys_exit_chown(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_fchown(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_fd(&c, EventKind::Fchown as u8)) } }
+#[tracepoint] pub fn sys_exit_fchown(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_fd(&c)) } }
+#[tracepoint] pub fn sys_enter_fchownat(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_at_path(&c, EventKind::Fchownat as u8)) } }
+#[tracepoint] pub fn sys_exit_fchownat(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_truncate(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Truncate as u8)) } }
+#[tracepoint] pub fn sys_exit_truncate(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_ftruncate(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_fd(&c, EventKind::Ftruncate as u8)) } }
+#[tracepoint] pub fn sys_exit_ftruncate(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_fd(&c)) } }
+#[tracepoint] pub fn sys_enter_mount(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_two_path(&c, TwoPathKind::Mount)) } }
+#[tracepoint] pub fn sys_exit_mount(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_two_path(&c)) } }
+#[tracepoint] pub fn sys_enter_umount2(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_path(&c, EventKind::Umount2 as u8)) } }
+#[tracepoint] pub fn sys_exit_umount2(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_path(&c)) } }
+#[tracepoint] pub fn sys_enter_sendto(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_sendto_recvfrom(&c, EventKind::Sendto as u8)) } }
+#[tracepoint] pub fn sys_exit_sendto(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_sendto_recvfrom(&c)) } }
+#[tracepoint] pub fn sys_enter_recvfrom(c: TracePointContext) -> u32 { unsafe { entry_result(try_enter_sendto_recvfrom(&c, EventKind::Recvfrom as u8)) } }
+#[tracepoint] pub fn sys_exit_recvfrom(c: TracePointContext) -> u32 { unsafe { exit_result(try_exit_sendto_recvfrom(&c)) } }
 
 // ── dup / dup2 / dup3 / fcntl(F_DUPFD*) — issue #5 ───────────────────────────
 //
@@ -797,35 +808,35 @@ struct DupEntryData {
 
 #[tracepoint]
 pub fn sys_enter_dup(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_dup_family(&ctx, EventKind::Dup as u8, 0) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_dup_family(&ctx, EventKind::Dup as u8, 0)) }
 }
 #[tracepoint]
 pub fn sys_exit_dup(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_dup_family(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_dup2(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_dup_family(&ctx, EventKind::Dup2 as u8, 0) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_dup_family(&ctx, EventKind::Dup2 as u8, 0)) }
 }
 #[tracepoint]
 pub fn sys_exit_dup2(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_dup_family(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_dup3(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_dup3(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_dup3(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_dup3(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_dup_family(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_fcntl(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_fcntl(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_fcntl(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_fcntl(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_dup_family(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_dup_family(&ctx)) }
 }
 
 unsafe fn try_enter_dup_family(
@@ -869,7 +880,7 @@ unsafe fn stash_dup_entry(kind: u8, oldfd: u32, cloexec: u8) -> Result<u32, i64>
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -881,7 +892,7 @@ unsafe fn stash_dup_entry(kind: u8, oldfd: u32, cloexec: u8) -> Result<u32, i64>
         core::mem::size_of::<DupEntryData>(),
     );
     entry.data_len = core::mem::size_of::<DupEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -902,7 +913,7 @@ unsafe fn try_exit_dup_family(ctx: &TracePointContext) -> Result<u32, i64> {
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -921,19 +932,19 @@ struct PreadPwriteEntryData {
 
 #[tracepoint]
 pub fn sys_enter_pread64(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_prw(&ctx, EventKind::Pread64 as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_prw(&ctx, EventKind::Pread64 as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_pread64(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_prw(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_prw(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_pwrite64(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_prw(&ctx, EventKind::Pwrite64 as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_prw(&ctx, EventKind::Pwrite64 as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_pwrite64(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_prw(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_prw(&ctx)) }
 }
 
 unsafe fn try_enter_prw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
@@ -947,7 +958,7 @@ unsafe fn try_enter_prw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -964,7 +975,7 @@ unsafe fn try_enter_prw(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
         core::mem::size_of::<PreadPwriteEntryData>(),
     );
     entry.data_len = core::mem::size_of::<PreadPwriteEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -986,7 +997,7 @@ unsafe fn try_exit_prw(ctx: &TracePointContext) -> Result<u32, i64> {
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -1021,19 +1032,19 @@ struct ReadvWritevEntryData {
 
 #[tracepoint]
 pub fn sys_enter_readv(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_rwv(&ctx, EventKind::Readv as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_rwv(&ctx, EventKind::Readv as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_readv(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_rwv(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_rwv(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_enter_writev(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_rwv(&ctx, EventKind::Writev as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_rwv(&ctx, EventKind::Writev as u8)) }
 }
 #[tracepoint]
 pub fn sys_exit_writev(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_rwv(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_rwv(&ctx)) }
 }
 
 unsafe fn try_enter_rwv(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
@@ -1073,7 +1084,7 @@ unsafe fn try_enter_rwv(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -1092,7 +1103,7 @@ unsafe fn try_enter_rwv(ctx: &TracePointContext, kind: u8) -> Result<u32, i64> {
         core::mem::size_of::<ReadvWritevEntryData>(),
     );
     entry.data_len = core::mem::size_of::<ReadvWritevEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -1116,7 +1127,7 @@ unsafe fn try_exit_rwv(ctx: &TracePointContext) -> Result<u32, i64> {
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -1139,11 +1150,11 @@ struct MmapEntryData {
 
 #[tracepoint]
 pub fn sys_enter_mmap(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_mmap(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_mmap(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_mmap(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_mmap(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_mmap(&ctx)) }
 }
 
 unsafe fn try_enter_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
@@ -1166,7 +1177,7 @@ unsafe fn try_enter_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
     let header = get_task_info(EventKind::Mmap as u8);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -1184,7 +1195,7 @@ unsafe fn try_enter_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
         core::mem::size_of::<MmapEntryData>(),
     );
     entry.data_len = core::mem::size_of::<MmapEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -1214,7 +1225,7 @@ unsafe fn try_exit_mmap(ctx: &TracePointContext) -> Result<u32, i64> {
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }
 
@@ -1239,19 +1250,19 @@ struct SendfileSpliceEntryData {
 
 #[tracepoint]
 pub fn sys_enter_sendfile(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_sendfile(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_sendfile(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_sendfile(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_sendfile_splice(&ctx, EventKind::Sendfile as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_sendfile_splice(&ctx, EventKind::Sendfile as u8)) }
 }
 #[tracepoint]
 pub fn sys_enter_splice(ctx: TracePointContext) -> u32 {
-    match unsafe { try_enter_splice(&ctx) } { Ok(_)|Err(_) => 0 }
+    unsafe { entry_result(try_enter_splice(&ctx)) }
 }
 #[tracepoint]
 pub fn sys_exit_splice(ctx: TracePointContext) -> u32 {
-    match unsafe { try_exit_sendfile_splice(&ctx, EventKind::Splice as u8) } { Ok(_)|Err(_) => 0 }
+    unsafe { exit_result(try_exit_sendfile_splice(&ctx, EventKind::Splice as u8)) }
 }
 
 unsafe fn try_enter_sendfile(ctx: &TracePointContext) -> Result<u32, i64> {
@@ -1283,7 +1294,7 @@ unsafe fn stash_sendfile_splice_entry(
     let header = get_task_info(kind);
     let entry_ptr = match SYSCALL_TMP_BUF.get_ptr_mut(0) {
         Some(p) => p,
-        None => return Ok(0),
+        None => return Err(-1),
     };
     let entry = unsafe { &mut *entry_ptr };
     entry.data_len = 0;
@@ -1302,7 +1313,7 @@ unsafe fn stash_sendfile_splice_entry(
         core::mem::size_of::<SendfileSpliceEntryData>(),
     );
     entry.data_len = core::mem::size_of::<SendfileSpliceEntryData>() as u16;
-    let _ = RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    syscall_save(RICH_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -1325,6 +1336,6 @@ unsafe fn try_exit_sendfile_splice(ctx: &TracePointContext, _kind: u8) -> Result
         return_code: ret,
     };
     emit_fixed(&entry.header, &payload);
-    let _ = RICH_ENTRY_MAP.remove(&pid_tgid);
+    syscall_cleanup(RICH_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }

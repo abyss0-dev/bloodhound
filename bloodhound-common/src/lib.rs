@@ -28,7 +28,8 @@ pub const EXEC_FAILURE_REASONS: [&str; 5] = [
     "entry_cleanup_failed",
 ];
 
-/// Raw syscall collection loss counters in the BPF `SYSCALL_FAILURES` map.
+/// Tier-2 rich/path collection loss counters in the BPF `SYSCALL_FAILURES`
+/// map, excluding openat and execve/execveat (which own separate scopes).
 pub const SYSCALL_ENTRY_CAPTURE_FAILED: u32 = 0;
 pub const SYSCALL_ENTRY_SAVE_FAILED: u32 = 1;
 pub const SYSCALL_EXIT_CAPTURE_FAILED: u32 = 2;

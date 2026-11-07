@@ -1,4 +1,4 @@
-"""Normal rich/path collection must not report missing raw state as loss."""
+"""Normal rich/path collection must not report syscall collection loss."""
 
 import json
 import shlex

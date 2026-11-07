@@ -49,9 +49,7 @@ pub unsafe fn emit_fixed<T>(header: &EventHeader, payload: Option<&T>) {
     let payload_size = payload.map_or(0, |_| core::mem::size_of::<T>());
     let total = EventHeader::SIZE + payload_size;
     let mut buf = [0u8; 128];
-    if total > buf.len() {
-        return;
-    }
+    const { assert!(EventHeader::SIZE + core::mem::size_of::<T>() <= 128); }
     core::ptr::copy_nonoverlapping(
         header as *const EventHeader as *const u8,
         buf.as_mut_ptr(),
@@ -92,10 +90,11 @@ pub unsafe fn increment_drop_count() {
 /// Small fixed-size copies (e.g., `size_of::<EventHeader>()` = 48 bytes) can still
 /// use `copy_nonoverlapping` safely.
 #[inline(always)]
-pub unsafe fn bpf_memcpy(dst: *mut u8, src: *const u8, len: u32) {
-    let _ = aya_ebpf::helpers::gen::bpf_probe_read_kernel(
+pub unsafe fn bpf_memcpy(dst: *mut u8, src: *const u8, len: u32) -> bool {
+    if len == 0 { return true; }
+    aya_ebpf::helpers::gen::bpf_probe_read_kernel(
         dst as *mut core::ffi::c_void,
         len,
         src as *const core::ffi::c_void,
-    );
+    ) == 0
 }

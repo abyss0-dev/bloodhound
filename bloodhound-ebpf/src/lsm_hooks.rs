@@ -19,7 +19,7 @@ unsafe fn is_daemon() -> bool {
 
 /// Emit an LSM event. Builds flat bytes on the stack.
 #[inline(always)]
-unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
+unsafe fn emit_lsm_event<T>(kind: u8, payload: &T) {
     let auid = get_current_auid();
     let timestamp_ns = bpf_ktime_get_ns();
     let pid_tgid = bpf_get_current_pid_tgid();
@@ -49,23 +49,20 @@ unsafe fn emit_lsm_event(kind: u8, payload_bytes: &[u8]) {
     };
     crate::ns::snapshot(aya_ebpf::helpers::bpf_get_current_task() as usize, &mut header.ns);
 
-    let total_size = EventHeader::SIZE + payload_bytes.len();
+    let payload_size = core::mem::size_of::<T>();
+    let total_size = EventHeader::SIZE + payload_size;
     let mut buf = [0u8; 256];
-    if total_size > buf.len() {
-        return;
-    }
+    const { assert!(EventHeader::SIZE + core::mem::size_of::<T>() <= 256); }
     core::ptr::copy_nonoverlapping(
         &header as *const EventHeader as *const u8,
         buf.as_mut_ptr(),
         EventHeader::SIZE,
     );
-    if !payload_bytes.is_empty() {
-        core::ptr::copy_nonoverlapping(
-            payload_bytes.as_ptr(),
-            buf.as_mut_ptr().add(EventHeader::SIZE),
-            payload_bytes.len(),
-        );
-    }
+    core::ptr::copy_nonoverlapping(
+        payload as *const T as *const u8,
+        buf.as_mut_ptr().add(EventHeader::SIZE),
+        payload_size,
+    );
     emit_event(&buf[..total_size]);
 }
 
@@ -139,11 +136,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
             return_code: -1,
             _pad: 0,
         };
-        let bytes = core::slice::from_raw_parts(
-            &payload as *const _ as *const u8,
-            LsmTaskKillPayload::SIZE,
-        );
-        emit_lsm_event(EventKind::LsmTaskKill as u8, bytes);
+        emit_lsm_event(EventKind::LsmTaskKill as u8, &payload);
         Ok(-1) // -EPERM: block target user from killing daemon
     } else {
         // Allow kills to non-daemon processes, but still emit an event for observability
@@ -154,11 +147,7 @@ unsafe fn try_task_kill(ctx: &LsmContext) -> Result<i32, i64> {
             return_code: 0,
             _pad: 0,
         };
-        let bytes = core::slice::from_raw_parts(
-            &payload as *const _ as *const u8,
-            LsmTaskKillPayload::SIZE,
-        );
-        emit_lsm_event(EventKind::LsmTaskKill as u8, bytes);
+        emit_lsm_event(EventKind::LsmTaskKill as u8, &payload);
         Ok(0)
     }
 }
@@ -190,11 +179,7 @@ unsafe fn try_bpf_hook(_ctx: &LsmContext) -> Result<i32, i64> {
         cmd: 0,
         return_code: 0,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmBpfPayload::SIZE,
-    );
-    emit_lsm_event(EventKind::LsmBpf as u8, bytes);
+    emit_lsm_event(EventKind::LsmBpf as u8, &payload);
     Ok(0) // Never enforce a blanket BPF denial.
 }
 
@@ -239,11 +224,7 @@ unsafe fn try_ptrace(ctx: &LsmContext) -> Result<i32, i64> {
         target_pid: daemon_pid,
         return_code: -1,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmPtracePayload::SIZE,
-    );
-    emit_lsm_event(EventKind::LsmPtraceAccessCheck as u8, bytes);
+    emit_lsm_event(EventKind::LsmPtraceAccessCheck as u8, &payload);
     Ok(-1) // Block target user ptrace on daemon
 }
 
@@ -272,11 +253,7 @@ unsafe fn try_file_open(_ctx: &LsmContext) -> Result<i32, i64> {
         _pad: [0; 2],
         return_code: 0,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmFileOpenPayload::SIZE,
-    );
-    emit_lsm_event(EventKind::LsmFileOpen as u8, bytes);
+    emit_lsm_event(EventKind::LsmFileOpen as u8, &payload);
     Ok(0)
 }
 
@@ -304,11 +281,7 @@ unsafe fn try_inode_op(_ctx: &LsmContext, kind: u8) -> Result<i32, i64> {
         _pad: [0; 2],
         return_code: 0,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmInodePayload::SIZE,
-    );
-    emit_lsm_event(kind, bytes);
+    emit_lsm_event(kind, &payload);
     Ok(0)
 }
 
@@ -336,11 +309,7 @@ unsafe fn try_inode_rename(_ctx: &LsmContext) -> Result<i32, i64> {
         new_path_len: 0,
         return_code: 0,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmInodeRenamePayload::SIZE,
-    );
-    emit_lsm_event(EventKind::LsmInodeRename as u8, bytes);
+    emit_lsm_event(EventKind::LsmInodeRename as u8, &payload);
     Ok(0)
 }
 
@@ -367,10 +336,6 @@ unsafe fn try_setuid(_ctx: &LsmContext) -> Result<i32, i64> {
         new_gid: 0,
         return_code: 0,
     };
-    let bytes = core::slice::from_raw_parts(
-        &payload as *const _ as *const u8,
-        LsmSetuidPayload::SIZE,
-    );
-    emit_lsm_event(EventKind::LsmTaskFixSetuid as u8, bytes);
+    emit_lsm_event(EventKind::LsmTaskFixSetuid as u8, &payload);
     Ok(0)
 }

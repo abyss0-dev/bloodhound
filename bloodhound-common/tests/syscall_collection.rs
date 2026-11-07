@@ -14,7 +14,7 @@ fn save_reports_every_error_including_enoent() {
         (Err(-12), Some(SYSCALL_ENTRY_SAVE_FAILED)), // ENOMEM
         (Err(-17), Some(SYSCALL_ENTRY_SAVE_FAILED)), // EEXIST
         (Err(-22), Some(SYSCALL_ENTRY_SAVE_FAILED)), // EINVAL
-        (Err(i32::MIN), Some(SYSCALL_ENTRY_SAVE_FAILED)),
+        (Err(i64::MIN), Some(SYSCALL_ENTRY_SAVE_FAILED)),
         (Err(0), Some(SYSCALL_ENTRY_SAVE_FAILED)),
     ] {
         assert_eq!(save_outcome(result), expected, "save {result:?}");
@@ -25,13 +25,13 @@ fn save_reports_every_error_including_enoent() {
 fn cleanup_absence_is_normal_but_other_errors_are_loss() {
     for (result, expected) in [
         (Ok(()), None),
-        (Err(-2), None), // ENOENT: rich collector or filtered entry
+        (Err(-2), None), // ENOENT: no recorded entry
         (Err(-7), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
         (Err(-12), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
         (Err(-17), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
         (Err(-22), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
         (Err(2), Some(SYSCALL_ENTRY_CLEANUP_FAILED)), // not negative ENOENT
-        (Err(i32::MIN), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
+        (Err(i64::MIN), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
         (Err(0), Some(SYSCALL_ENTRY_CLEANUP_FAILED)),
     ] {
         assert_eq!(cleanup_outcome(result), expected, "cleanup {result:?}");
