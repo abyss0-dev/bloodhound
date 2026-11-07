@@ -6,17 +6,21 @@ import uuid
 import pytest
 
 REQUIRED = {"lifecycle", "signal", "exec.execve", "raw_syscalls"}
-TIER2 = {
-    "openat", "read", "write", "connect", "bind", "listen", "socket",
-    "clone", "clone3", "chdir", "fchdir", "unlink", "unlinkat", "rename",
-    "renameat2", "mkdir", "mkdirat", "rmdir", "symlink", "symlinkat", "link",
-    "linkat", "chmod", "fchmod", "fchmodat", "chown", "fchown", "fchownat",
-    "truncate", "ftruncate", "mount", "umount2", "sendto", "recvfrom", "dup",
-    "dup2", "dup3", "pread64", "pwrite64", "readv", "writev", "mmap", "fcntl",
-}
-DEFAULT_KEYS = REQUIRED | {f"tier2.{name}" for name in TIER2} | {
-    "exec.execveat", "tty.write", "tty.read", "tty.read_ret",
-}
+NON_TIER2_KEYS = REQUIRED | {"exec.execveat", "tty.write", "tty.read", "tty.read_ret"}
+
+
+def assert_attached_matches_loader(daemon, attached):
+    reports = [
+        json.loads(line.split("BPF Tier-2 selection: ", 1)[1])
+        for line in daemon.stderr().splitlines()
+        if line.startswith("BPF Tier-2 selection: ")
+    ]
+    assert len(reports) == 1, daemon.stderr()
+    tier2 = {key for key in attached if key.startswith("tier2.")}
+    assert tier2 == set(reports[0])
+    assert tier2
+    assert all(attached[key] is True for key in tier2), daemon.stderr()
+    assert set(attached) - tier2 == NON_TIER2_KEYS
 
 
 def tc_state(ssh_cmd):
@@ -69,9 +73,10 @@ def test_first_record_is_ready_with_exact_startup_facts(
         assert isinstance(pid, int) and pid > 0
         actual = ssh_cmd(f"cat /proc/{pid}/comm", user="root")
         assert actual.returncode == 0 and actual.stdout.strip() == "bloodhound"
-        assert set(args["attached"]) == DEFAULT_KEYS
+        assert_attached_matches_loader(daemon, args["attached"])
+        assert "tier2.sendfile" not in args["attached"]
+        assert "tier2.splice" not in args["attached"]
         assert all(args["attached"][key] is True for key in REQUIRED)
-        assert args["attached"]["tier2.umount2"] is True
         assert all(isinstance(value, bool) for value in args["attached"].values())
         after_qdiscs, after_filters = tc_state(ssh_cmd)
         assert after_qdiscs == before_qdiscs, "startup changed qdiscs"
@@ -148,6 +153,6 @@ def test_selected_rich_pairs_have_readiness_keys(foreground_bloodhound, wait_unt
     with foreground_bloodhound("--enable-rich-sendfile") as daemon:
         wait_until(lambda: daemon.events(), "readiness with selected rich pairs")
         attached = daemon.events()[0]["args"]["attached"]
-        assert set(attached) == DEFAULT_KEYS | {"tier2.sendfile", "tier2.splice"}
-        assert isinstance(attached["tier2.sendfile"], bool)
-        assert isinstance(attached["tier2.splice"], bool)
+        assert_attached_matches_loader(daemon, attached)
+        assert attached["tier2.sendfile"] is True
+        assert attached["tier2.splice"] is True

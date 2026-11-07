@@ -125,9 +125,15 @@ pub fn load_and_attach(
 
     info!("Attaching Layer 2: execve tracepoints...");
     required(&mut report, "exec.execve", |report| {
-        attach_syscall_pair(&mut bpf, "execve", report)
+        attach_syscall_pair(&mut bpf, "execve", "execve", report)
     })?;
-    try_attach_syscall_pair(&mut bpf, "execveat", "exec.execveat", &mut report);
+    try_attach_syscall_pair(
+        &mut bpf,
+        "execveat",
+        "execveat",
+        "exec.execveat",
+        &mut report,
+    );
 
     info!("Attaching Layer 3 Tier 1: raw syscalls...");
     required(&mut report, "raw_syscalls", |report| {
@@ -141,87 +147,36 @@ pub fn load_and_attach(
     })?;
 
     info!("Attaching Layer 3 Tier 2: rich syscalls...");
-    let tier2_syscalls: &[(&str, u64)] = &[
-        ("openat", NR_OPENAT),
-        ("read", NR_READ),
-        ("write", NR_WRITE),
-        ("connect", NR_CONNECT),
-        ("bind", NR_BIND),
-        ("listen", NR_LISTEN),
-        ("socket", NR_SOCKET),
-        ("clone", NR_CLONE),
-        ("clone3", NR_CLONE3),
-        ("chdir", NR_CHDIR),
-        ("fchdir", NR_FCHDIR),
-        ("unlink", NR_UNLINK),
-        ("unlinkat", NR_UNLINKAT),
-        ("rename", NR_RENAME),
-        ("renameat2", NR_RENAMEAT2),
-        ("mkdir", NR_MKDIR),
-        ("mkdirat", NR_MKDIRAT),
-        ("rmdir", NR_RMDIR),
-        ("symlink", NR_SYMLINK),
-        ("symlinkat", NR_SYMLINKAT),
-        ("link", NR_LINK),
-        ("linkat", NR_LINKAT),
-        ("chmod", NR_CHMOD),
-        ("fchmod", NR_FCHMOD),
-        ("fchmodat", NR_FCHMODAT),
-        ("chown", NR_CHOWN),
-        ("fchown", NR_FCHOWN),
-        ("fchownat", NR_FCHOWNAT),
-        ("truncate", NR_TRUNCATE),
-        ("ftruncate", NR_FTRUNCATE),
-        ("mount", NR_MOUNT),
-        ("umount2", NR_UMOUNT2),
-        ("sendto", NR_SENDTO),
-        ("recvfrom", NR_RECVFROM),
-        ("dup", NR_DUP),
-        ("dup2", NR_DUP2),
-        ("dup3", NR_DUP3),
-        ("pread64", NR_PREAD64),
-        ("pwrite64", NR_PWRITE64),
-        ("readv", NR_READV),
-        ("writev", NR_WRITEV),
-        ("mmap", NR_MMAP),
-    ];
-
-    let mut successful_syscalls = Vec::new();
-
-    for (name, nr) in tier2_syscalls {
-        if try_attach_syscall_pair(&mut bpf, name, &format!("tier2.{name}"), &mut report) {
-            if (*nr as u32) < BITMAP_SIZE as u32 {
-                successful_syscalls.push(*nr as u32);
-            }
+    let selected_tier2: Vec<_> = TIER2
+        .iter()
+        .filter(|syscall| syscall.dedup != Dedup::OptIn || args.enable_rich_sendfile)
+        .collect();
+    // Report the plan independently of attachment outcomes so readiness can be
+    // checked for missing keys without maintaining another syscall list.
+    let selected_keys: Vec<_> = selected_tier2
+        .iter()
+        .map(|syscall| format!("tier2.{}", syscall.name))
+        .collect();
+    eprintln!(
+        "BPF Tier-2 selection: {}",
+        serde_json::to_string(&selected_keys)?
+    );
+    for syscall in selected_tier2 {
+        let name = syscall.name;
+        if try_attach_syscall_pair(
+            &mut bpf,
+            name,
+            syscall.tracepoint,
+            &format!("tier2.{name}"),
+            &mut report,
+        ) {
             info!("  Attached: {}", name);
-        }
-    }
-
-    // fcntl rich extraction is conditional on cmd ∈ {F_DUPFD, F_DUPFD_CLOEXEC};
-    // attach the tracepoints, but DO NOT register fcntl in TIER2_BITMAP, so
-    // non-DUPFD fcntl commands remain visible via Tier 1 raw capture.
-    try_attach_syscall_pair(&mut bpf, "fcntl", "tier2.fcntl", &mut report);
-
-    // sendfile / splice rich extraction is opt-in (issue #9). When enabled,
-    // attach both tracepoint pairs and register the syscall numbers in
-    // TIER2_BITMAP so Tier 1 deduplicates. When disabled, the BPF programs
-    // remain compiled in but unattached, and Tier 1 raw capture continues.
-    if args.enable_rich_sendfile {
-        let sf_ok = try_attach_syscall_pair(&mut bpf, "sendfile", "tier2.sendfile", &mut report);
-        if sf_ok && (NR_SENDFILE as u32) < BITMAP_SIZE as u32 {
-            successful_syscalls.push(NR_SENDFILE as u32);
-            info!("  Attached: sendfile (opt-in via --enable-rich-sendfile)");
-        }
-        let sp_ok = try_attach_syscall_pair(&mut bpf, "splice", "tier2.splice", &mut report);
-        if sp_ok && (NR_SPLICE as u32) < BITMAP_SIZE as u32 {
-            successful_syscalls.push(NR_SPLICE as u32);
-            info!("  Attached: splice (opt-in via --enable-rich-sendfile)");
         }
     }
 
     let mut tier2_bitmap: Array<_, u32> = Array::try_from(bpf.map_mut("TIER2_BITMAP").unwrap())?;
 
-    for nr in successful_syscalls {
+    for nr in dedup_syscalls(&report) {
         tier2_bitmap.set(nr, 1, 0)?;
     }
 
@@ -283,6 +238,25 @@ pub fn load_and_attach(
         .collect();
     info!("BPF attachment attempts complete");
     Ok((bpf, usdt_diagnostics, usdt_links, report))
+}
+
+/// Only complete rich collectors may suppress raw capture. Layer 2 covers
+/// exec successes and failures too; the kernel bitmap is the sole dedup owner.
+fn dedup_syscalls(report: &AttachReport) -> Vec<u32> {
+    TIER2
+        .iter()
+        .filter(|syscall| syscall.dedup != Dedup::NoDedup)
+        .filter(|syscall| report.keys.get(&format!("tier2.{}", syscall.name)) == Some(&true))
+        .map(|syscall| syscall.nr)
+        .chain(
+            EXEC_DEDUP
+                .iter()
+                .copied()
+                .filter(|(_, key)| report.keys.get(*key) == Some(&true))
+                .map(|(nr, _)| nr),
+        )
+        .map(|nr| u32::try_from(nr).expect("syscall number fits u32"))
+        .collect()
 }
 
 fn required(
@@ -362,12 +336,14 @@ fn attach_pair<B, L>(
     Ok(())
 }
 
-fn attach_syscall_pair(bpf: &mut aya::Ebpf, name: &str, report: &mut AttachReport) -> Result<()> {
+fn attach_syscall_pair(
+    bpf: &mut aya::Ebpf,
+    name: &str,
+    tracepoint_name: &str,
+    report: &mut AttachReport,
+) -> Result<()> {
     let enter = format!("sys_enter_{name}");
     let exit = format!("sys_exit_{name}");
-    // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
-    // so its kernel tracepoints are named umount, not umount2.
-    let tracepoint_name = if name == "umount2" { "umount" } else { name };
     let enter_tp = format!("sys_enter_{tracepoint_name}");
     let exit_tp = format!("sys_exit_{tracepoint_name}");
     attach_tracepoint_pair(
@@ -399,10 +375,11 @@ fn attach_tracepoint(
 fn try_attach_syscall_pair(
     bpf: &mut aya::Ebpf,
     name: &str,
+    tracepoint_name: &str,
     key: &str,
     report: &mut AttachReport,
 ) -> bool {
-    let complete = match attach_syscall_pair(bpf, name, report) {
+    let complete = match attach_syscall_pair(bpf, name, tracepoint_name, report) {
         Ok(()) => true,
         Err(e) => {
             warn!("Failed to attach syscall pair {name}: {e:#}");
@@ -472,6 +449,30 @@ mod tests {
             "usdt.unselected",
         ] {
             assert!(!report.keys.contains_key(unselected));
+        }
+    }
+
+    #[test]
+    fn bitmap_follows_complete_collectors_including_layer2_exec() {
+        let mut report = AttachReport::default();
+        assert!(dedup_syscalls(&report).is_empty());
+        for complete in [false, true] {
+            for key in ["exec.execve", "exec.execveat"] {
+                report.keys.insert(key.into(), complete);
+            }
+            let numbers = dedup_syscalls(&report);
+            assert_eq!(numbers.contains(&(NR_EXECVE as u32)), complete);
+            assert!(!numbers.contains(&(NR_EXECVEAT as u32)));
+        }
+        for syscall in TIER2 {
+            let key = format!("tier2.{}", syscall.name);
+            report.keys.insert(key.clone(), false);
+            assert!(!dedup_syscalls(&report).contains(&(syscall.nr as u32)));
+            report.keys.insert(key, true);
+            assert_eq!(
+                dedup_syscalls(&report).contains(&(syscall.nr as u32)),
+                syscall.dedup != Dedup::NoDedup
+            );
         }
     }
 
