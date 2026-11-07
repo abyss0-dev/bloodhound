@@ -87,8 +87,8 @@ impl TryFrom<u8> for CaptureStatus {
     }
 }
 
-/// Exec version 1 uses primary for argv and secondary for filename status.
-/// Other event kinds leave these bytes zero; legacy exec capture is unknown.
+/// Version 1 uses primary/secondary for exec argv/filename or path1/path2 status.
+/// Single-path events use primary and leave secondary zero. Version 0 is unknown.
 /// Raw bytes allow legacy versions and untrusted wire values to be validated
 /// before conversion to `CaptureStatus`.
 #[repr(C)]

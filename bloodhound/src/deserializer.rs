@@ -1998,8 +1998,9 @@ mod tests {
     fn path_capture_status_contract() {
         for two in [false, true] {
             for (version, code, expected) in [
-                (0, 255, "unknown"), (1, 0, "complete"),
-                (1, 1, "truncated"), (1, 2, "read_error"),
+                (0, 255, "unknown"), (1, CaptureStatus::Complete as u8, "complete"),
+                (1, CaptureStatus::Truncated as u8, "truncated"),
+                (1, CaptureStatus::ReadError as u8, "read_error"),
             ] {
                 let mut data = path_capture_record(two, b"/one", b"/two");
                 let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
@@ -2030,7 +2031,11 @@ mod tests {
 
     #[test]
     fn path_capture_rejects_invalid_codes() {
-        for (two, primary, secondary) in [(false, 255, 0), (true, 255, 0), (true, 0, 255)] {
+        for (two, primary, secondary) in [
+            (false, 0, 0), (false, 255, 0),
+            (true, 255, CaptureStatus::Complete as u8),
+            (true, CaptureStatus::Complete as u8, 255),
+        ] {
             let mut data = path_capture_record(two, b"a", b"b");
             let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
             header.capture = HeaderCapture { version: 1, primary, secondary };
@@ -2042,17 +2047,32 @@ mod tests {
     #[test]
     fn path_capture_invalid_encoding_and_order() {
         for (two, first, second, primary, secondary, expected1, expected2) in [
-            (false, &b"\xff"[..], &b""[..], 0, 0, "invalid_encoding", "complete"),
-            (true, &b"\xff"[..], &b"ok"[..], 0, 2, "invalid_encoding", "read_error"),
-            (true, &b"ok"[..], &b"\xff"[..], 1, 0, "truncated", "invalid_encoding"),
+            (false, &b"\xff"[..], &b""[..], CaptureStatus::Complete, CaptureStatus::Complete, "invalid_encoding", "complete"),
+            (true, &b"\xff"[..], &b"ok"[..], CaptureStatus::Complete, CaptureStatus::ReadError, "invalid_encoding", "read_error"),
+            (true, &b"ok"[..], &b"\xff"[..], CaptureStatus::Truncated, CaptureStatus::Complete, "truncated", "invalid_encoding"),
         ] {
             let mut data = path_capture_record(two, first, second);
             let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
-            header.capture = HeaderCapture { version: 1, primary, secondary };
+            header.capture = HeaderCapture { version: 1, primary: primary as u8, secondary: secondary as u8 };
             data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
             let args = deserialize(&data).unwrap().args.unwrap();
             assert_eq!(args[if two { "path1_status" } else { "path_status" }], expected1);
             if two { assert_eq!(args["path2_status"], expected2); }
+        }
+    }
+
+    #[test]
+    fn path_capture_v1_rejects_mismatched_lengths() {
+        for two in [false, true] {
+            for extra in [false, true] {
+                let mut data = path_capture_record(two, b"one", b"two");
+                let mut header = unsafe { core::ptr::read_unaligned(data.as_ptr() as *const EventHeader) };
+                header.capture = HeaderCapture { version: 1,
+                    primary: CaptureStatus::Complete as u8, secondary: CaptureStatus::Complete as u8 };
+                data[..EventHeader::SIZE].copy_from_slice(&header_bytes(&header));
+                if extra { data.push(0); } else { data.pop(); }
+                assert!(deserialize(&data).is_err());
+            }
         }
     }
 
