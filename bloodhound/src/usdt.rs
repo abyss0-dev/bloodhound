@@ -349,17 +349,7 @@ pub fn diagnostic(collector_id: &str, reason: ReasonCode, context: Option<Value>
         args.extend(extra);
     }
     BehaviorEvent {
-        header: EventHeaderJson {
-            timestamp,
-            auid: 0,
-            sessionid: 0,
-            pid: 0,
-            ppid: None,
-            comm: String::new(),
-            process_ref: None,
-            tid: None,
-            ns: None,
-        },
+        header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
             name: "usdt.collector".into(),

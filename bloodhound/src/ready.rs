@@ -61,17 +61,7 @@ pub fn ready_event(
     timestamp: u64,
 ) -> BehaviorEvent {
     BehaviorEvent {
-        header: EventHeaderJson {
-            timestamp,
-            auid: 0,
-            sessionid: 0,
-            pid: 0,
-            ppid: None,
-            comm: String::new(),
-            process_ref: None,
-            tid: None,
-            ns: None,
-        },
+        header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
             event_type: "META".into(),
             name: "bloodhound_ready".into(),

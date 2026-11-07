@@ -114,17 +114,7 @@ pub fn build_heartbeat(drops_delta: u64, drops_total: u64, emitted_delta: u64, t
     }
 
     BehaviorEvent {
-        header: EventHeaderJson {
-            timestamp,
-            auid: 0,
-            sessionid: 0,
-            pid: 0,
-            ppid: None,
-            comm: String::new(),
-            process_ref: None,
-            tid: None,
-            ns: None,
-        },
+        header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
             event_type: "HEARTBEAT".into(),
             name: "heartbeat".into(),
