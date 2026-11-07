@@ -1368,6 +1368,22 @@ pub const EXEC_VIEW_FIELDS: [(&str, &str); 14] = [
     ("mount", "mnt_id"),
 ];
 
+/// Additional fd traversal members. Identity endpoints reuse EXEC_VIEW_FIELDS[6..9].
+pub const FD_CHAIN_FIELDS: [(&str, &str); 5] = [
+    ("task_struct", "files"),
+    ("files_struct", "fdt"),
+    ("fdtable", "max_fds"),
+    ("fdtable", "fd"),
+    ("file", "f_inode"),
+];
+
+/// Ordered direct-member offsets for PTY slave classification.
+pub const TTY_FIELDS: [(&str, &str); 3] = [
+    ("tty_struct", "driver"),
+    ("tty_driver", "type"),
+    ("tty_driver", "subtype"),
+];
+
 // ── Namespace membership snapshot ────────────────────────────────────────────
 
 /// Header slots, in output order: mnt, net, uts, ipc, cgroup, user, pid.

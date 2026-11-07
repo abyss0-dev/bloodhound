@@ -54,8 +54,16 @@ pub fn load_and_attach(
     // Load BPF programs with global variables set BEFORE loading
     let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
     let view_supported = u32::from(offsets.exec_view.is_some());
+    let fd_offsets = offsets.fd_ident.unwrap_or([0; 8]);
+    let fd_supported = u32::from(offsets.fd_ident.is_some());
+    let tty_offsets = offsets.tty.unwrap_or([0; 3]);
+    let tty_supported = u32::from(offsets.tty.is_some());
     let mut bpf = EbpfLoader::new()
         .set_max_entries("EVENTS", args.ring_buffer_size)
+        .set_global("OFF_FD_IDENT", &fd_offsets, true)
+        .set_global("FD_IDENT_SUPPORTED", &fd_supported, true)
+        .set_global("OFF_TTY", &tty_offsets, true)
+        .set_global("TTY_SUPPORTED", &tty_supported, true)
         .set_global("OFF_EXEC_VIEW", &view_offsets, true)
         .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
         .set_global("OFF_NS", &offsets.namespaces.offsets, true)

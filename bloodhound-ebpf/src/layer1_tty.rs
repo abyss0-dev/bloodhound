@@ -12,7 +12,11 @@ use bloodhound_common::*;
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::emit_event;
 use crate::maps::{ASSEMBLY_BUF, SCRATCH_BUF};
-use crate::vmlinux::{tty_driver, tty_struct, PTY_TYPE_SLAVE, TTY_DRIVER_TYPE_PTY};
+use core::ffi::c_void;
+
+// Stable Linux TTY class values, not kernel layout offsets.
+const TTY_DRIVER_TYPE_PTY: i16 = 4;
+const PTY_TYPE_SLAVE: i16 = 2;
 
 // ── kprobe → kretprobe correlation map ───────────────────────────────────────
 
@@ -53,33 +57,30 @@ static TTY_READ_ENTRY_MAP: HashMap<u64, TtyReadEntry> =
 /// safe direction is to drop the event when the device class cannot be
 /// determined.
 #[inline(always)]
-unsafe fn is_pts_slave(tty: *const tty_struct) -> bool {
-    if tty.is_null() {
+unsafe fn is_pts_slave(tty: *const c_void) -> bool {
+    if tty.is_null() || core::ptr::read_volatile(&raw const crate::TTY_SUPPORTED) == 0 {
         return false;
     }
-    // Read tty->driver (a pointer to struct tty_driver).
-    let driver_ptr_ptr = core::ptr::addr_of!((*tty).driver);
-    let driver: *const tty_driver = match bpf_probe_read_kernel(driver_ptr_ptr) {
-        Ok(d) => d,
-        Err(_) => return false,
+    let offsets = core::ptr::addr_of!(crate::OFF_TTY).cast::<u32>();
+    let driver: usize = match bpf_probe_read_kernel(
+        (tty as usize + core::ptr::read_volatile(offsets) as usize) as *const usize,
+    ) {
+        Ok(driver) if driver != 0 => driver,
+        _ => return false,
     };
-    if driver.is_null() {
-        return false;
-    }
-
-    // Read driver->type and driver->subtype.
-    let type_ptr = core::ptr::addr_of!((*driver).r#type);
-    let drv_type: i16 = match bpf_probe_read_kernel(type_ptr) {
-        Ok(t) => t,
+    let drv_type: i16 = match bpf_probe_read_kernel(
+        (driver + core::ptr::read_volatile(offsets.add(1)) as usize) as *const i16,
+    ) {
+        Ok(value) => value,
         Err(_) => return false,
     };
     if drv_type != TTY_DRIVER_TYPE_PTY {
         return false;
     }
-
-    let subtype_ptr = core::ptr::addr_of!((*driver).subtype);
-    let drv_subtype: i16 = match bpf_probe_read_kernel(subtype_ptr) {
-        Ok(s) => s,
+    let drv_subtype: i16 = match bpf_probe_read_kernel(
+        (driver + core::ptr::read_volatile(offsets.add(2)) as usize) as *const i16,
+    ) {
+        Ok(value) => value,
         Err(_) => return false,
     };
     drv_subtype == PTY_TYPE_SLAVE
@@ -119,7 +120,7 @@ unsafe fn try_tty_write(ctx: &ProbeContext) -> Result<u32, i64> {
     }
 
     // pty_write: arg0=tty_struct*, arg1=buf*, arg2=count
-    let tty: *const tty_struct = ctx.arg(0).ok_or(-1i64)?;
+    let tty: *const c_void = ctx.arg(0).ok_or(-1i64)?;
     if !is_pts_slave(tty) {
         return Ok(0);
     }
@@ -191,7 +192,7 @@ unsafe fn try_tty_read_entry(ctx: &ProbeContext) -> Result<u32, i64> {
     }
 
     // n_tty_read: arg0=tty_struct*, arg1=file*, arg2=buf*, arg3=count
-    let tty: *const tty_struct = ctx.arg(0).ok_or(-1i64)?;
+    let tty: *const c_void = ctx.arg(0).ok_or(-1i64)?;
     if !is_pts_slave(tty) {
         return Ok(0);
     }
