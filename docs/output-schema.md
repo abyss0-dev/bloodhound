@@ -471,8 +471,7 @@ and once after kernel production stops during graceful shutdown. Their timestamp
 describe the userspace poll, not the missing operation, and do not identify
 affected actors or processes.
 
-Under the workspace contract (§2.4.3), Bloodhound owns the reason names for the
-`syscall` scope. The producer-owned reasons in `bloodhound_common::SYSCALL_FAILURE_REASONS`
+The reason names for the `syscall` scope in `bloodhound_common::SYSCALL_FAILURE_REASONS`
 are:
 - `entry_capture_failed`: Syscall entry context/argument read failure or per-CPU scratch buffer acquisition failure.
 - `entry_save_failed`: Map insertion failure when storing in-flight entry state in `RICH_ENTRY_MAP` or `PATH_ENTRY_MAP` (e.g., map capacity reached or `NO_PREALLOC` memory allocation failure).
@@ -482,11 +481,9 @@ are:
 
 In addition, the userspace monitor reports `counter_read_failed` with null counts
 (`failure_count_delta: null`, `failure_count_total: null`, never fabricated zeroes)
-when the kernel BPF counter map cannot be read. In downstream observer health mapping
-([observer-connection row 116](https://github.com/abyss0-dev/workspace/blob/99d751b90f8520a62c428d2012d018c6100a30ad/docs/spec/tracer/observer-connection.md#5-loss-accounting-and-health-mapping)),
-`counter_read_failed` takes explicit precedence over the `.collection` name-suffix rule
-(row 115): it transitions `CAPTURE` health to sticky `INDETERMINATE/COLLECTOR_FAILURE`,
-whereas ordinary `.collection` loss transitions to sticky `INDETERMINATE/EVENT_LOSS`.
+when the kernel BPF counter map cannot be read. See
+[observer-connection rows 115/116](https://github.com/abyss0-dev/workspace/blob/99d751b90f8520a62c428d2012d018c6100a30ad/docs/spec/tracer/observer-connection.md#5-loss-accounting-and-health-mapping)
+for consumer mapping.
 
 Invocations already in flight when tracing attaches have no recorded entry in the
 in-flight maps and are not counted as failures. Map removal of an unrecorded or
