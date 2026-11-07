@@ -352,7 +352,18 @@ fn attach_tracepoint_pair(
 fn attach_syscall_pair(bpf: &mut aya::Ebpf, name: &str, report: &mut AttachReport) -> Result<()> {
     let enter = format!("sys_enter_{name}");
     let exit = format!("sys_exit_{name}");
-    attach_tracepoint_pair(bpf, "syscalls", (&enter, &enter), (&exit, &exit), report)
+    // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
+    // so its kernel tracepoints are named umount, not umount2.
+    let tracepoint_name = if name == "umount2" { "umount" } else { name };
+    let enter_tp = format!("sys_enter_{tracepoint_name}");
+    let exit_tp = format!("sys_exit_{tracepoint_name}");
+    attach_tracepoint_pair(
+        bpf,
+        "syscalls",
+        (&enter, &enter_tp),
+        (&exit, &exit_tp),
+        report,
+    )
 }
 
 fn attach_tracepoint(
