@@ -2,8 +2,9 @@
 //! Offsets are resolved from the running kernel's BTF before program load.
 
 use aya_ebpf::helpers::{bpf_get_current_task, bpf_probe_read_kernel};
+use bloodhound_common::{DEV_VALID, INO_VALID};
 
-/// Partial `(device, inode)` observation: bit 0 validates dev, bit 1 ino.
+/// Partial `(device, inode)` observation using the shared validity flags.
 #[derive(Clone, Copy, Default)]
 pub struct DevIno {
     pub dev: u64,
@@ -55,7 +56,7 @@ pub unsafe fn fd_to_dev_ino(fd: i32) -> DevIno {
         Err(_) => return DevIno::default(),
     };
     let (ino, ino_valid) = match read::<u64>(inode, 5) {
-        Ok(value) => (value, 2),
+        Ok(value) => (value, INO_VALID),
         Err(_) => (0, 0),
     };
     let sb = match pointer(inode, 6) {
@@ -63,7 +64,7 @@ pub unsafe fn fd_to_dev_ino(fd: i32) -> DevIno {
         Err(_) => return DevIno { dev: 0, ino, valid: ino_valid },
     };
     let (dev, dev_valid) = match read::<u32>(sb, 7) {
-        Ok(value) => (value as u64, 1),
+        Ok(value) => (value as u64, DEV_VALID),
         Err(_) => (0, 0),
     };
     DevIno { dev, ino, valid: ino_valid | dev_valid }

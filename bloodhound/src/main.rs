@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     let (capture_shutdown_tx, capture_shutdown_rx) = tokio::sync::oneshot::channel();
     let capture_handle = tokio::spawn(capture_health::monitor(
         "openat",
-        &capture_health::OPENAT_REASONS,
+        &bloodhound_common::OPENAT_FAILURE_REASONS,
         capture_map,
         sequence_tx.clone(),
         capture_shutdown_rx,

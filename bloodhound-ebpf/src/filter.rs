@@ -2,7 +2,7 @@ use aya_ebpf::helpers::{
     bpf_get_current_comm, bpf_get_current_pid_tgid, bpf_get_current_task,
     bpf_ktime_get_ns, bpf_probe_read_kernel,
 };
-use bloodhound_common::{EventHeader, NsSnapshot, COMM_SIZE};
+use bloodhound_common::{EventHeader, HeaderCapture, NsSnapshot, COMM_SIZE};
 
 use crate::{
     DAEMON_PID, OFF_COMM, OFF_GROUP_LEADER, OFF_LOGINUID, OFF_PID, OFF_SESSIONID,
@@ -150,7 +150,7 @@ pub unsafe fn get_task_info(kind: u8) -> EventHeader {
 #[inline(always)]
 pub unsafe fn fill_task_info(kind: u8, header: &mut EventHeader) {
     header.kind = kind;
-    header._pad = [0; 3];
+    header.capture = HeaderCapture::default();
     header.timestamp_ns = bpf_ktime_get_ns();
     header.auid = get_current_auid();
     header.sessionid = get_current_sessionid();
@@ -175,7 +175,7 @@ pub unsafe fn get_task_info_from_task(kind: u8, task: *const u8) -> EventHeader 
     let process_ref = process_ref_from_task(task);
     let mut header = EventHeader {
         kind,
-        _pad: [0; 3],
+        capture: HeaderCapture::default(),
         timestamp_ns: bpf_ktime_get_ns(),
         auid: task_auid(task),
         sessionid: task_sessionid(task),

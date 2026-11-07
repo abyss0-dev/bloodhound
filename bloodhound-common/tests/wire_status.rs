@@ -19,12 +19,37 @@ fn capture_status_round_trips_every_wire_byte() {
 #[test]
 fn reason_tables_cover_the_map_indices() {
     for (reasons, indices) in [
-        (EXEC_FAILURE_REASONS.as_slice(), [EXEC_ENTRY_CAPTURE_FAILED, EXEC_ENTRY_SAVE_FAILED,
-            EXEC_EXIT_CAPTURE_FAILED, EXEC_INVOCATION_INTERRUPTED, EXEC_ENTRY_CLEANUP_FAILED].as_slice()),
-        (OPENAT_FAILURE_REASONS.as_slice(), [OPENAT_ENTRY_CAPTURE_FAILED, OPENAT_ENTRY_SAVE_FAILED,
-            OPENAT_ENTRY_CLEANUP_FAILED, OPENAT_INVOCATION_INTERRUPTED].as_slice()),
-        (EXIT_FAILURE_REASONS.as_slice(), [EXIT_CAPTURE_FAILED, EXIT_CLAIM_FAILED,
-            CLEANUP_CAPTURE_FAILED, CLEANUP_DELETE_FAILED].as_slice()),
+        (
+            EXEC_FAILURE_REASONS.as_slice(),
+            [
+                EXEC_ENTRY_CAPTURE_FAILED,
+                EXEC_ENTRY_SAVE_FAILED,
+                EXEC_EXIT_CAPTURE_FAILED,
+                EXEC_INVOCATION_INTERRUPTED,
+                EXEC_ENTRY_CLEANUP_FAILED,
+            ]
+            .as_slice(),
+        ),
+        (
+            OPENAT_FAILURE_REASONS.as_slice(),
+            [
+                OPENAT_ENTRY_CAPTURE_FAILED,
+                OPENAT_ENTRY_SAVE_FAILED,
+                OPENAT_EXIT_CAPTURE_FAILED,
+                OPENAT_INVOCATION_INTERRUPTED,
+            ]
+            .as_slice(),
+        ),
+        (
+            EXIT_FAILURE_REASONS.as_slice(),
+            [
+                EXIT_CAPTURE_FAILED,
+                EXIT_CLAIM_FAILED,
+                CLEANUP_CAPTURE_FAILED,
+                CLEANUP_DELETE_FAILED,
+            ]
+            .as_slice(),
+        ),
     ] {
         assert_eq!(reasons.len(), indices.len());
         for (index, &code) in indices.iter().enumerate() {

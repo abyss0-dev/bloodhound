@@ -1,5 +1,5 @@
 use aya_ebpf::helpers::{bpf_get_current_task, bpf_probe_read_kernel};
-use bloodhound_common::{EventHeader, EventKind, ExecViewPayload};
+use bloodhound_common::{EventHeader, EventKind, ExecViewPayload, HeaderCapture};
 
 enum CaptureError {
     Read,
@@ -68,7 +68,7 @@ unsafe fn capture() -> Result<ExecViewPayload, CaptureError> {
 pub unsafe fn emit(exec_header: &EventHeader) {
     let mut header = *exec_header;
     header.kind = EventKind::ExecView as u8;
-    header._pad = [0; 3];
+    header.capture = HeaderCapture::default();
     let payload = if core::ptr::read_volatile(&raw const crate::EXEC_VIEW_SUPPORTED) == 0 {
         ExecViewPayload {
             version: 1,

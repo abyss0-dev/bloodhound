@@ -1,6 +1,10 @@
 //! Internal map contract, not a wire event. Never evict a live exit claim.
 
 pub const EXIT_CLAIM_CAPACITY: u32 = 10240;
+pub const EXIT_CAPTURE_FAILED: u32 = 0;
+pub const EXIT_CLAIM_FAILED: u32 = 1;
+pub const CLEANUP_CAPTURE_FAILED: u32 = 2;
+pub const CLEANUP_DELETE_FAILED: u32 = 3;
 pub const EXIT_FAILURE_REASONS: [&str; 4] = [
     "exit_capture_failed",
     "exit_claim_failed",

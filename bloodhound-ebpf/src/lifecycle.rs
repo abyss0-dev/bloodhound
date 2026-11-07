@@ -11,6 +11,9 @@ use aya_ebpf::{
     bindings::BPF_NOEXIST, helpers::bpf_probe_read_kernel, macros::raw_tracepoint,
     programs::RawTracePointContext,
 };
+use bloodhound_common::exit_claim::{
+    CLEANUP_CAPTURE_FAILED, CLEANUP_DELETE_FAILED, EXIT_CAPTURE_FAILED, EXIT_CLAIM_FAILED,
+};
 use bloodhound_common::{
     select_process_exit_status, EventKind, ProcessExitPayload, ProcessForkPayload,
 };
@@ -89,7 +92,7 @@ pub fn sched_process_exit(ctx: RawTracePointContext) -> u32 {
         Ok(()) => 0,
         Err(_) => {
             unsafe {
-                exit_failure(0);
+                exit_failure(EXIT_CAPTURE_FAILED);
             }
             0
         }
@@ -102,7 +105,7 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
     // reuse cannot inherit the pending invocation and the map stays bounded.
     let tid = aya_ebpf::helpers::bpf_get_current_pid_tgid();
     if crate::maps::OPENAT_ENTRY_MAP.get(&tid).is_some() {
-        crate::maps::openat_failure(3);
+        crate::maps::openat_failure(bloodhound_common::OPENAT_INVOCATION_INTERRUPTED);
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
     }
     // Entry/exit tracepoints attach separately: an invocation can be saved
@@ -165,7 +168,7 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         ClaimOutcome::Emit => {}
         ClaimOutcome::Duplicate => return Ok(()),
         ClaimOutcome::Failed => {
-            exit_failure(1);
+            exit_failure(EXIT_CLAIM_FAILED);
             return Ok(());
         }
     }
@@ -178,7 +181,7 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
 pub fn sched_process_free(ctx: RawTracePointContext) -> u32 {
     if unsafe { try_process_free(&ctx) }.is_err() {
         unsafe {
-            exit_failure(2);
+            exit_failure(CLEANUP_CAPTURE_FAILED);
         }
     }
     0
@@ -206,7 +209,7 @@ unsafe fn try_process_free(ctx: &RawTracePointContext) -> Result<(), i64> {
     // the old leader trades PIDs with the execing worker and fails pid==tgid.
     // The new leader inherits start_boottime and later removes its own claim.
     if cleanup_failed(EXIT_CLAIMS.remove(&key)) {
-        exit_failure(3);
+        exit_failure(CLEANUP_DELETE_FAILED);
     }
     Ok(())
 }

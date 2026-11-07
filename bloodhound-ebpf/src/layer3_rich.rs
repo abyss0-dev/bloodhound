@@ -77,7 +77,7 @@ unsafe fn emit_varlen<T: Sized>(header: &EventHeader, payload: &T, var_data: &[u
 pub fn sys_enter_openat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_enter_openat(&ctx) } {
         Ok(_) => 0,
-        Err(_) => { unsafe { crate::maps::openat_failure(0); } 0 },
+        Err(_) => { unsafe { crate::maps::openat_failure(OPENAT_ENTRY_CAPTURE_FAILED); } 0 },
     }
 }
 
@@ -106,13 +106,13 @@ unsafe fn try_sys_enter_openat(ctx: &TracePointContext) -> Result<u32, i64> {
         filename_ptr as *const u8, &mut entry.filename,
     ) {
         Ok(s) => {
-            if s.len() < MAX_PATH_SIZE - 1 { entry.capture_flags = 4; }
+            if s.len() < MAX_PATH_SIZE - 1 { entry.capture_flags = PATH_COMPLETE; }
             s.len() as u16
         }
-        Err(_) => { entry.capture_flags = 8; 0 },
+        Err(_) => { entry.capture_flags = PATH_READ_FAILED; 0 },
     };
     if OPENAT_ENTRY_MAP.insert(&pid_tgid, entry, 0).is_err() {
-        crate::maps::openat_failure(1);
+        crate::maps::openat_failure(OPENAT_ENTRY_SAVE_FAILED);
     }
     Ok(0)
 }
@@ -122,7 +122,7 @@ pub fn sys_exit_openat(ctx: TracePointContext) -> u32 {
     match unsafe { try_sys_exit_openat(&ctx) } {
         Ok(_) => 0,
         Err(_) => { unsafe {
-            crate::maps::openat_failure(2);
+            crate::maps::openat_failure(OPENAT_EXIT_CAPTURE_FAILED);
             let _ = OPENAT_ENTRY_MAP.remove(&bpf_get_current_pid_tgid());
         } 0 },
     }

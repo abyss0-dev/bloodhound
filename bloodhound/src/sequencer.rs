@@ -129,7 +129,7 @@ mod tests {
     fn raw_syscall_for_process(timestamp: u64, syscall_nr: u64, pid: u32, ppid: u32) -> Vec<u8> {
         let header = EventHeader {
             kind: EventKind::RawSyscall as u8,
-            _pad: [0; 3],
+            capture: bloodhound_common::HeaderCapture::default(),
             timestamp_ns: timestamp,
             auid: 1000,
             sessionid: 7,

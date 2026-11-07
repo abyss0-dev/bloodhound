@@ -7,10 +7,8 @@ pub mod exit_claim;
 pub const MAX_ARGV_SIZE: usize = 4096;
 pub const MAX_PATH_SIZE: usize = 4096;
 pub const MAX_TTY_DATA: usize = 4096;
-pub const MAX_PACKET_SIZE: usize = 4096;
 pub const RING_BUFFER_DEFAULT: u32 = 4 * 1024 * 1024; // 4 MB
 pub const COMM_SIZE: usize = 16;
-pub const MAX_ARGV_COUNT: usize = 128;
 pub const SYSCALL_ENTRY_MAP_SIZE: u32 = 10240;
 pub const SOCKET_TABLE_SIZE: u32 = 4096;
 
@@ -28,6 +26,55 @@ pub const EXEC_FAILURE_REASONS: [&str; 5] = [
     "invocation_interrupted",
     "entry_cleanup_failed",
 ];
+
+pub const OPENAT_ENTRY_CAPTURE_FAILED: u32 = 0;
+pub const OPENAT_ENTRY_SAVE_FAILED: u32 = 1;
+pub const OPENAT_EXIT_CAPTURE_FAILED: u32 = 2;
+pub const OPENAT_INVOCATION_INTERRUPTED: u32 = 3;
+pub const OPENAT_FAILURE_REASONS: [&str; 4] = [
+    "entry_capture_failed",
+    "entry_save_failed",
+    "exit_capture_failed",
+    "invocation_interrupted",
+];
+
+pub const DEV_VALID: u8 = 1;
+pub const INO_VALID: u8 = 2;
+pub const PATH_COMPLETE: u8 = 4;
+pub const PATH_READ_FAILED: u8 = 8;
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureStatus {
+    Complete = 1,
+    Truncated = 2,
+    ReadError = 3,
+}
+
+impl TryFrom<u8> for CaptureStatus {
+    type Error = ();
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Complete),
+            2 => Ok(Self::Truncated),
+            3 => Ok(Self::ReadError),
+            _ => Err(()),
+        }
+    }
+}
+
+/// Exec version 1 uses primary for argv and secondary for filename status.
+/// Other event kinds leave these bytes zero; legacy exec capture is unknown.
+/// Raw bytes allow legacy versions and untrusted wire values to be validated
+/// before conversion to `CaptureStatus`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default)]
+pub struct HeaderCapture {
+    pub version: u8,
+    pub primary: u8,
+    pub secondary: u8,
+}
 
 // ── EventKind ────────────────────────────────────────────────────────────────
 
@@ -205,10 +252,7 @@ impl EventKind {
 #[derive(Clone, Copy, Debug)]
 pub struct EventHeader {
     pub kind: u8,
-    /// Execve/Execveat only: [capture version, argv status, filename status].
-    /// Version 1 statuses: 1 complete, 2 truncated, 3 read error. Other kinds
-    /// retain zero padding; old exec producers have unknown completeness.
-    pub _pad: [u8; 3],
+    pub capture: HeaderCapture,
     pub timestamp_ns: u64,
     pub auid: u32,
     pub sessionid: u32,
@@ -1202,7 +1246,7 @@ mod tests {
 
     #[test]
     fn event_header_size_is_stable() {
-        // repr(C) layout: kind(1) + _pad(3) + 4 bytes alignment padding
+        // repr(C) layout: kind(1) + capture(3) + 4 bytes alignment padding
         // + timestamp_ns(8) + auid(4) + sessionid(4)
         // + pid(4) + ppid(4) + process_start_boottime_ns(8)
         // + comm(16) + tid(4) + ns(36) = 96
