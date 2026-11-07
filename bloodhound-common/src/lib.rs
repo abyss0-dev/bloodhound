@@ -988,22 +988,298 @@ pub const MAP_ANONYMOUS: u32 = 0x20;
 /// `dup3` `flags` bit setting `FD_CLOEXEC` on the new fd.
 pub const O_CLOEXEC: u32 = 0o2000000;
 
-pub const TIER2_SYSCALLS: &[u64] = &[
-    NR_EXECVE, NR_EXECVEAT, NR_OPENAT, NR_READ, NR_WRITE, NR_CONNECT,
-    NR_BIND, NR_LISTEN, NR_SOCKET, NR_CLONE, NR_CLONE3, NR_CHDIR, NR_FCHDIR,
-    NR_UNLINK, NR_UNLINKAT, NR_RENAME, NR_RENAMEAT2, NR_MKDIR, NR_MKDIRAT,
-    NR_RMDIR, NR_SYMLINK, NR_SYMLINKAT, NR_LINK, NR_LINKAT, NR_CHMOD,
-    NR_FCHMOD, NR_FCHMODAT, NR_CHOWN, NR_FCHOWN, NR_FCHOWNAT,
-    NR_TRUNCATE, NR_FTRUNCATE, NR_MOUNT, NR_UMOUNT2, NR_SENDTO, NR_RECVFROM,
-    NR_DUP, NR_DUP2, NR_DUP3,
-    NR_PREAD64, NR_PWRITE64, NR_READV, NR_WRITEV, NR_MMAP,
-    // NR_FCNTL is intentionally omitted: rich extraction only fires for the
-    // F_DUPFD command family (see `try_enter_fcntl` in `layer3_rich.rs`).
-    // All other fcntl commands must remain visible via Tier 1 raw capture.
-    //
-    // NR_SENDFILE, NR_SPLICE are also intentionally omitted: they are opt-in
-    // via `--enable-rich-sendfile` and added to the bitmap at runtime only
-    // when the flag is set (see bloodhound::loader).
+/// Whether a rich collector replaces raw capture for the whole syscall.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Dedup {
+    Dedup,
+    NoDedup,
+    OptIn,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Tier2 {
+    pub name: &'static str,
+    pub tracepoint: &'static str,
+    pub nr: u64,
+    pub dedup: Dedup,
+}
+
+/// Layer-3 rich syscall attachment and raw-dedup policy (x86_64).
+pub const TIER2: &[Tier2] = &[
+    Tier2 {
+        name: "openat",
+        tracepoint: "openat",
+        nr: NR_OPENAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "read",
+        tracepoint: "read",
+        nr: NR_READ,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "write",
+        tracepoint: "write",
+        nr: NR_WRITE,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "connect",
+        tracepoint: "connect",
+        nr: NR_CONNECT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "bind",
+        tracepoint: "bind",
+        nr: NR_BIND,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "listen",
+        tracepoint: "listen",
+        nr: NR_LISTEN,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "socket",
+        tracepoint: "socket",
+        nr: NR_SOCKET,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "clone",
+        tracepoint: "clone",
+        nr: NR_CLONE,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "clone3",
+        tracepoint: "clone3",
+        nr: NR_CLONE3,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "chdir",
+        tracepoint: "chdir",
+        nr: NR_CHDIR,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "fchdir",
+        tracepoint: "fchdir",
+        nr: NR_FCHDIR,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "unlink",
+        tracepoint: "unlink",
+        nr: NR_UNLINK,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "unlinkat",
+        tracepoint: "unlinkat",
+        nr: NR_UNLINKAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "rename",
+        tracepoint: "rename",
+        nr: NR_RENAME,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "renameat2",
+        tracepoint: "renameat2",
+        nr: NR_RENAMEAT2,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "mkdir",
+        tracepoint: "mkdir",
+        nr: NR_MKDIR,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "mkdirat",
+        tracepoint: "mkdirat",
+        nr: NR_MKDIRAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "rmdir",
+        tracepoint: "rmdir",
+        nr: NR_RMDIR,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "symlink",
+        tracepoint: "symlink",
+        nr: NR_SYMLINK,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "symlinkat",
+        tracepoint: "symlinkat",
+        nr: NR_SYMLINKAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "link",
+        tracepoint: "link",
+        nr: NR_LINK,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "linkat",
+        tracepoint: "linkat",
+        nr: NR_LINKAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "chmod",
+        tracepoint: "chmod",
+        nr: NR_CHMOD,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "fchmod",
+        tracepoint: "fchmod",
+        nr: NR_FCHMOD,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "fchmodat",
+        tracepoint: "fchmodat",
+        nr: NR_FCHMODAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "chown",
+        tracepoint: "chown",
+        nr: NR_CHOWN,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "fchown",
+        tracepoint: "fchown",
+        nr: NR_FCHOWN,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "fchownat",
+        tracepoint: "fchownat",
+        nr: NR_FCHOWNAT,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "truncate",
+        tracepoint: "truncate",
+        nr: NR_TRUNCATE,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "ftruncate",
+        tracepoint: "ftruncate",
+        nr: NR_FTRUNCATE,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "mount",
+        tracepoint: "mount",
+        nr: NR_MOUNT,
+        dedup: Dedup::Dedup,
+    },
+    // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
+    // so its kernel tracepoints are named umount, not umount2.
+    Tier2 {
+        name: "umount2",
+        tracepoint: "umount",
+        nr: NR_UMOUNT2,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "sendto",
+        tracepoint: "sendto",
+        nr: NR_SENDTO,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "recvfrom",
+        tracepoint: "recvfrom",
+        nr: NR_RECVFROM,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "dup",
+        tracepoint: "dup",
+        nr: NR_DUP,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "dup2",
+        tracepoint: "dup2",
+        nr: NR_DUP2,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "dup3",
+        tracepoint: "dup3",
+        nr: NR_DUP3,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "pread64",
+        tracepoint: "pread64",
+        nr: NR_PREAD64,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "pwrite64",
+        tracepoint: "pwrite64",
+        nr: NR_PWRITE64,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "readv",
+        tracepoint: "readv",
+        nr: NR_READV,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "writev",
+        tracepoint: "writev",
+        nr: NR_WRITEV,
+        dedup: Dedup::Dedup,
+    },
+    Tier2 {
+        name: "mmap",
+        tracepoint: "mmap",
+        nr: NR_MMAP,
+        dedup: Dedup::Dedup,
+    },
+    // Rich fcntl only captures F_DUPFD/F_DUPFD_CLOEXEC; other commands need raw capture.
+    Tier2 {
+        name: "fcntl",
+        tracepoint: "fcntl",
+        nr: NR_FCNTL,
+        dedup: Dedup::NoDedup,
+    },
+    // Disabled by default (issue #9); raw capture remains until explicitly enabled.
+    Tier2 {
+        name: "sendfile",
+        tracepoint: "sendfile",
+        nr: NR_SENDFILE,
+        dedup: Dedup::OptIn,
+    },
+    Tier2 {
+        name: "splice",
+        tracepoint: "splice",
+        nr: NR_SPLICE,
+        dedup: Dedup::OptIn,
+    },
 ];
 
 // Bitmap size: 512 entries covers all syscalls on x86_64 (max ~450)
@@ -1011,7 +1287,6 @@ pub const BITMAP_SIZE: usize = 512;
 
 #[cfg(test)]
 mod tests {
-    extern crate std;
     use super::*;
     use core::mem;
 
@@ -1187,7 +1462,7 @@ mod tests {
     fn excluded_and_tier2_are_disjoint() {
         for nr in EXCLUDED_SYSCALLS {
             assert!(
-                !TIER2_SYSCALLS.contains(nr),
+                !TIER2.iter().any(|syscall| syscall.nr == *nr),
                 "Syscall NR {} is in both EXCLUDED and TIER2",
                 nr,
             );
@@ -1197,9 +1472,14 @@ mod tests {
     /// All referenced syscall NRs must fit within the bitmap.
     #[test]
     fn all_syscall_nrs_fit_in_bitmap() {
-        for nr in EXCLUDED_SYSCALLS.iter().chain(TIER2_SYSCALLS.iter()) {
+        for nr in EXCLUDED_SYSCALLS
+            .iter()
+            .copied()
+            .chain(TIER2.iter().map(|syscall| syscall.nr))
+            .chain([NR_EXECVE, NR_EXECVEAT])
+        {
             assert!(
-                (*nr as usize) < BITMAP_SIZE,
+                (nr as usize) < BITMAP_SIZE,
                 "Syscall NR {} exceeds BITMAP_SIZE {}",
                 nr,
                 BITMAP_SIZE,
@@ -1209,26 +1489,31 @@ mod tests {
 
     #[test]
     fn tier2_numbers_are_unique_and_leave_tier1_only_calls_visible() {
-        for (i, nr) in TIER2_SYSCALLS.iter().enumerate() {
-            assert!(!TIER2_SYSCALLS[..i].contains(nr));
-            assert!(![NR_EXIT_GROUP, 3, 60].contains(nr)); // close, exit
+        for (i, syscall) in TIER2.iter().enumerate() {
+            assert!(!TIER2[..i]
+                .iter()
+                .any(|other| other.nr == syscall.nr || other.name == syscall.name));
+            assert!(![NR_EXIT_GROUP, 3, 60, NR_EXECVE, NR_EXECVEAT].contains(&syscall.nr));
+            // close, exit and Layer 2
+        }
+        for nr in [NR_EXECVE, NR_EXECVEAT] {
+            assert!(!EXCLUDED_SYSCALLS.contains(&nr));
         }
     }
 
-    // Migration oracle: freeze the pre-refactor loader attach set before moving it.
+    // The full pre-migration attach-set oracle is preserved in the test-first
+    // commit; retain only semantic edge cases, not a second maintained list.
     #[test]
-    fn previous_loader_attach_set() {
-        let loader = include_str!("../../bloodhound/src/loader.rs");
-        let list = loader.split("let tier2_syscalls:").nth(1).unwrap();
-        let list = list.split("];" ).next().unwrap();
-        let actual: std::collections::BTreeSet<_> = list.lines()
-            .filter_map(|line| line.trim().strip_prefix("(\""))
-            .map(|line| line.split('"').next().unwrap()).collect();
-        let expected: std::collections::BTreeSet<_> = "openat read write connect bind listen socket clone clone3 chdir fchdir unlink unlinkat rename renameat2 mkdir mkdirat rmdir symlink symlinkat link linkat chmod fchmod fchmodat chown fchown fchownat truncate ftruncate mount umount2 sendto recvfrom dup dup2 dup3 pread64 pwrite64 readv writev mmap".split_whitespace().collect();
-        assert_eq!(actual, expected);
-        for name in ["fcntl", "sendfile", "splice"] {
-            assert!(loader.contains(&std::format!("\"tier2.{name}\"")));
-        }
+    fn tier2_special_tracepoint_and_partial_capture_policies() {
+        let umount = TIER2
+            .iter()
+            .find(|syscall| syscall.nr == NR_UMOUNT2)
+            .unwrap();
+        assert_eq!((umount.name, umount.tracepoint), ("umount2", "umount"));
+        let policy = |nr| TIER2.iter().find(|syscall| syscall.nr == nr).unwrap().dedup;
+        assert_eq!(policy(NR_FCNTL), Dedup::NoDedup);
+        assert_eq!(policy(NR_SENDFILE), Dedup::OptIn);
+        assert_eq!(policy(NR_SPLICE), Dedup::OptIn);
     }
 
     /// Spot-check a few well-known x86_64 syscall numbers.
