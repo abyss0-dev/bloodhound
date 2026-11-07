@@ -37,4 +37,33 @@ GitHub 上の設定を適用する場合は、リポジトリのルートで次�
 
 ## Project commands
 
-テンプレートから生成したリポジトリは、実装を追加するときに Setup、Build、Test、Check の正規コマンドをこの節へ記録してください。
+ビルドと E2E は Linux または WSL2 を前提とします。
+eBPF の読み込みに必要なカーネル機能（`CONFIG_AUDIT`、BTF）と KVM が macOS にはないためです。
+CI が実行するコマンドの正は `.github/workflows/` です。この節と食い違う場合は workflow に合わせて更新してください。
+
+Setup は次の通りです。
+
+```sh
+mise install
+```
+
+Build は Docker 上で静的 musl バイナリを作ります。
+
+```sh
+make build-docker
+```
+
+Test はビルド用イメージ内で workspace のテストを実行します。
+
+```sh
+docker build --target build -t bloodhound-workspace-test -f Dockerfile.build .
+docker run --rm bloodhound-workspace-test cargo test --workspace --locked --target x86_64-unknown-linux-musl
+```
+
+E2E は QEMU/KVM 上の VM を使います。手順は `e2e/` と `README.md` に従ってください。
+
+Check は次の通りです。
+
+```sh
+mise run actions:check
+```
