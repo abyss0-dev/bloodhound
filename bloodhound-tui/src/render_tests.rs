@@ -8,9 +8,8 @@
 //! correlator filtering, dedup) can't see that class of bug because they
 //! don't exercise `ui::draw`.
 //!
-//! Test fixtures live in `bloodhound-tui/testdata/` and are shared with the
-//! daemon's e2e suite. When fixtures are regenerated (daemon output shape
-//! changes), snapshots here need `cargo insta review`.
+//! Keep `bloodhound-tui/testdata/` inputs deterministic so rendering regressions
+//! can be distinguished from changes in live daemon observations.
 
 use std::path::PathBuf;
 

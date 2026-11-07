@@ -85,9 +85,10 @@ pub unsafe fn increment_drop_count() {
 ///
 /// # BPF Verifier Constraint
 ///
-/// Use this for any copy > ~64 bytes or any variable-length copy between map values.
-/// Small fixed-size copies (e.g., `size_of::<EventHeader>()` = 48 bytes) can still
-/// use `copy_nonoverlapping` safely.
+/// Prefer this helper for large or variable-length copies between map values
+/// to avoid verifier instruction growth. Reassess fixed-size copies against
+/// `EventHeader::SIZE` when the header layout changes rather than assuming
+/// LLVM's unrolled copy remains small.
 #[inline(always)]
 pub unsafe fn bpf_memcpy(dst: *mut u8, src: *const u8, len: u32) -> bool {
     if len == 0 { return true; }

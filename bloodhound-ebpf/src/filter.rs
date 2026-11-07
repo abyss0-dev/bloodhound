@@ -156,7 +156,8 @@ pub unsafe fn fill_task_info(kind: u8, header: &mut EventHeader) {
     header.sessionid = get_current_sessionid();
     let pid_tgid = bpf_get_current_pid_tgid();
     header.pid = (pid_tgid >> 32) as u32;
-    // ppid is populated in userspace from /proc
+    // Leave lineage unknown rather than infer it from a later /proc snapshot,
+    // which may describe a reparented task or a reused PID.
     header.ppid = 0;
     header.process_start_boottime_ns = process_ref_from_task(bpf_get_current_task() as *const u8)
         .map(|process_ref| process_ref.start_boottime_ns)
