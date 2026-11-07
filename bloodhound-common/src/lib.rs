@@ -923,6 +923,11 @@ pub const EXCLUDED_SYSCALLS: &[u64] = &[
 // Tier 2 syscall numbers (x86_64) for dedup bitmap
 pub const NR_EXECVE: u64 = 59;
 pub const NR_EXECVEAT: u64 = 322;
+
+/// Layer-2 collectors whose complete attachment can suppress raw syscalls.
+// Why only execve: ExecvePayload omits execveat's dirfd and flags. Raw 322
+// must remain visible to identify fd-based exec (empty filename + AT_EMPTY_PATH).
+pub const EXEC_DEDUP: &[(u64, &str)] = &[(NR_EXECVE, "exec.execve")];
 pub const NR_OPENAT: u64 = 257;
 pub const NR_READ: u64 = 0;
 pub const NR_WRITE: u64 = 1;
@@ -1478,7 +1483,7 @@ mod tests {
             .iter()
             .copied()
             .chain(TIER2.iter().map(|syscall| syscall.nr))
-            .chain([NR_EXECVE, NR_EXECVEAT])
+            .chain(EXEC_DEDUP.iter().map(|(nr, _)| *nr))
         {
             assert!(
                 (nr as usize) < BITMAP_SIZE,

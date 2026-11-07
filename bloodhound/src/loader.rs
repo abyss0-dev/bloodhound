@@ -127,7 +127,13 @@ pub fn load_and_attach(
     required(&mut report, "exec.execve", |report| {
         attach_syscall_pair(&mut bpf, "execve", "execve", report)
     })?;
-    try_attach_syscall_pair(&mut bpf, "execveat", "execveat", "exec.execveat", &mut report);
+    try_attach_syscall_pair(
+        &mut bpf,
+        "execveat",
+        "execveat",
+        "exec.execveat",
+        &mut report,
+    );
 
     info!("Attaching Layer 3 Tier 1: raw syscalls...");
     required(&mut report, "raw_syscalls", |report| {
@@ -243,8 +249,9 @@ fn dedup_syscalls(report: &AttachReport) -> Vec<u32> {
         .filter(|syscall| report.keys.get(&format!("tier2.{}", syscall.name)) == Some(&true))
         .map(|syscall| syscall.nr)
         .chain(
-            [(NR_EXECVE, "exec.execve"), (NR_EXECVEAT, "exec.execveat")]
-                .into_iter()
+            EXEC_DEDUP
+                .iter()
+                .copied()
                 .filter(|(_, key)| report.keys.get(*key) == Some(&true))
                 .map(|(nr, _)| nr),
         )
@@ -455,7 +462,7 @@ mod tests {
             }
             let numbers = dedup_syscalls(&report);
             assert_eq!(numbers.contains(&(NR_EXECVE as u32)), complete);
-            assert_eq!(numbers.contains(&(NR_EXECVEAT as u32)), complete);
+            assert!(!numbers.contains(&(NR_EXECVEAT as u32)));
         }
         for syscall in TIER2 {
             let key = format!("tier2.{}", syscall.name);
