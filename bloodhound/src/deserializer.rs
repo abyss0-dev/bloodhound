@@ -332,7 +332,12 @@ fn parse_tty(payload: &[u8], name: &str, capture: HeaderCapture) -> Result<(Stri
                 bail!("TTY capture length does not match bounded record");
             }
             match CaptureStatus::try_from(capture.primary).ok().context("invalid TTY capture status")? {
-                CaptureStatus::Complete => "complete",
+                CaptureStatus::Complete => {
+                    if declared_len == 0 {
+                        bail!("Complete TTY capture must be nonempty");
+                    }
+                    "complete"
+                }
                 CaptureStatus::Truncated => {
                     if declared_len != MAX_TTY_DATA - 1 {
                         bail!("Truncated TTY capture must contain the bounded prefix");
@@ -2264,6 +2269,7 @@ mod tests {
     fn tty_capture_v1_rejects_invalid_lengths() {
         for kind in [EventKind::TtyRead, EventKind::TtyWrite] {
             for (status, declared_len, bytes) in [
+                (CaptureStatus::Complete, 0, vec![]),
                 (CaptureStatus::Complete, 2, vec![b'x']),
                 (CaptureStatus::Complete, 1, vec![b'x'; 2]),
                 (CaptureStatus::Complete, MAX_TTY_DATA, vec![b'x'; MAX_TTY_DATA]),
@@ -2286,7 +2292,6 @@ mod tests {
     #[test]
     fn tty_capture_complete_at_bound_is_not_inferred_truncated() {
         assert_tty_capture_status(1, CaptureStatus::Complete as u8, "complete", &vec![0xff; MAX_TTY_DATA - 1]);
-        assert_tty_capture_status(1, CaptureStatus::Complete as u8, "complete", b"");
     }
 
     #[test]
