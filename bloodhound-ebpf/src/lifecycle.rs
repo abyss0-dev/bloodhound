@@ -109,7 +109,10 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
         let _ = crate::maps::OPENAT_ENTRY_MAP.remove(&tid);
     }
     // Reclaim only recorded invocations: an invocation already in flight at
-    // attach has no entry and must not be reported as interrupted.
+    // attach has no entry and must not be reported as interrupted. Ordinary
+    // fatal-signal delivery is not a skipped syscall exit: Linux 6.8
+    // kernel/entry/common.c traces sys_exit before return-to-user signal
+    // handling, so those entries have already been removed here.
     if crate::maps::PATH_ENTRY_MAP.get(&tid).is_some() {
         crate::maps::syscall_failure(bloodhound_common::SYSCALL_INVOCATION_INTERRUPTED);
         crate::maps::syscall_cleanup(crate::maps::PATH_ENTRY_MAP.remove(&tid));
