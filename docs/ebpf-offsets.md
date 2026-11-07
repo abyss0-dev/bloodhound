@@ -1,79 +1,134 @@
-# eBPF `task_struct` Field Access
+# eBPF Kernel Struct Offset Resolution
 
-Bloodhound resolves the kernel fields needed both to filter events and to
-identify a process instance: `task_struct::{loginuid,sessionid,pid,tgid,
-group_leader,start_boottime,signal,exit_code,comm}` and
-`signal_struct::{live,group_exit_code}`.
+Bloodhound resolves all kernel struct member offsets needed for event
+filtering, process instance identity, namespace membership, mount/exec views
+(`exec_view`), file-descriptor identity (`fd_ident`), and TTY classification
+at daemon startup from the running kernel's BTF (`/sys/kernel/btf/vmlinux`).
 
-## How It Works: runtime BTF offset resolution ("manual CO-RE")
+## How It Works: Runtime BTF Offset Resolution
 
-The byte offset of each field is resolved **at daemon start** from the
-running kernel's own BTF, then injected into the eBPF programs as global
-constants before load. This makes the daemon portable to any BTF-bearing
-kernel without recompilation. See issue #37 for the failure this replaces.
+The byte offset of each member is resolved at daemon start from the running
+kernel's own BTF, then injected into eBPF programs as global variables before
+load. This makes the daemon portable to any BTF-bearing kernel without
+recompilation or hard-coded kernel layout headers.
 
 The pieces:
 
-- **Userspace** (`bloodhound::btf_offsets`): a minimal BTF reader parses
-  `/sys/kernel/btf/vmlinux`, finds `task_struct` and `signal_struct`, and
-  returns all required member offsets.
-- **Injection** (`bloodhound::loader`): the resolved offsets are passed
-  via `EbpfLoader::set_global` into the corresponding `OFF_*` globals.
-- **eBPF** (`filter.rs`, `lsm_hooks.rs`): each field is read as
-  `bpf_probe_read_kernel((task_base + offset))`. A variable offset is
-  accepted by the verifier, unlike a typed deref that bakes a fixed
-  compile-time offset.
+- **Userspace resolver** (`bloodhound::btf_offsets`): A single BTF reader
+  parses `/sys/kernel/btf/vmlinux` and resolves all required member offsets:
+  - *Process lifecycle and filtering*: `task_struct::{loginuid, sessionid, pid,
+    tgid, group_leader, start_boottime, signal, exit_code, comm}` and
+    `signal_struct::{live, group_exit_code}`.
+  - *Namespace membership*: `task_struct::nsproxy` and namespace hierarchy
+    offsets (`uts_ns`, `ipc_ns`, `mnt_ns`, `pid_ns_for_children`, `net_ns`,
+    `cgroup_ns`, `pid.numbers`, `upid.ns`).
+  - *Exec mount views* (`exec_view`): 14 member offsets across `fs_struct`,
+    `path`, `dentry`, and `mount`.
+  - *File-descriptor identity* (`fd_ident`): 5 traversal offsets
+    (`task_struct.files`, `files_struct.fdt`, `fdtable.max_fds`, `fdtable.fd`,
+    `file.f_inode`) plus 3 shared inode/superblock endpoints (`inode.i_ino`,
+    `inode.i_sb`, `super_block.s_dev`). Shared endpoints are resolved once and
+    reused independently of `exec_view` support.
+  - *TTY device classification* (`tty`): 3 direct offsets
+    (`tty_struct.driver`, `tty_driver.type`, `tty_driver.subtype`).
+- **Loader injection** (`bloodhound::loader`): The resolved offsets and feature
+  support flags are passed via `EbpfLoader::set_global` into corresponding
+  global variables (`OFF_FD_IDENT`, `FD_IDENT_SUPPORTED`, `OFF_TTY`,
+  `TTY_SUPPORTED`, `OFF_EXEC_VIEW`, `EXEC_VIEW_SUPPORTED`, `OFF_NS`).
+- **eBPF in-kernel reads** (`filter.rs`, `fd_ident.rs`, `layer1_tty.rs`,
+  `lsm_hooks.rs`): Fields are read dynamically with `bpf_probe_read_kernel`
+  using base pointer plus injected offset. No compile-time layout bindings or
+  hard-coded struct offsets exist in the eBPF programs.
 
-The daemon logs the resolved offsets at startup. If BTF is unavailable or
-any required field is missing, startup fails closed. Guessing an identity
-offset could merge unrelated processes after PID reuse.
+## Fail-Closed Behavior and Degraded Observations
 
-## Why not typed `vmlinux.rs` struct access?
+Different subsystems enforce distinct degradation semantics when BTF members
+are absent:
 
-The previous approach (issue #1) defined a typed `task_struct` in
-`vmlinux.rs` and used `core::ptr::addr_of!` to compute the offset. Because
-rustc does **not** emit `preserve_access_index` BTF relocations, that
-still compiled to a fixed offset baked to the kernel `vmlinux.rs` was
-generated against (`6.8.0-49-generic`). On any other kernel build the
-fields had drifted, the daemon silently read the wrong bytes, and every
-task-scoped event was dropped in-kernel — only `HEARTBEAT` and `PACKET`
-survived. Runtime resolution sidesteps this without depending on rustc
-gaining CO-RE.
+- **Process lifecycle and identity (Required)**: If `/sys/kernel/btf/vmlinux`
+  is unavailable or any required `task_struct` / `signal_struct` member is
+  missing, `btf_offsets::resolve()` returns an error and the daemon refuses to
+  start. Guessing identity offsets risks misidentifying processes or conflating
+  distinct process instances across PID reuse.
+- **File-descriptor identity (`fd_ident`)**: If any member in the fd chain is
+  unresolved, `offsets.fd_ident` is `None`. The daemon logs a warning at
+  startup:
+  ```text
+  BTF fd identity fields unavailable: openat/mmap dev/ino validity bits remain clear
+  ```
+  The loader sets `FD_IDENT_SUPPORTED = 0`. In eBPF, `fd_to_dev_ino` checks
+  this flag and returns a default identity with validity bits clear:
+  - `openat`: reports `file_identity_status: unavailable`.
+  - `mmap`: emits zero values (`dev: 0, ino: 0`), preserving the existing wire
+    format without extra validity fields.
+  - *Runtime traversal failures* (negative fd, fd out of bounds, null pointer,
+    or probe read error) also fail closed. If the inode is successfully read
+    but the superblock read fails, partial identity (inode valid, dev invalid)
+    is reported.
+- **TTY classification (`tty`)**: If any member of `tty_struct` or `tty_driver`
+  is unresolved, `offsets.tty` is `None`. The daemon logs a warning at startup:
+  ```text
+  BTF TTY classification fields unavailable: TTY events suppressed (fail closed)
+  ```
+  The loader sets `TTY_SUPPORTED = 0` and the startup `ready` event reports TTY
+  collectors as unavailable (`tty.write`, `tty.read`, and `tty.read_ret` set to
+  `false` in `attached`). In eBPF, `is_pts_slave` returns `false` whenever
+  `TTY_SUPPORTED == 0` (as well as on null pointer, probe read error, or
+  non-PTY slave device). The `pty_write` and `n_tty_read` entry probes check
+  `is_pts_slave` and drop the event when false. All TTY events are suppressed,
+  preventing misclassification or noise.
 
-> **Scope:** This covers direct member offsets only. It is not full CO-RE
-> (no type / enum /
-> field-existence / bitfield relocation). The nested-pointer traversal
-> structs that remain in `vmlinux.rs` (TTY device class, fd → inode →
-> super_block) are still compile-time fixed.
+## Why Not Typed Struct Definitions in eBPF?
+
+Rustc does not emit CO-RE (`preserve_access_index`) relocations for eBPF
+targets. Defining C struct layouts in Rust compiles to fixed byte offsets baked
+for a specific kernel build. Across different kernel builds or configurations,
+struct layouts drift; fixed offsets cause eBPF probes to silently read the
+wrong fields.
+
+Runtime BTF resolution inspects the running kernel's `/sys/kernel/btf/vmlinux`
+directly, eliminating compile-time kernel layout definitions (`vmlinux.rs` and
+hard-coded `FILES_OFFSET_IN_TASK` are completely absent).
 
 ## How to Verify Offsets Manually
 
-For debugging, compare the daemon's logged offsets against `pahole` on the
-**same kernel the daemon runs on**:
+Compare the daemon's logged offsets against `pahole` on the target kernel:
 
 ```bash
-pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(pid|tgid|group_leader|start_boottime|signal|exit_code|comm|loginuid|sessionid)\b'
+# Lifecycle & filtering
+pahole -C task_struct /sys/kernel/btf/vmlinux | grep -E '\b(pid|tgid|group_leader|start_boottime|signal|exit_code|comm|loginuid|sessionid|files)\b'
 pahole -C signal_struct /sys/kernel/btf/vmlinux | grep -E '\b(live|group_exit_code)\b'
+
+# File descriptor traversal & identity endpoints
+pahole -C files_struct /sys/kernel/btf/vmlinux | grep fdt
+pahole -C fdtable /sys/kernel/btf/vmlinux | grep -E '\b(max_fds|fd)\b'
+pahole -C file /sys/kernel/btf/vmlinux | grep f_inode
+pahole -C inode /sys/kernel/btf/vmlinux | grep -E '\b(i_ino|i_sb)\b'
+pahole -C super_block /sys/kernel/btf/vmlinux | grep s_dev
+
+# TTY classification
+pahole -C tty_struct /sys/kernel/btf/vmlinux | grep driver
+pahole -C tty_driver /sys/kernel/btf/vmlinux | grep -E '\b(type|subtype)\b'
 ```
 
 > **Note:** `pahole` is provided by the `dwarves` package (`apt install dwarves`).
 
-The byte offsets printed by `pahole` should match the daemon startup log.
+The byte offsets printed by `pahole` match the daemon's startup log.
 
-## Host ≠ VM Kernel (now handled automatically)
+## Host ≠ Target Kernel Portability
 
-The **build host** and the **target VM** run different kernels with
-different `task_struct` layouts. Previously this required regenerating
-`vmlinux.rs` per kernel; the offset drift was silent and easy to miss:
+Build hosts (such as WSL2 or build containers) and target machines run
+different kernels with different struct layouts:
 
-| Field  | WSL2 6.6      | 6.8.0-49 HWE  | 6.8.0-117     |
-|--------|---------------|---------------|---------------|
-| `tgid` | 0x974 (2420)  | 0x9a4 (2468)  | (shifted)     |
+| Field | WSL2 6.6 | 6.8.0-49 HWE | 6.8.0-117 |
+|---|---|---|---|
+| `tgid` | 0x974 (2420) | 0x9a4 (2468) | (shifted) |
 | `loginuid` | 0xc30 (3120) | 0xc88 (3208) | 0xca0 (3232) |
 
-Runtime resolution reads whatever the running kernel reports, so no
-per-kernel code change is needed. If `/sys/kernel/btf/vmlinux` is absent,
-unparseable, or incomplete, the daemon refuses to attach.
+Because runtime resolution queries the running kernel's BTF at startup, a single
+binary artifact runs across differing kernel builds without recompilation. If
+`/sys/kernel/btf/vmlinux` is absent, unparseable, or missing required lifecycle
+fields, the daemon refuses to attach.
 
 ## DAC vs LSM Permission Ordering
 

@@ -311,17 +311,19 @@ and allows downstream consumers to filter noise from pipe I/O in pipelines.
 `openat` and file-backed `mmap` events include a `(dev, ino)` pair derived
 from the underlying inode at `sys_exit`. The traversal walks
 `task_struct → files_struct → fdtable → file → inode → super_block` using
-`bpf_probe_read_kernel`. The kernel offsets used are fixed at compile time
-to the measured target VM (kernel `6.8.0-49-generic`). Readable but incorrect
-offsets on other kernels cannot be detected from read success alone.
+`bpf_probe_read_kernel`. Traversal offsets are resolved at daemon startup
+from the running kernel's BTF (`/sys/kernel/btf/vmlinux`) by the same resolver
+used for `exec_view`. If BTF lacks required fd traversal fields, fd identity is
+marked unsupported: openat leaves validity bits clear (`file_identity_status: unavailable`),
+mmap emits zero identity (`dev: 0, ino: 0`), and the daemon logs a startup warning.
 
 Openat version 1 reports each component's read validity independently and
-exposes `file_identity_status`; only complete pairs on a validated layout are
-consumable as complete identity. Valid zero components are retained. Legacy
-openat records have unknown status; mmap retains its legacy numeric interface.
-Kernel `dev` encoding differs from userspace `st_dev`, so normalize through
-major/minor before comparison. The [filesystem measurement](development/filesystem-observation.md)
-records offsets, acquisition times, FD close/reuse limitations and verification.
+exposes `file_identity_status`; only complete pairs are consumable as complete
+identity. Valid zero components are retained. Legacy openat records have unknown
+status; mmap retains its legacy numeric interface. Kernel `dev` encoding differs
+from userspace `st_dev`, so normalize through major/minor before comparison. The
+[filesystem measurement](development/filesystem-observation.md) records
+acquisition times, FD close/reuse limitations and verification.
 
 ### Vectored I/O traversal cap
 

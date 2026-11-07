@@ -155,11 +155,12 @@ cargo run --package bloodhound-tui -- /path/to/bloodhound.ndjson
 
 ### Kernel Struct Offsets
 
-The eBPF code reads `task_struct` fields (`loginuid`, `sessionid`, `tgid`)
-using hardcoded byte offsets. These are **kernel-version-specific** and must
-be verified on the **target VM kernel**, not the build host.
+Kernel struct member offsets (process lifecycle, namespaces, mount views,
+fd identity, and TTY classification) are resolved at daemon startup from
+the running kernel's BTF (`/sys/kernel/btf/vmlinux`) and injected before
+eBPF load.
 
-See [docs/ebpf-offsets.md](docs/ebpf-offsets.md) for the verification procedure.
+See [docs/ebpf-offsets.md](docs/ebpf-offsets.md) for details.
 
 ### BPF Verifier
 
