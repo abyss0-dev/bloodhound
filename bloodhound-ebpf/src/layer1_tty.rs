@@ -261,13 +261,13 @@ unsafe fn emit_tty_event(kind: u8, buf_ptr: *const u8, count: usize) -> Result<u
     let out = &mut (*asm).buf;
     let data_out = out.as_mut_ptr().add(EventHeader::SIZE + TtyPayload::SIZE);
     let dest = &mut (&mut (*scratch).buf)[..data_len];
-    if buf_ptr.is_null()
-        || bpf_probe_read_kernel_buf(buf_ptr, dest).is_err()
-        || !bpf_memcpy(data_out, (*scratch).buf.as_ptr(), data_len as u32)
-    {
-        // Never expose partial or stale scratch bytes after either helper fails.
+    if buf_ptr.is_null() || bpf_probe_read_kernel_buf(buf_ptr, dest).is_err() {
+        // Never expose partial or stale scratch bytes after a source read fails.
         data_len = 0;
         status = CaptureStatus::ReadError;
+    } else if !bpf_memcpy(data_out, (*scratch).buf.as_ptr(), data_len as u32) {
+        // An internal assembly failure prevents emission, like path capture.
+        return Err(-1);
     }
 
     let mut header = get_task_info(kind);

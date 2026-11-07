@@ -191,15 +191,13 @@ pub fn load_and_attach(
     //   Similarly, `tty_read` → `n_tty_read` for the read path.
     let ok = try_attach_kprobe(&mut bpf, "tty_write_probe", "pty_write", &mut report);
     report.record_tty_attach("tty.write", ok, offsets.tty.as_ref());
-    let ok = try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read", &mut report);
+    // A kretprobe registers returns only for calls entering after attachment.
+    // Install it first so startup cannot create entries with no possible return;
+    // if it fails, leave entry capture disabled rather than accumulate orphans.
+    let ret_ok = try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read", &mut report);
+    report.record_tty_attach("tty.read_ret", ret_ok, offsets.tty.as_ref());
+    let ok = ret_ok && try_attach_kprobe(&mut bpf, "tty_read_probe", "n_tty_read", &mut report);
     report.record_tty_attach("tty.read", ok, offsets.tty.as_ref());
-    // kretprobe on n_tty_read: captures the bytes that were actually
-    // written into the userspace buffer during the call. Without this
-    // attach, only metadata (no `data` field) is emitted for tty_read.
-    // Aya's KProbe wrapper handles both kprobe and kretprobe via the
-    // `kind` discriminator set by the `#[kretprobe]` macro.
-    let ok = try_attach_kprobe(&mut bpf, "tty_read_ret_probe", "n_tty_read", &mut report);
-    report.record_tty_attach("tty.read_ret", ok, offsets.tty.as_ref());
 
     if args.enable_lsm {
         info!("Attaching opt-in LSM hooks...");
