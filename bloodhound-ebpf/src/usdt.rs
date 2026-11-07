@@ -7,7 +7,11 @@
 use aya_ebpf::{helpers::bpf_probe_read_user_str_bytes, macros::uprobe, programs::ProbeContext};
 use bloodhound_common::*;
 
-use crate::{filter::get_task_info, helpers::emit_event, maps::ASSEMBLY_BUF};
+use crate::{
+    filter::{get_task_info, should_trace},
+    helpers::emit_event,
+    maps::ASSEMBLY_BUF,
+};
 
 const COMMAND_NAME_LIMIT: usize = 64;
 
@@ -116,6 +120,9 @@ macro_rules! shell_attach_point {
         #[uprobe]
         pub fn $function(ctx: ProbeContext) -> u32 {
             unsafe {
+                if !should_trace() {
+                    return 0;
+                }
                 emit_shell(
                     $id,
                     ctx.arg::<u64>(0).unwrap_or(0) as u32,
@@ -136,6 +143,9 @@ macro_rules! peer_attach_point {
         #[uprobe]
         pub fn $function(ctx: ProbeContext) -> u32 {
             unsafe {
+                if !should_trace() {
+                    return 0;
+                }
                 let header = get_task_info(EventKind::UsdtTrainingPeerV1 as u8);
                 let payload = UsdtTrainingPeerPayload {
                     attach_point_id: $id,
