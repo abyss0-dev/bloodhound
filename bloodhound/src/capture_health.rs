@@ -11,10 +11,7 @@ use crate::sequencer::SequencedInput;
 
 fn diagnostic(scope: &str, reason: &str, delta: Option<u64>, total: Option<u64>, timestamp: u64) -> BehaviorEvent {
     BehaviorEvent {
-        header: EventHeaderJson {
-            timestamp, auid: 0, sessionid: 0, pid: 0,
-            ppid: None, comm: String::new(), process_ref: None, tid: None, ns: None,
-        },
+        header: EventHeaderJson::unattributed(timestamp),
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(), name: format!("{scope}.collection"),
             layer: "behavior".into(),
@@ -92,8 +89,7 @@ mod tests {
             assert_eq!(event.event.name, "tty.collection");
             assert_eq!(event.event.layer, "behavior");
             assert!(event.header.process_ref.is_none());
-            assert!(event.header.tid.is_none());
-            assert!(event.header.ns.is_none());
+            assert!(event.header.task.is_none());
             assert!(event.proc.is_none());
             assert!(event.return_code.is_none());
             assert_eq!(event.args.unwrap(), json!({
@@ -124,8 +120,7 @@ mod tests {
             assert_eq!(event.event.name, "raw_syscall.collection");
             assert_eq!(event.event.layer, "behavior");
             assert!(event.header.process_ref.is_none());
-            assert!(event.header.tid.is_none());
-            assert!(event.header.ns.is_none());
+            assert!(event.header.task.is_none());
             assert!(event.return_code.is_none());
             assert_eq!(event.args.unwrap(), json!({
                 "scope": "raw_syscall", "reason_code": reason,
@@ -150,7 +145,7 @@ mod tests {
             assert_eq!(event.event.name, "syscall.collection");
             assert_eq!(event.event.layer, "behavior");
             assert!(event.header.process_ref.is_none());
-            assert!(event.header.tid.is_none());
+            assert!(event.header.task.is_none());
             assert!(event.return_code.is_none());
             assert_eq!(event.args.unwrap(), json!({
                 "scope": "syscall", "reason_code": reason,

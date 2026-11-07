@@ -150,15 +150,9 @@ fn make_identity_diagnostic(
     };
     BehaviorEvent {
         header: EventHeaderJson {
-            timestamp: triggering.header.timestamp,
             auid: triggering.header.auid,
             sessionid: triggering.header.sessionid,
-            pid: 0,
-            ppid: None,
-            comm: String::new(),
-            process_ref: None,
-            tid: None,
-            ns: None,
+            ..EventHeaderJson::unattributed(triggering.header.timestamp)
         },
         event: EventTypeJson {
             event_type: "DIAGNOSTIC".into(),
@@ -193,8 +187,7 @@ fn make_process_start(triggering: &BehaviorEvent, process_ref: ProcessRefJson) -
 /// moment of that task, so it never carries `tid` or a namespace snapshot.
 fn clone_header(header: &EventHeaderJson) -> EventHeaderJson {
     EventHeaderJson {
-        tid: None,
-        ns: None,
+        task: None,
         ..header.clone()
     }
 }
@@ -202,7 +195,7 @@ fn clone_header(header: &EventHeaderJson) -> EventHeaderJson {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::deserializer::NamespaceSnapshotJson;
+    use crate::deserializer::{NamespaceSnapshotJson, TaskContext};
     use bloodhound_common::{NsSnapshot, NS_SLOTS, NS_STATUS_COMPLETE};
 
     fn event(pid: u32, start_boottime_ns: u64, event_type: &str, name: &str) -> BehaviorEvent {
@@ -218,12 +211,14 @@ mod tests {
                     tgid: pid,
                     start_boottime_ns,
                 }),
-                tid: Some(pid),
-                ns: Some(NamespaceSnapshotJson::from(&NsSnapshot {
-                    inum: [7; NS_SLOTS],
-                    status: [NS_STATUS_COMPLETE; NS_SLOTS],
-                    _pad: 0,
-                })),
+                task: Some(TaskContext {
+                    tid: pid,
+                    ns: NamespaceSnapshotJson::from(&NsSnapshot {
+                        inum: [7; NS_SLOTS],
+                        status: [NS_STATUS_COMPLETE; NS_SLOTS],
+                        _pad: 0,
+                    }),
+                }),
             },
             event: EventTypeJson {
                 event_type: event_type.to_string(),
@@ -260,7 +255,7 @@ mod tests {
         let start = life.before(&triggering).remove(0);
         assert!(start.proc.is_none());
         assert_eq!(start.header.process_ref, triggering.header.process_ref);
-        assert!(start.header.tid.is_none() && start.header.ns.is_none());
+        assert!(start.header.task.is_none());
     }
 
     #[test]
@@ -289,7 +284,7 @@ mod tests {
         assert!(args.get("partial").is_none());
         // The bootstrap record is synthesized, not a hook moment of the task.
         assert_eq!(start.header.pid, 999_999_999);
-        assert!(start.header.tid.is_none() && start.header.ns.is_none());
+        assert!(start.header.task.is_none());
     }
 
     #[test]

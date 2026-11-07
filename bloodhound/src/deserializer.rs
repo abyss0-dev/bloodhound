@@ -40,12 +40,31 @@ pub struct EventHeaderJson {
     pub comm: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub process_ref: Option<ProcessRefJson>,
-    /// Present exactly on kernel-captured records with a task context,
-    /// together with `ns` (tracer contract §2.8.1).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub ns: Option<NamespaceSnapshotJson>,
+    /// Present exactly on kernel-captured records with a task context
+    /// (tracer contract §2.8.1).
+    #[serde(flatten)]
+    pub task: Option<TaskContext>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskContext {
+    pub tid: u32,
+    pub ns: NamespaceSnapshotJson,
+}
+
+impl EventHeaderJson {
+    pub fn unattributed(timestamp: u64) -> Self {
+        Self {
+            timestamp,
+            auid: 0,
+            sessionid: 0,
+            pid: 0,
+            ppid: None,
+            comm: String::new(),
+            process_ref: None,
+            task: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -170,8 +189,10 @@ fn deserialize_process_event(data: &[u8], kind: EventKind) -> Result<BehaviorEve
             tgid: header.pid,
             start_boottime_ns: header.process_start_boottime_ns,
         }),
-        tid: (header.tid != 0).then_some(header.tid),
-        ns: (header.tid != 0).then(|| NamespaceSnapshotJson::from(&header.ns)),
+        task: (header.tid != 0).then(|| TaskContext {
+            tid: header.tid,
+            ns: NamespaceSnapshotJson::from(&header.ns),
+        }),
     };
 
     let (event_type, name, layer, mut args, return_code) = match kind {
@@ -289,17 +310,8 @@ fn deserialize_packet(data: &[u8]) -> Result<BehaviorEvent> {
     });
 
     Ok(BehaviorEvent {
-        header: EventHeaderJson {
-            timestamp: pkt_header.timestamp_ns,
-            auid: 0,       // Historical offline capture; no live correlation.
-            sessionid: 0,
-            pid: 0,
-            ppid: None,
-            comm: String::new(),
-            process_ref: None,
-            tid: None,
-            ns: None,
-        },
+        // Historical offline capture; no live correlation.
+        header: EventHeaderJson::unattributed(pkt_header.timestamp_ns),
         event: EventTypeJson {
             event_type: "PACKET".to_string(),
             name: name.to_string(),
