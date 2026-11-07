@@ -50,12 +50,19 @@ and decrements it when the link fd is closed during shutdown or attachment
 rollback. Aya owns ordinary uprobe links; Bloodhound owns only these additional
 fd-based links because Aya 0.13 does not expose `ref_ctr_offset`.
 
-No function-symbol fallback, runtime DSO scan, PID filter, or config-provided
-offset is used. A failed check emits a bounded `DIAGNOSTIC` event with
+No function-symbol fallback, runtime DSO scan, or config-provided offset is
+used. A failed check emits a bounded `DIAGNOSTIC` event with
 `event.name = "usdt.collector"`, the collector ID, and a reason code. The
 allowed reason codes are `disabled`, `unknown_collector`,
 `unsupported_architecture`, `target_build_id_mismatch`, `probe_not_found`,
 `abi_incompatible`, `semaphore_unavailable`, and `attach_failed`.
+
+USDT hits are filtered by the single target AUID and daemon exclusion in eBPF
+before capture; a filtered hit emits nothing (no `DIAGNOSTIC`). Consumers
+receive only the target principal's activity and must not re-derive it; Build ID
+identifies the binary, not the actor. Collectors do not filter by PID, parent
+process, session, or cgroup; all concurrent executions under the target AUID are
+observed.
 
 USDT events use `event.type = "USDT"`, `event.layer = "behavior"`, and a
 `<provider>.<probe>` name. Collector fields use fixed-size scalar values and
