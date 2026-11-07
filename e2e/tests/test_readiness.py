@@ -71,6 +71,7 @@ def test_first_record_is_ready_with_exact_startup_facts(
         assert actual.returncode == 0 and actual.stdout.strip() == "bloodhound"
         assert set(args["attached"]) == DEFAULT_KEYS
         assert all(args["attached"][key] is True for key in REQUIRED)
+        assert args["attached"]["tier2.umount2"] is True
         assert all(isinstance(value, bool) for value in args["attached"].values())
         after_qdiscs, after_filters = tc_state(ssh_cmd)
         assert after_qdiscs == before_qdiscs, "startup changed qdiscs"
@@ -84,6 +85,41 @@ def test_first_record_is_ready_with_exact_startup_facts(
             assert not any(e["event"]["type"] == "HEARTBEAT" for e in events)
         else:
             assert events[-1]["event"]["type"] == "HEARTBEAT"
+
+
+def test_unprivileged_umount2_is_tier2_without_raw_duplicate(
+    ssh_cmd, foreground_bloodhound, wait_until,
+):
+    script = '''
+import ctypes, errno, json, os
+assert os.geteuid() == 1000
+libc = ctypes.CDLL(None, use_errno=True)
+result = libc.umount2(b"/nonexistent", 0)
+error = ctypes.get_errno()
+assert result == -1 and error in {errno.EPERM, errno.ENOENT}, (result, error)
+print(json.dumps({"pid": os.getpid(), "error": error}))
+'''
+    with foreground_bloodhound() as daemon:
+        wait_until(lambda: daemon.events(), "readiness before umount2")
+        result = ssh_cmd("python3 -c " + shlex.quote(script))
+        assert result.returncode == 0, result.stderr
+        call = json.loads(result.stdout)
+        pid = call["pid"]
+        wait_until(
+            lambda: any(e["header"]["pid"] == pid
+                        and e["event"]["name"] == "umount2"
+                        for e in daemon.events()),
+            "Tier-2 umount2 event for unprivileged caller",
+        )
+        daemon.signal()
+        assert daemon.wait() == 0, daemon.stderr()
+        records = [e for e in daemon.events() if e["header"]["pid"] == pid]
+        rich = [e for e in records if e["event"]["name"] == "umount2"
+                and e["event"]["type"] == "TRACEPOINT"]
+        assert len(rich) == 1, records
+        assert rich[0]["return_code"] == -call["error"]
+        assert not any(e["event"]["type"] == "SYSCALL"
+                       and e["args"].get("syscall_nr") == 166 for e in records)
 
 
 def test_live_process_records_are_not_procfs_enriched(ssh_cmd, foreground_bloodhound, wait_until):

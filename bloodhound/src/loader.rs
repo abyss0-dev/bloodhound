@@ -226,8 +226,11 @@ pub fn load_and_attach(
     for (name, nr) in tier2_syscalls {
         let enter_prog = format!("sys_enter_{}", name);
         let exit_prog = format!("sys_exit_{}", name);
-        let enter_tp = format!("sys_enter_{}", name);
-        let exit_tp = format!("sys_exit_{}", name);
+        // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
+        // so its kernel tracepoints are named umount, not umount2.
+        let tracepoint_name = if *name == "umount2" { "umount" } else { name };
+        let enter_tp = format!("sys_enter_{}", tracepoint_name);
+        let exit_tp = format!("sys_exit_{}", tracepoint_name);
 
         let enter_ok =
             try_attach_tracepoint(&mut bpf, &enter_prog, "syscalls", &enter_tp, &mut report);
