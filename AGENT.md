@@ -2,6 +2,16 @@
 
 このリポジトリを変更するエージェントは、変更対象に必要なコマンドを非対話 shell から実行できる状態に保ってください。
 
+## Design philosophy
+
+設計や実装の判断をする前に、`docs/philosophy/README.md` を読んで従ってください。
+
+## Pull requests
+
+PR を作成するときは、`.agents/skills/create-pr/SKILL.md` に従ってください。
+変更が設計思想に沿っているかのレビューは、`.agents/skills/review-pr-against-philosophy/SKILL.md` に従ってください。
+レビューは、変更を作成したセッションとは別のまっさらな文脈で行います。
+
 ## GitHub Actions
 
 `.github/workflows/` 配下を作成または変更する前に、`.github/workflows/AGENT.md` を読んで従ってください。
