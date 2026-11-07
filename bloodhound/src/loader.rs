@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use aya::{
     maps::Array,
-    programs::{KProbe, Lsm, RawTracePoint, TracePoint},
+    programs::{trace_point::TracePointLinkId, KProbe, Lsm, RawTracePoint, TracePoint},
     Btf, EbpfLoader,
 };
 use log::{info, warn};
@@ -28,12 +28,6 @@ impl AttachReport {
         // Attached hooks cannot emit TTY events without classification offsets.
         self.keys
             .insert(key.into(), attached && tty_offsets.is_some());
-    }
-
-    fn pair(&mut self, key: &str, enter: bool, exit: bool) -> bool {
-        let complete = enter && exit;
-        self.keys.insert(key.into(), complete);
-        complete
     }
 }
 
@@ -131,48 +125,19 @@ pub fn load_and_attach(
 
     info!("Attaching Layer 2: execve tracepoints...");
     required(&mut report, "exec.execve", |report| {
-        attach_tracepoint(
-            &mut bpf,
-            "sys_enter_execve",
-            "syscalls",
-            "sys_enter_execve",
-            report,
-        )?;
-        attach_tracepoint(
-            &mut bpf,
-            "sys_exit_execve",
-            "syscalls",
-            "sys_exit_execve",
-            report,
-        )
+        attach_syscall_pair(&mut bpf, "execve", report)
     })?;
-    let execveat_enter = try_attach_tracepoint(
-        &mut bpf,
-        "sys_enter_execveat",
-        "syscalls",
-        "sys_enter_execveat",
-        &mut report,
-    );
-    let execveat_exit = try_attach_tracepoint(
-        &mut bpf,
-        "sys_exit_execveat",
-        "syscalls",
-        "sys_exit_execveat",
-        &mut report,
-    );
-
-    report.pair("exec.execveat", execveat_enter, execveat_exit);
+    try_attach_syscall_pair(&mut bpf, "execveat", "exec.execveat", &mut report);
 
     info!("Attaching Layer 3 Tier 1: raw syscalls...");
     required(&mut report, "raw_syscalls", |report| {
-        attach_tracepoint(
+        attach_tracepoint_pair(
             &mut bpf,
-            "raw_sys_enter",
             "raw_syscalls",
-            "sys_enter",
+            ("raw_sys_enter", "sys_enter"),
+            ("raw_sys_exit", "sys_exit"),
             report,
-        )?;
-        attach_tracepoint(&mut bpf, "raw_sys_exit", "raw_syscalls", "sys_exit", report)
+        )
     })?;
 
     info!("Attaching Layer 3 Tier 2: rich syscalls...");
@@ -224,20 +189,7 @@ pub fn load_and_attach(
     let mut successful_syscalls = Vec::new();
 
     for (name, nr) in tier2_syscalls {
-        let enter_prog = format!("sys_enter_{}", name);
-        let exit_prog = format!("sys_exit_{}", name);
-        // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
-        // so its kernel tracepoints are named umount, not umount2.
-        let tracepoint_name = if *name == "umount2" { "umount" } else { name };
-        let enter_tp = format!("sys_enter_{}", tracepoint_name);
-        let exit_tp = format!("sys_exit_{}", tracepoint_name);
-
-        let enter_ok =
-            try_attach_tracepoint(&mut bpf, &enter_prog, "syscalls", &enter_tp, &mut report);
-        let exit_ok =
-            try_attach_tracepoint(&mut bpf, &exit_prog, "syscalls", &exit_tp, &mut report);
-
-        if report.pair(&format!("tier2.{name}"), enter_ok, exit_ok) {
+        if try_attach_syscall_pair(&mut bpf, name, &format!("tier2.{name}"), &mut report) {
             if (*nr as u32) < BITMAP_SIZE as u32 {
                 successful_syscalls.push(*nr as u32);
             }
@@ -248,62 +200,19 @@ pub fn load_and_attach(
     // fcntl rich extraction is conditional on cmd ∈ {F_DUPFD, F_DUPFD_CLOEXEC};
     // attach the tracepoints, but DO NOT register fcntl in TIER2_BITMAP, so
     // non-DUPFD fcntl commands remain visible via Tier 1 raw capture.
-    let fcntl_enter = try_attach_tracepoint(
-        &mut bpf,
-        "sys_enter_fcntl",
-        "syscalls",
-        "sys_enter_fcntl",
-        &mut report,
-    );
-    let fcntl_exit = try_attach_tracepoint(
-        &mut bpf,
-        "sys_exit_fcntl",
-        "syscalls",
-        "sys_exit_fcntl",
-        &mut report,
-    );
-
-    report.pair("tier2.fcntl", fcntl_enter, fcntl_exit);
+    try_attach_syscall_pair(&mut bpf, "fcntl", "tier2.fcntl", &mut report);
 
     // sendfile / splice rich extraction is opt-in (issue #9). When enabled,
     // attach both tracepoint pairs and register the syscall numbers in
     // TIER2_BITMAP so Tier 1 deduplicates. When disabled, the BPF programs
     // remain compiled in but unattached, and Tier 1 raw capture continues.
     if args.enable_rich_sendfile {
-        let sf_enter = try_attach_tracepoint(
-            &mut bpf,
-            "sys_enter_sendfile",
-            "syscalls",
-            "sys_enter_sendfile",
-            &mut report,
-        );
-        let sf_exit = try_attach_tracepoint(
-            &mut bpf,
-            "sys_exit_sendfile",
-            "syscalls",
-            "sys_exit_sendfile",
-            &mut report,
-        );
-        let sf_ok = report.pair("tier2.sendfile", sf_enter, sf_exit);
+        let sf_ok = try_attach_syscall_pair(&mut bpf, "sendfile", "tier2.sendfile", &mut report);
         if sf_ok && (NR_SENDFILE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SENDFILE as u32);
             info!("  Attached: sendfile (opt-in via --enable-rich-sendfile)");
         }
-        let sp_enter = try_attach_tracepoint(
-            &mut bpf,
-            "sys_enter_splice",
-            "syscalls",
-            "sys_enter_splice",
-            &mut report,
-        );
-        let sp_exit = try_attach_tracepoint(
-            &mut bpf,
-            "sys_exit_splice",
-            "syscalls",
-            "sys_exit_splice",
-            &mut report,
-        );
-        let sp_ok = report.pair("tier2.splice", sp_enter, sp_exit);
+        let sp_ok = try_attach_syscall_pair(&mut bpf, "splice", "tier2.splice", &mut report);
         if sp_ok && (NR_SPLICE as u32) < BITMAP_SIZE as u32 {
             successful_syscalls.push(NR_SPLICE as u32);
             info!("  Attached: splice (opt-in via --enable-rich-sendfile)");
@@ -412,37 +321,96 @@ fn populate_exclusion_bitmap(bpf: &mut aya::Ebpf) -> Result<()> {
     Ok(())
 }
 
+fn attach_tracepoint_pair(
+    bpf: &mut aya::Ebpf,
+    category: &str,
+    enter: (&str, &str),
+    exit: (&str, &str),
+    report: &mut AttachReport,
+) -> Result<()> {
+    // Install the consumer before the producer: an enter captured before its
+    // exit hook exists can survive until task exit and falsely report an
+    // invocation_interrupted collection loss (notably for openat).
+    attach_pair(
+        bpf,
+        report,
+        |bpf, report| attach_tracepoint(bpf, exit.0, category, exit.1, report),
+        |bpf, report| attach_tracepoint(bpf, enter.0, category, enter.1, report).map(|_| ()),
+        |bpf, exit_link| {
+            let program: &mut TracePoint = bpf.program_mut(exit.0).unwrap().try_into()?;
+            program.detach(exit_link)?;
+            Ok(())
+        },
+    )
+}
+
+// Keep the rollback transaction testable without loading BPF or requiring root.
+fn attach_pair<B, L>(
+    backend: &mut B,
+    report: &mut AttachReport,
+    attach_exit: impl FnOnce(&mut B, &mut AttachReport) -> Result<L>,
+    attach_enter: impl FnOnce(&mut B, &mut AttachReport) -> Result<()>,
+    detach_exit: impl FnOnce(&mut B, L) -> Result<()>,
+) -> Result<()> {
+    let exit_link = attach_exit(backend, report)?;
+    if let Err(error) = attach_enter(backend, report) {
+        detach_exit(backend, exit_link)
+            .context("rolling back syscall exit hook after enter attachment failed")?;
+        report.probes -= 1;
+        return Err(error);
+    }
+    Ok(())
+}
+
+fn attach_syscall_pair(bpf: &mut aya::Ebpf, name: &str, report: &mut AttachReport) -> Result<()> {
+    let enter = format!("sys_enter_{name}");
+    let exit = format!("sys_exit_{name}");
+    // Syscall nr 166 (umount2) is defined as SYSCALL_DEFINE2(umount, ...),
+    // so its kernel tracepoints are named umount, not umount2.
+    let tracepoint_name = if name == "umount2" { "umount" } else { name };
+    let enter_tp = format!("sys_enter_{tracepoint_name}");
+    let exit_tp = format!("sys_exit_{tracepoint_name}");
+    attach_tracepoint_pair(
+        bpf,
+        "syscalls",
+        (&enter, &enter_tp),
+        (&exit, &exit_tp),
+        report,
+    )
+}
+
 fn attach_tracepoint(
     bpf: &mut aya::Ebpf,
     prog_name: &str,
     category: &str,
     name: &str,
     report: &mut AttachReport,
-) -> Result<()> {
+) -> Result<TracePointLinkId> {
     let program: &mut TracePoint = bpf
         .program_mut(prog_name)
         .context(format!("program {} not found", prog_name))?
         .try_into()?;
     program.load()?;
-    program.attach(category, name)?;
+    let link = program.attach(category, name)?;
     report.probes += 1;
-    Ok(())
+    Ok(link)
 }
 
-fn try_attach_tracepoint(
+fn try_attach_syscall_pair(
     bpf: &mut aya::Ebpf,
-    prog_name: &str,
-    category: &str,
     name: &str,
+    key: &str,
     report: &mut AttachReport,
 ) -> bool {
-    match attach_tracepoint(bpf, prog_name, category, name, report) {
+    let complete = match attach_syscall_pair(bpf, name, report) {
         Ok(()) => true,
         Err(e) => {
-            warn!("Failed to attach tracepoint {}/{}: {}", category, name, e);
+            warn!("Failed to attach syscall pair {name}: {e:#}");
             false
         }
-    }
+    };
+    report.keys.insert(key.into(), complete);
+    complete
 }
 
 fn try_attach_kprobe(
@@ -495,17 +463,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pairs_require_both_halves_and_unselected_keys_stay_absent() {
-        let mut report = AttachReport::default();
-        for (enter, exit, complete) in [
-            (false, false, false),
-            (true, false, false),
-            (false, true, false),
-            (true, true, true),
-        ] {
-            assert_eq!(report.pair("tier2.openat", enter, exit), complete);
-            assert_eq!(report.keys["tier2.openat"], complete);
-        }
+    fn unselected_keys_stay_absent() {
+        let report = AttachReport::default();
         for unselected in [
             "tier2.sendfile",
             "tier2.splice",
@@ -518,16 +477,39 @@ mod tests {
 
     #[test]
     fn required_failure_aborts_without_claiming_availability() {
-        let mut report = AttachReport::default();
+        let mut report = AttachReport {
+            probes: 2,
+            ..AttachReport::default()
+        };
+        let mut exit_attached = false;
         let startup: Result<()> = (|| {
             required(&mut report, "exec.execve", |report| {
-                report.probes += 1; // A successful enter does not complete the pair.
-                anyhow::bail!("injected exit attach failure")
+                attach_pair(
+                    &mut exit_attached,
+                    report,
+                    |attached, report| {
+                        assert!(!*attached);
+                        *attached = true;
+                        report.probes += 1;
+                        Ok(42)
+                    },
+                    |attached, _| {
+                        assert!(*attached, "exit must attach before enter");
+                        anyhow::bail!("injected enter attach failure")
+                    },
+                    |attached, link| {
+                        assert_eq!(link, 42);
+                        assert!(*attached);
+                        *attached = false;
+                        Ok(())
+                    },
+                )
             })?;
             panic!("failed required collector must abort startup");
         })();
-        assert!(startup.is_err());
-        assert_eq!(report.probes, 1);
+        assert!(startup.unwrap_err().to_string().contains("exec.execve"));
+        assert!(!exit_attached, "failed pair must detach its exit hook");
+        assert_eq!(report.probes, 2, "rollback restores existing probe count");
         assert!(!report.keys.contains_key("exec.execve"));
         required(&mut report, "signal", |report| {
             report.probes += 1;
@@ -535,6 +517,6 @@ mod tests {
         })
         .unwrap();
         assert!(report.keys["signal"]);
-        assert_eq!(report.probes, 2);
+        assert_eq!(report.probes, 3);
     }
 }
