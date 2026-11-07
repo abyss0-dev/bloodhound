@@ -57,13 +57,12 @@ allowed reason codes are `disabled`, `unknown_collector`,
 `unsupported_architecture`, `target_build_id_mismatch`, `probe_not_found`,
 `abi_incompatible`, `semaphore_unavailable`, and `attach_failed`.
 
-USDT probe hits pass the same single-AUID filter and daemon exclusion as every
-other collector, evaluated in eBPF before capture; a filtered hit emits nothing
-(no `DIAGNOSTIC`). Consumers receive only the target principal's activity and
-must not re-derive it; Build ID verification identifies the binary, not the
-actor. This supersedes #39's "no UID/session filter" clause for AUID, while
-concurrent executions within the target AUID are all observed. PID,
-parent-process, session, and cgroup filters remain absent.
+USDT hits are filtered by the single target AUID and daemon exclusion in eBPF
+before capture; a filtered hit emits nothing (no `DIAGNOSTIC`). Consumers
+receive only the target principal's activity and must not re-derive it; Build ID
+identifies the binary, not the actor. Collectors do not filter by PID, parent
+process, session, or cgroup; all concurrent executions under the target AUID are
+observed.
 
 USDT events use `event.type = "USDT"`, `event.layer = "behavior"`, and a
 `<provider>.<probe>` name. Collector fields use fixed-size scalar values and

@@ -55,11 +55,14 @@ Every collector change must preserve these properties:
   replacement between those phases must not redirect the uprobe.
 - Probe locations come only from `.note.stapsdt`; there is no symbol fallback,
   runtime DSO scan, configured offset, or configured PID.
+- Every collector probe program calls `should_trace()` at entry before reading
+  any argument or emitting.
 - eBPF emits fixed-size scalars and explicitly bounded byte strings. It never
   emits process pointers, surrounding memory, environment data, or unbounded
   text.
-- Required capture failures become bounded `DIAGNOSTIC/usdt.collector` events;
-  they do not produce partial semantic events.
+- Required capture failures for executions that pass the filter become bounded
+  `DIAGNOSTIC/usdt.collector` events; they do not produce partial semantic
+  events.
 - Collector-specific decoding stays in the USDT module. The core deserializer
   only dispatches by `EventKind`.
 - All links survive for the daemon lifetime and are rolled back as one collector
@@ -79,9 +82,10 @@ Treat a new collector as one vertical change through all layers:
 2. Add an `EventKind` and collector payload structures in
    `bloodhound-common/src/lib.rs`. Keep layouts `#[repr(C)]`, fixed, and safe to
    read unaligned in userspace.
-3. Add the probe program in `bloodhound-ebpf/src/usdt.rs`. Use one compiled
-   entry point per supported static location and reject unsafe required reads
-   with a collector-owned capture-error payload.
+3. Add the probe program in `bloodhound-ebpf/src/usdt.rs`. Call `should_trace()`
+   at entry before reading any argument or emitting. Use one compiled entry
+   point per supported static location and reject unsafe required reads with a
+   collector-owned capture-error payload.
 4. Register all trusted metadata in `bloodhound/src/usdt.rs`, map each static
    location to its compiled program name, and add the decoder that produces the
    canonical `BehaviorEvent`.
