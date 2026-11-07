@@ -44,6 +44,12 @@ pub const SYSCALL_FAILURE_REASONS: [&str; 5] = [
 ];
 pub const SYSCALL_FAILURE_COUNT: u32 = SYSCALL_FAILURE_REASONS.len() as u32;
 
+/// Tier-1 raw capture has the same reachable failures and uses the shared
+/// `SYSCALL_*` reason indices and syscall_collection outcome policies.
+/// Counters remain separate from Tier-2 capture.
+pub const RAW_SYSCALL_FAILURE_REASONS: [&str; 5] = SYSCALL_FAILURE_REASONS;
+pub const RAW_SYSCALL_FAILURE_COUNT: u32 = RAW_SYSCALL_FAILURE_REASONS.len() as u32;
+
 pub const OPENAT_ENTRY_CAPTURE_FAILED: u32 = 0;
 pub const OPENAT_ENTRY_SAVE_FAILED: u32 = 1;
 pub const OPENAT_EXIT_CAPTURE_FAILED: u32 = 2;
@@ -990,6 +996,12 @@ pub const NR_WRITEV: u64 = 20;
 pub const NR_MMAP: u64 = 9;
 pub const NR_SENDFILE: u64 = 40;
 pub const NR_SPLICE: u64 = 275;
+
+/// `exit` — emitted at sys_enter by Tier 1 raw capture because the
+/// matching sys_exit tracepoint never fires (the task is gone by then). See
+/// `layer3_raw::try_raw_sys_enter` and the `process_exit` contract in
+/// `docs/output-schema.md`.
+pub const NR_EXIT: u64 = 60;
 
 /// `exit_group` — emitted at sys_enter by Tier 1 raw capture because the
 /// matching sys_exit tracepoint never fires (the task is gone by then). See

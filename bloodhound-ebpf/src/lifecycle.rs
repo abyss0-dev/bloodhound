@@ -113,6 +113,10 @@ unsafe fn try_process_exit(ctx: &RawTracePointContext) -> Result<(), i64> {
     // fatal-signal delivery is not a skipped syscall exit: Linux 6.8
     // kernel/entry/common.c traces sys_exit before return-to-user signal
     // handling, so those entries have already been removed here.
+    if crate::maps::SYSCALL_ENTRY_MAP.get(&tid).is_some() {
+        crate::maps::raw_syscall_failure(bloodhound_common::SYSCALL_INVOCATION_INTERRUPTED);
+        crate::maps::raw_syscall_cleanup(crate::maps::SYSCALL_ENTRY_MAP.remove(&tid));
+    }
     if crate::maps::PATH_ENTRY_MAP.get(&tid).is_some() {
         crate::maps::syscall_failure(bloodhound_common::SYSCALL_INVOCATION_INTERRUPTED);
         crate::maps::syscall_cleanup(crate::maps::PATH_ENTRY_MAP.remove(&tid));

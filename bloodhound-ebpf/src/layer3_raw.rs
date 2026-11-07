@@ -7,7 +7,10 @@ use bloodhound_common::*;
 
 use crate::filter::{get_task_info, should_trace};
 use crate::helpers::emit_event;
-use crate::maps::{EXCLUSION_BITMAP, SYSCALL_ENTRY_MAP, TIER2_BITMAP};
+use crate::maps::{
+    raw_syscall_cleanup, raw_syscall_failure, raw_syscall_save,
+    EXCLUSION_BITMAP, SYSCALL_ENTRY_MAP, TIER2_BITMAP,
+};
 
 // ── raw_syscalls:sys_enter ───────────────────────────────────────────────────
 
@@ -15,7 +18,10 @@ use crate::maps::{EXCLUSION_BITMAP, SYSCALL_ENTRY_MAP, TIER2_BITMAP};
 pub fn raw_sys_enter(ctx: TracePointContext) -> u32 {
     match unsafe { try_raw_sys_enter(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { raw_syscall_failure(SYSCALL_ENTRY_CAPTURE_FAILED); }
+            0
+        }
     }
 }
 
@@ -28,6 +34,9 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
     let nr: i64 = ctx.read_at(8).map_err(|_| -1i64)?;
     let nr = nr as u64;
 
+    // Out-of-range IDs are outside the bitmap-backed capture scope, not
+    // collection failures. For example, ptrace can set nr to -1 to skip a
+    // syscall; sys_enter can still observe it (cast above to u64::MAX).
     if nr >= BITMAP_SIZE as u64 {
         return Ok(0);
     }
@@ -54,14 +63,14 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
     // Read the 6 raw args from the tracepoint context
     let mut args = [0u64; 6];
     for i in 0..6 {
-        args[i] = ctx.read_at(16 + i * 8).unwrap_or(0);
+        args[i] = ctx.read_at(16 + i * 8).map_err(|_| -1i64)?;
     }
 
-    // `exit_group` has no matching sys_exit tracepoint (the task is gone
+    // `exit` and `exit_group` have no matching sys_exit (the task is gone
     // by then), so emit the Tier 1 raw event at sys_enter. Skipping the
     // map insert also avoids leaking orphan entries in SYSCALL_ENTRY_MAP.
     // `args[0]` carries the exit status; return_code is a sentinel 0.
-    if nr == NR_EXIT_GROUP {
+    if nr == NR_EXIT || nr == NR_EXIT_GROUP {
         let payload = RawSyscallPayload {
             syscall_nr: nr,
             args,
@@ -89,7 +98,7 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
         args,
     };
 
-    let _ = SYSCALL_ENTRY_MAP.insert(&pid_tgid, &entry, 0);
+    raw_syscall_save(SYSCALL_ENTRY_MAP.insert(&pid_tgid, &entry, 0));
     Ok(0)
 }
 
@@ -99,7 +108,10 @@ unsafe fn try_raw_sys_enter(ctx: &TracePointContext) -> Result<u32, i64> {
 pub fn raw_sys_exit(ctx: TracePointContext) -> u32 {
     match unsafe { try_raw_sys_exit(&ctx) } {
         Ok(_) => 0,
-        Err(_) => 0,
+        Err(_) => {
+            unsafe { raw_syscall_failure(SYSCALL_EXIT_CAPTURE_FAILED); }
+            0
+        }
     }
 }
 
@@ -112,7 +124,13 @@ unsafe fn try_raw_sys_exit(ctx: &TracePointContext) -> Result<u32, i64> {
     };
 
     // raw_syscalls/sys_exit: offset 8 = id, offset 16 = ret
-    let return_code: i64 = ctx.read_at(16).map_err(|_| -1i64)?;
+    let return_code: i64 = match ctx.read_at(16) {
+        Ok(value) => value,
+        Err(_) => {
+            raw_syscall_cleanup(SYSCALL_ENTRY_MAP.remove(&pid_tgid));
+            return Err(-1);
+        }
+    };
 
     let payload = RawSyscallPayload {
         syscall_nr: entry.syscall_nr,
@@ -136,6 +154,6 @@ unsafe fn try_raw_sys_exit(ctx: &TracePointContext) -> Result<u32, i64> {
 
     emit_event(&buf[..total_size]);
 
-    let _ = SYSCALL_ENTRY_MAP.remove(&pid_tgid);
+    raw_syscall_cleanup(SYSCALL_ENTRY_MAP.remove(&pid_tgid));
     Ok(0)
 }

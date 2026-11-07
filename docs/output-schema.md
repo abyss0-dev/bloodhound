@@ -281,7 +281,10 @@ emitted. Consumers must fail closed rather than substitute a PID-only identity.
 DECIDED: Used for Tier 1 raw_syscalls events. These carry `syscall_nr`
 (integer) and `raw_args` (array of 6 integers) in `args`. The
 `event.name` is the syscall number as a string (e.g., "83" for mkdir).
-`event.layer` is always `"behavior"`.
+`event.layer` is always `"behavior"`. Raw `exit` (60) and `exit_group` (231)
+are emitted at syscall entry because they never return through syscall exit;
+`raw_args[0]` carries the exit status and `return_code` is 0 as a placeholder
+that does not mean a returned value.
 
 ### event.type KPROBE
 
@@ -493,6 +496,27 @@ increments `invocation_interrupted` only when a saved entry is found for the exi
 thread. Ring-buffer overflow is represented strictly in `DROP_COUNT` / `HEARTBEAT` drop
 counters and is never counted on collection scope counters (`emit_varlen` reports
 pre-emission assembly success independently of ring-buffer acceptance).
+
+`DIAGNOSTIC/raw_syscall.collection` reports pre-ring-buffer collection loss for
+Tier-1 raw syscalls, with the same fields (`reason_code`, `failure_count_delta`,
+`failure_count_total`, `scope: raw_syscall`, `sampling: userspace_poll`, and sticky
+`run_prefix_incomplete: true`) and periodic/shutdown polling behavior as
+`syscall.collection`. It uses the same reason set (`bloodhound_common::RAW_SYSCALL_FAILURE_REASONS`,
+which aliases `SYSCALL_FAILURE_REASONS`). Operational meanings differ only where raw
+capture specifics apply:
+- `entry_capture_failed`: Tracepoint ID or argument read failure at syscall entry.
+- `entry_save_failed` and `entry_cleanup_failed`: Map insertion or deletion failures on `SYSCALL_ENTRY_MAP`.
+- `exit_capture_failed`: Return-code read failure at syscall exit after a recorded entry was found in `SYSCALL_ENTRY_MAP` (the saved entry is removed before reporting loss).
+- `invocation_interrupted`: Pending invocation entry removed from `SYSCALL_ENTRY_MAP` during lifecycle exit cleanup (`sched_process_exit`).
+
+As with other collection scopes, the userspace monitor reports `counter_read_failed`
+with null counts when `RAW_SYSCALL_FAILURES` cannot be read; see
+[observer-connection rows 115/116](https://github.com/abyss0-dev/workspace/blob/99d751b90f8520a62c428d2012d018c6100a30ad/docs/spec/tracer/observer-connection.md#5-loss-accounting-and-health-mapping)
+for consumer mapping. Not counted as failures: `should_trace` exclusion,
+Tier-2-covered syscall numbers (delegated to rich/path capture), out-of-range or
+excluded syscall numbers, invocations in flight at attach, and `-ENOENT` return
+values on map removal. Interrupted accounting requires a recorded entry, and
+ring-buffer drops remain strictly in `DROP_COUNT` / `HEARTBEAT`.
 
 ### Exec-entry filesystem view
 
