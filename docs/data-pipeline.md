@@ -46,7 +46,7 @@ Each BPF event from Layer 1-3 and LSM hooks carries at minimum:
 - auid (u32)
 - sessionid (u32)
 - pid (u32)
-- ppid (u32)
+- ppid (u32; 0 on general kernel-hook headers, populated on kernel child-start)
 - process start-boottime (u64; paired with TGID as the stable process reference)
 - comm ([u8; 16])
 - Hook-specific payload (variable length)
