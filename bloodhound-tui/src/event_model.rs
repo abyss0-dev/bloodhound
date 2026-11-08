@@ -243,16 +243,7 @@ impl BehaviorEvent {
                 };
                 ("KILL", detail)
             }
-            "bpf" => {
-                let detail = self
-                    .args
-                    .as_ref()
-                    .and_then(|a| a.get("cmd"))
-                    .and_then(|v| v.as_u64())
-                    .map(|c| format!(" cmd={}", c))
-                    .unwrap_or_default();
-                ("BPF", detail)
-            }
+            "bpf" => ("BPF", String::new()),
             "ptrace_access_check" => {
                 let detail = self
                     .args
@@ -263,16 +254,7 @@ impl BehaviorEvent {
                     .unwrap_or_default();
                 ("PTRACE", detail)
             }
-            "task_fix_setuid" => {
-                let detail = if let Some(args) = &self.args {
-                    let old_uid = args.get("old_uid").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let new_uid = args.get("new_uid").and_then(|v| v.as_u64()).unwrap_or(0);
-                    format!(" uid:{}→{}", old_uid, new_uid)
-                } else {
-                    String::new()
-                };
-                ("SETUID", detail)
-            }
+            "task_fix_setuid" => ("SETUID", String::new()),
 
             "connect" | "bind" | "sendto" | "recvfrom" => {
                 let detail = if let Some(args) = &self.args {

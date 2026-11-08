@@ -2952,10 +2952,39 @@ mod golden_tests {
     golden_from_qemu!(golden_rename, "rename", "../testdata/qemu/rename.b64");
     golden_from_qemu!(golden_sendto, "sendto", "../testdata/qemu/sendto.b64");
     golden_from_qemu!(golden_lsm_task_kill, "lsm_task_kill", "../testdata/qemu/lsm_task_kill.b64");
-    // Real opt-in observe-only capture: a capable principal successfully created
-    // a BPF map (cmd=0), and the hook emitted return_code=0.
-    golden_from_qemu!(golden_lsm_bpf, "lsm_bpf", "../testdata/qemu/lsm_bpf.b64");
-    golden_from_qemu!(golden_lsm_setuid, "lsm_setuid", "../testdata/qemu/lsm_setuid.b64");
+    // Preserve the historical captures, but explicitly strip their uncaptured
+    // placeholder fields before testing the current wire layout. Otherwise the
+    // old cmd/old_uid bytes would be mistaken for the hook's return_code.
+    fn legacy_lsm_without_placeholders(encoded: &str, placeholder_len: usize) -> Vec<u8> {
+        let mut raw = captured(encoded);
+        assert_eq!(raw.len(), EventHeader::SIZE + placeholder_len + 4);
+        assert!(raw[EventHeader::SIZE..EventHeader::SIZE + placeholder_len]
+            .iter().all(|&byte| byte == 0));
+        raw.drain(EventHeader::SIZE..EventHeader::SIZE + placeholder_len);
+        raw
+    }
+
+    #[test]
+    fn golden_lsm_bpf() {
+        let raw = legacy_lsm_without_placeholders(
+            include_str!("../testdata/qemu/lsm_bpf.b64"), 4,
+        );
+        assert_eq!(raw.len(), EventHeader::SIZE + LsmBpfPayload::SIZE);
+        let event = deserialize(&raw).unwrap();
+        assert_json_snapshot!("lsm_bpf", to_json(&event));
+        assert_snapshot!("lsm_bpf_bytes", serde_json::to_string(&event).unwrap());
+    }
+
+    #[test]
+    fn golden_lsm_setuid() {
+        let raw = legacy_lsm_without_placeholders(
+            include_str!("../testdata/qemu/lsm_setuid.b64"), 16,
+        );
+        assert_eq!(raw.len(), EventHeader::SIZE + LsmSetuidPayload::SIZE);
+        let event = deserialize(&raw).unwrap();
+        assert_json_snapshot!("lsm_setuid", to_json(&event));
+        assert_snapshot!("lsm_setuid_bytes", serde_json::to_string(&event).unwrap());
+    }
     golden_from_qemu!(golden_lsm_ptrace, "lsm_ptrace", "../testdata/qemu/lsm_ptrace.b64");
     // Historical 2026-08-20 capture: offline compatibility only, not current capture.
     golden_from_qemu!(golden_packet_ingress, "packet_ingress", "../testdata/qemu/packet_ingress.b64");
