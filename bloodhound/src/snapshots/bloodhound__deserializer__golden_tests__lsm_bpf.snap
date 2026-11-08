@@ -3,9 +3,6 @@ source: bloodhound/src/deserializer.rs
 expression: to_json(& event)
 ---
 {
-  "args": {
-    "cmd": 0
-  },
   "event": {
     "layer": "behavior",
     "name": "bpf",

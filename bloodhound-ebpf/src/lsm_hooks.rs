@@ -105,7 +105,6 @@ unsafe fn try_bpf_hook(_ctx: &LsmContext) -> Result<i32, i64> {
     // Observe only. A successful hook decision does not imply that DAC or
     // another security module will permit the syscall.
     let payload = LsmBpfPayload {
-        cmd: 0,
         return_code: 0,
     };
     emit_fixed(&get_task_info(EventKind::LsmBpf as u8), Some(&payload));
@@ -167,8 +166,6 @@ unsafe fn try_file_open(_ctx: &LsmContext) -> Result<i32, i64> {
     }
 
     let payload = LsmFileOpenPayload {
-        path_len: 0,
-        _pad: [0; 2],
         return_code: 0,
     };
     emit_fixed(&get_task_info(EventKind::LsmFileOpen as u8), Some(&payload));
@@ -190,8 +187,6 @@ unsafe fn try_inode_op(_ctx: &LsmContext, kind: u8) -> Result<i32, i64> {
         return Ok(0);
     }
     let payload = LsmInodePayload {
-        path_len: 0,
-        _pad: [0; 2],
         return_code: 0,
     };
     emit_fixed(&get_task_info(kind), Some(&payload));
@@ -213,8 +208,6 @@ unsafe fn try_inode_rename(_ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
     let payload = LsmInodeRenamePayload {
-        old_path_len: 0,
-        new_path_len: 0,
         return_code: 0,
     };
     emit_fixed(&get_task_info(EventKind::LsmInodeRename as u8), Some(&payload));
@@ -239,10 +232,6 @@ unsafe fn try_setuid(_ctx: &LsmContext) -> Result<i32, i64> {
         return Ok(0);
     }
     let payload = LsmSetuidPayload {
-        old_uid: 0,
-        new_uid: 0,
-        old_gid: 0,
-        new_gid: 0,
         return_code: 0,
     };
     emit_fixed(&get_task_info(EventKind::LsmTaskFixSetuid as u8), Some(&payload));
