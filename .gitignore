@@ -32,3 +32,6 @@ e2e/fixtures/training-shell-v3
 # OS
 .DS_Store
 Thumbs.db
+
+# Agent tooling (Gemini / Antigravity) writes skill files here; not part of this repository.
+/skills/
