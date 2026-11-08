@@ -10,58 +10,33 @@ commit `6337baa4be3b5eabc0c9ee64a1c1d75939c31625`.
 
 ## Structure Overview
 
-```
-BehaviorEvent
-|
-+-- header (REQUIRED)
-|   +-- timestamp    : u64    (VM CLOCK_MONOTONIC nanoseconds)
-|   +-- auid         : u32    (audit login UID)
-|   +-- sessionid    : u32    (audit session ID)
-|   +-- pid          : u32
-|   +-- tid          : u32    (kernel-captured task events only)
-|   +-- ppid         : u32    (optional in schema, but always populated)
-|   +-- comm         : string (max 16 bytes)
-|   +-- process_ref  : { tgid, start_boottime_ns } (process events only)
-|   +-- ns           : { mnt, net, uts, ipc, cgroup, user, pid } (present exactly with tid)
-|       +-- <slot>   : { status: complete|unsupported|unavailable, inode: u32 | null }
-|
-+-- event (REQUIRED)
-|   +-- type         : enum [SYSCALL, TTY, PACKET, KPROBE, TRACEPOINT, LSM, META, LIFECYCLE, HEARTBEAT, USDT, DIAGNOSTIC]
-|   +-- name         : string (hook point name, e.g. "openat", "tty_read")
-|   +-- layer        : enum [intent, tooling, behavior]
-|
-+-- proc (OPTIONAL)
-|   +-- main_executable : string (absolute path)
-|   +-- cwd             : string
-|   +-- tty             : string (device path)
-|
-+-- args (OPTIONAL, additionalProperties: true)
-|   +-- filename : string
-|   +-- argv     : [string]
-|   +-- flags    : [string]   (human-readable, e.g. ["O_RDONLY", "O_SYNC"])
-|   +-- data     : string     (raw TTY data, Base64 encoded)
-|   +-- fd_type  : string     (regular, pipe, socket, tty, other)
-|   +-- dev      : u64        (kernel encoding; openat validity is explicit, mmap is legacy)
-|   +-- ino      : u64        (inode number; openat validity is explicit, mmap is legacy)
-|   +-- oldfd    : u32        (dup/dup2/dup3/fcntl-DUPFD: source fd)
-|   +-- newfd    : i32        (dup family: destination fd, == return value)
-|   +-- cloexec  : bool       (dup3 with O_CLOEXEC, fcntl(F_DUPFD_CLOEXEC))
-|   +-- offset   : i64        (pread64/pwrite64: file offset; mmap: file offset)
-|   +-- iov_count   : u32     (readv/writev: caller-supplied iov array length)
-|   +-- iov_truncated : bool  (readv/writev: true ⇒ args.size is a lower bound)
-|   +-- prot     : [string]   (mmap: ["PROT_READ", "PROT_WRITE", "PROT_EXEC"])
-|   +-- length   : u64        (mmap: requested mapping length in bytes)
-|   +-- in_fd, out_fd, in_fd_type, out_fd_type, size : sendfile/splice
-|   +-- oldpath, newpath : string (two-path syscalls: input paths)
-|   +-- path_capture_version : u8 (path events: 1 when capture status is recorded, 0 when absent/legacy)
-|   +-- path_status : string  (single-path events: complete, truncated, read_error, invalid_encoding, unknown)
-|   +-- path1_status, path2_status : string (two-path events: complete, truncated, read_error, invalid_encoding, unknown)
-|   +-- tty_capture_version : u8 (TTY events: 1 when capture status is recorded, 0 when absent/legacy)
-|   +-- data_status : string  (TTY events: complete, truncated, read_error, unknown)
-|   +-- ...      : (extensible per event type)
-|
-+-- return_code (OPTIONAL) : i32
-```
+The authoritative wire format is defined in [schema.json](schema.json). Every event
+emitted by Bloodhound conforms to this schema.
+
+Top-level event records require `header` and `event`, with optional `args`,
+`return_code`, and historical `proc`. Schema types, required fields, and constraints
+are defined solely by `schema.json`. Producer-specific facts that `schema.json` does not
+state:
+
+- **`header.ppid`**: Optional in schema. The producer populates `ppid` only when
+  lineage is authoritatively known from the kernel (specifically, `process_start`
+  emitted by `sched_process_fork`). On general kernel-hook headers (syscalls,
+  tracepoints, LSM) and userspace-synthesized events, `ppid` is absent (omitted from
+  the serialized JSON header; never looked up or inferred from `/proc`).
+- **`header.tid` and `header.ns`**: Present on kernel-captured records with a task
+  context; omitted on records without task context (userspace-synthesized records
+  `HEARTBEAT`, `DIAGNOSTIC`, `META`, and bootstrap `process_start`).
+- **`header.process_ref`**: Present when both TGID and a non-zero `start_boottime_ns`
+  are available from kernel task state; omitted otherwise.
+- **`event.layer`**: An allowed additional key (`intent`, `tooling`, `behavior`)
+  emitted as legacy producer metadata. It is not a schema field (`schema.json` defines
+  `type` and `name`, permitting additional keys), and consumers must not depend on it.
+- **`proc`**: Not emitted by Bloodhound (removed in #97; retained in `schema.json`
+  for historical trace decoding only).
+- **`args`**: Extensible per event type (`additionalProperties: true`). Payloads
+  emitted by Bloodhound are described in the event-specific sections below.
+- **`return_code`**: Emitted when applicable (e.g. syscall exit return value,
+  LSM hook decision).
 
 
 ## Layer-to-Event-Type Mapping
@@ -78,38 +53,29 @@ BehaviorEvent
 | behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
 
-Note: `event.layer` remains emitted legacy producer metadata (`intent`, `tooling`, `behavior`) in the schema, but downstream consumers do not depend on it for event classification.
+Note: `event.layer` is an allowed additional key (`intent`, `tooling`, `behavior`) emitted as legacy producer metadata. It is not a schema field (`schema.json` does not declare `layer`), and downstream consumers must not depend on it for event classification.
 
 
 ## Implementation Notes
 
-### proc.main_executable, proc.cwd, and proc.tty
+### proc (not emitted)
 
-These fields were formerly populated via best-effort userspace `/proc` reads.
-In Phase 2, live `/proc` enrichment has been completely removed from the producer.
-For live processes, no `proc.*` values (`main_executable`, `cwd`, `tty`) are filled,
-and missing `ppid` is never looked up from `/proc`. Synthesized `process_start` events
-never copy `triggering.proc` (it is always `None`).
+The `proc` object is not emitted by Bloodhound (removed in #97). While retained in
+`schema.json` as an optional property for backward compatibility and historical trace
+decoding, the producer event structure contains no `proc` field.
 
-The `proc` object is retained in the schema for backward compatibility and
-historical trace decoding only. Live processes continue to rely on authoritative
-kernel-level lifecycle facts:
-- Kernel child-start `ppid` and `process_fork` lineage authority remain intact.
+Live processes rely on authoritative kernel-level facts rather than `/proc`:
 - Executable context at execution entry is authoritatively provided by `exec_view`
   (root device/inode, mount namespace, root mount ID, and explicit status; see
-  [exec-view.md](development/exec-view.md)), which is captured directly in the kernel
-  without relying on `/proc`.
+  [exec-view.md](development/exec-view.md)), captured directly in the kernel.
+- Process lineage is provided by kernel lifecycle events (`process_start` / `process_fork`).
+  Lineage is never looked up from `/proc`.
 
-### header.timestamp
+### header.timestamp and emission ordering
 
-`header.timestamp` is an integer number of nanoseconds from the observed VM's
-`CLOCK_MONOTONIC` clock. BPF and userspace-synthesized events use the same
-domain. It is comparable within one VM run, but is not wall-clock time, is not
-comparable across boots, and does not define total kernel causal order.
-
-NDJSON line position is the canonical Bloodhound emission order. Each producer
-retains FIFO order; cross-producer order is successful admission to the bounded
-sequencer rather than timestamp sorting.
+Timestamp domain, clock semantics, and emission ordering are specified in
+[data-pipeline.md §Timestamp Strategy and §Emission Ordering and Backpressure](data-pipeline.md#timestamp-strategy).
+`output-schema.md` does not redefine them.
 
 ### header.tid and header.ns
 
@@ -235,7 +201,7 @@ LSM hooks are opt-in and disabled by default (`--enable-lsm`). When enabled, all
 When opted in:
 - `task_kill` and `ptrace_access_check` retain daemon-protection enforcement: they block
   unauthorized signals or ptrace operations targeting the daemon PID (returning `-1` / `-EPERM`)
-  and emit an LSM event with `return_code = -1`. Non-daemon signals emit `return_code = 0`.
+  and emit an LSM event with `return_code = -1`. Non-daemon operations emit `return_code = 0`.
 - The `bpf` hook (`lsm.bpf`) is observe-only: it always returns 0 and emits `return_code = 0`
   (no blanket denial).
 - `file_open`, `inode_unlink`, `inode_rename`, and `task_fix_setuid` emit behavior events
@@ -244,10 +210,12 @@ When opted in:
   For example, standard Linux DAC checks reject unprivileged kill or ptrace attempts
   against root before LSM hooks are reached.
 
-`task_kill.args.target_ref` identifies the target process instance. A
-successful `task_kill` event records signal delivery only; it is not evidence
-that the target exited. If the stable target identity cannot be read,
-`target_ref` is omitted rather than populated with a zero start time.
+#### Payload and Arguments
+
+- **`bpf` (`lsm.bpf`)** and **`task_fix_setuid`**: Emit no `args` (omitted from NDJSON), reporting only the hook decision in `return_code`. Command (`cmd`) and credential identities (`old_uid`, `new_uid`, `old_gid`, `new_gid`) are not captured.
+- **`file_open`**, **`inode_unlink`**, and **`inode_rename`**: Emit no `args` (no path or path length fields), reporting only the hook decision in `return_code`. (Path acquisition for filesystem operations is owned by Tier 2 tracepoint hooks.)
+- **`task_kill`**: Emits `args.target_pid`, `args.signal`, and optional `args.target_ref` (`{ tgid, start_boottime_ns }`), along with `return_code`. `target_ref` identifies the target process instance. A successful `task_kill` event records signal delivery only; it is not evidence that the target exited. If the stable target identity cannot be read, `target_ref` is omitted rather than populated with a zero start time.
+- **`ptrace_access_check`**: Emits `args.target_pid` and `return_code`.
 
 ### event.name signal_generate
 

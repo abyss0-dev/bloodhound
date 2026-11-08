@@ -26,8 +26,7 @@
 
 - Async runtime: tokio for ring buffer polling
 - Event processing: single-threaded async pipeline
-- Ordering: per-producer FIFO plus successful bounded-sequencer admission;
-  NDJSON line order is emission order, not inferred kernel causal order
+- Ordering: see [data-pipeline.md §Emission Ordering and Backpressure](data-pipeline.md#emission-ordering-and-backpressure)
 - Output: NDJSON (newline-delimited JSON) to stdout, one BehaviorEvent per line
 - Operational logs (startup, errors, drop count warnings): stderr
 - Event evaluation is NOT performed by Bloodhound -- it emits raw events
