@@ -192,6 +192,7 @@ pub struct Payload {
 }
 
 /// Parse raw ring buffer bytes into a BehaviorEvent.
+#[cfg(test)]
 pub fn deserialize(data: &[u8]) -> Result<BehaviorEvent> {
     Ok(deserialize_with_authority(data)?.event)
 }
