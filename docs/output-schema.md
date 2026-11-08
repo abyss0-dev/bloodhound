@@ -20,9 +20,10 @@ state:
 
 - **`header.ppid`**: Optional in schema. The producer populates `ppid` only when
   lineage is authoritatively known from the kernel (specifically, `process_start`
-  emitted by `sched_process_fork`). On general kernel-hook headers (syscalls,
-  tracepoints, LSM) and userspace-synthesized events, `ppid` is absent (omitted from
-  the serialized JSON header; never looked up or inferred from `/proc`).
+  emitted by `sched_process_fork`; not `process_fork`, which carries parent identity
+  in `args.parent_ref`). On general kernel-hook headers (syscalls, tracepoints, LSM)
+  and userspace-synthesized events, `ppid` is absent (omitted from the serialized
+  JSON header; never looked up or inferred from `/proc`).
 - **`header.tid` and `header.ns`**: Present on kernel-captured records with a task
   context; omitted on records without task context (userspace-synthesized records
   `HEARTBEAT`, `DIAGNOSTIC`, `META`, and bootstrap `process_start`).
@@ -31,8 +32,7 @@ state:
 - **`event.layer`**: An allowed additional key (`intent`, `tooling`, `behavior`)
   emitted as legacy producer metadata. It is not a schema field (`schema.json` defines
   `type` and `name`, permitting additional keys), and consumers must not depend on it.
-- **`proc`**: Not emitted by Bloodhound (removed in #97; retained in `schema.json`
-  for historical trace decoding only).
+- **`proc`**: Bloodhound does not emit `proc`, although `schema.json` still allows it.
 - **`args`**: Extensible per event type (`additionalProperties: true`). Payloads
   emitted by Bloodhound are described in the event-specific sections below.
 - **`return_code`**: Emitted when applicable (e.g. syscall exit return value,
@@ -53,16 +53,12 @@ state:
 | behavior | TRACEPOINT   | signal_generate                              |
 | behavior | HEARTBEAT    | heartbeat                                    |
 
-Note: `event.layer` is an allowed additional key (`intent`, `tooling`, `behavior`) emitted as legacy producer metadata. It is not a schema field (`schema.json` does not declare `layer`), and downstream consumers must not depend on it for event classification.
-
 
 ## Implementation Notes
 
 ### proc (not emitted)
 
-The `proc` object is not emitted by Bloodhound (removed in #97). While retained in
-`schema.json` as an optional property for backward compatibility and historical trace
-decoding, the producer event structure contains no `proc` field.
+Bloodhound does not emit `proc`, although `schema.json` still allows it.
 
 Live processes rely on authoritative kernel-level facts rather than `/proc`:
 - Executable context at execution entry is authoritatively provided by `exec_view`
