@@ -20,7 +20,7 @@ PR を作成するときは、`.agents/skills/create-pr/SKILL.md` に従って�
 
 ## GitHub Actions
 
-`.github/workflows/` 配下を作成または変更する前に、`.github/workflows/AGENT.md` を読んで従ってください。
+`.github/workflows/` 配下を作成または変更する前に、`.github/workflows/AGENTS.md` を読んで従ってください。
 
 外部 Action と reusable workflow の参照は、mise で管理する pinact を使って40文字の commit SHAに固定します。
 tag、branch、短縮SHAをチェックインしてはいけません。

@@ -28,4 +28,4 @@
 
 - [ ] External Actions and reusable workflows are pinned by `mise run actions:pin`.
 - [ ] `mise run actions:check` passes.
-- [ ] GitHub Actions follow `.github/workflows/AGENT.md`.
+- [ ] GitHub Actions follow `.github/workflows/AGENTS.md`.
