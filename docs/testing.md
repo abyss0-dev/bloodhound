@@ -27,7 +27,7 @@ does not skip USDT attachment when BPF prerequisites are unavailable.
 
 ## Build Environment
 
-Building and running tests require Linux. See [README.md](../README.md#requirements) and [AGENT.md](../AGENT.md#project-commands) for host environment requirements and rationale.
+Building and running tests require Linux. See [README.md](../README.md#requirements) and [AGENTS.md](../AGENTS.md#project-commands) for host environment requirements and rationale.
 
 
 ## E2E Test Infrastructure

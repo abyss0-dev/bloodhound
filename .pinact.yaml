@@ -2,7 +2,7 @@ version: 3
 files:
   - pattern: .github/workflows/*.yml
   - pattern: .github/workflows/*.yaml
-  - pattern: .github/workflows/AGENT.md
+  - pattern: .github/workflows/AGENTS.md
   - pattern: action.yml
   - pattern: action.yaml
   - pattern: .github/actions/*/action.yml
