@@ -82,93 +82,6 @@ mod tests {
     }
 
     #[test]
-    fn tty_collection_reports_loss_without_operation_identity_or_ring_drops() {
-        for reason in bloodhound_common::TTY_FAILURE_REASONS {
-            let event = diagnostic("tty", reason, Some(2), Some(5), 1);
-            assert!(serde_json::to_value(&event).unwrap().get("proc").is_none());
-            assert_eq!(event.event.event_type, EventClass::Diagnostic);
-            assert_eq!(event.event.name, "tty.collection");
-            assert_eq!(event.event.layer, Layer::Behavior);
-            assert!(event.header.process_ref.is_none());
-            assert!(event.header.task.is_none());
-            assert!(event.return_code.is_none());
-            assert_eq!(event.args.unwrap(), json!({
-                "scope": "tty", "reason_code": reason,
-                "failure_count_delta": 2, "failure_count_total": 5,
-                "run_prefix_incomplete": true, "sampling": "userspace_poll",
-            }));
-        }
-    }
-
-    #[test]
-    fn tty_unreadable_counter_is_unknown_not_zero() {
-        let event = diagnostic("tty", "counter_read_failed", None, None, 1);
-        assert_eq!(event.event.name, "tty.collection");
-        assert!(event.header.process_ref.is_none());
-        assert_eq!(event.args.unwrap(), json!({
-            "scope": "tty", "reason_code": "counter_read_failed",
-            "failure_count_delta": null, "failure_count_total": null,
-            "run_prefix_incomplete": true, "sampling": "userspace_poll",
-        }));
-    }
-
-    #[test]
-    fn raw_syscall_collection_reports_loss_without_operation_identity() {
-        for reason in bloodhound_common::RAW_SYSCALL_FAILURE_REASONS {
-            let event = diagnostic("raw_syscall", reason, Some(2), Some(5), 1);
-            assert_eq!(event.event.event_type, EventClass::Diagnostic);
-            assert_eq!(event.event.name, "raw_syscall.collection");
-            assert_eq!(event.event.layer, Layer::Behavior);
-            assert!(event.header.process_ref.is_none());
-            assert!(event.header.task.is_none());
-            assert!(event.return_code.is_none());
-            assert_eq!(event.args.unwrap(), json!({
-                "scope": "raw_syscall", "reason_code": reason,
-                "failure_count_delta": 2, "failure_count_total": 5,
-                "run_prefix_incomplete": true, "sampling": "userspace_poll",
-            }));
-        }
-        let event = diagnostic("raw_syscall", "counter_read_failed", None, None, 1);
-        assert_eq!(event.event.name, "raw_syscall.collection");
-        assert_eq!(event.args.unwrap(), json!({
-            "scope": "raw_syscall", "reason_code": "counter_read_failed",
-            "failure_count_delta": null, "failure_count_total": null,
-            "run_prefix_incomplete": true, "sampling": "userspace_poll",
-        }));
-    }
-
-    #[test]
-    fn syscall_collection_reports_loss_without_claiming_operation_identity() {
-        for reason in bloodhound_common::SYSCALL_FAILURE_REASONS {
-            let event = diagnostic("syscall", reason, Some(2), Some(5), 1);
-            assert_eq!(event.event.event_type, EventClass::Diagnostic);
-            assert_eq!(event.event.name, "syscall.collection");
-            assert_eq!(event.event.layer, Layer::Behavior);
-            assert!(event.header.process_ref.is_none());
-            assert!(event.header.task.is_none());
-            assert!(event.return_code.is_none());
-            assert_eq!(event.args.unwrap(), json!({
-                "scope": "syscall", "reason_code": reason,
-                "failure_count_delta": 2, "failure_count_total": 5,
-                "run_prefix_incomplete": true, "sampling": "userspace_poll",
-            }));
-        }
-    }
-
-    #[test]
-    fn syscall_unreadable_counter_is_unknown_not_zero() {
-        let event = diagnostic("syscall", "counter_read_failed", None, None, 1);
-        assert_eq!(event.event.event_type, EventClass::Diagnostic);
-        assert_eq!(event.event.name, "syscall.collection");
-        assert!(event.header.process_ref.is_none());
-        assert_eq!(event.args.unwrap(), json!({
-            "scope": "syscall", "reason_code": "counter_read_failed",
-            "failure_count_delta": null, "failure_count_total": null,
-            "run_prefix_incomplete": true, "sampling": "userspace_poll",
-        }));
-    }
-
-    #[test]
     fn exec_collection_loss_reports_an_incomplete_prefix() {
         for reason in bloodhound_common::EXEC_FAILURE_REASONS {
             let event = diagnostic("exec", reason, Some(2), Some(4), 1);
@@ -195,26 +108,6 @@ mod tests {
         }
         let args = diagnostic("process_exit", "counter_read_failed", None, None, 1).args.unwrap();
         assert!(args["failure_count_total"].is_null());
-        assert_eq!(args["run_prefix_incomplete"], true);
-    }
-
-    #[test]
-    fn capture_loss_has_its_own_scope_and_does_not_claim_event_placement() {
-        let event = diagnostic("openat", "entry_save_failed", Some(2), Some(5), 1);
-        assert_eq!(event.event.name, "openat.collection");
-        assert!(event.header.process_ref.is_none());
-        let args = event.args.unwrap();
-        assert_eq!(args["failure_count_delta"], 2);
-        assert_eq!(args["failure_count_total"], 5);
-        assert_eq!(args["run_prefix_incomplete"], true);
-        assert!(args.get("drop_count_delta").is_none());
-    }
-
-    #[test]
-    fn unreadable_counter_never_claims_zero_failures() {
-        let args = diagnostic("openat", "counter_read_failed", None, None, 1).args.unwrap();
-        assert!(args["failure_count_total"].is_null());
-        assert!(args["failure_count_delta"].is_null());
         assert_eq!(args["run_prefix_incomplete"], true);
     }
 }

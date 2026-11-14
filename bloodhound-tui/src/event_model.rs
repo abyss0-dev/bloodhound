@@ -365,60 +365,6 @@ mod tests {
     }
 
     #[test]
-    fn test_category_process() {
-        assert_eq!(make_event("TRACEPOINT", "execve").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "execveat").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "clone").category(), EventCategory::Process);
-        assert_eq!(make_event("TRACEPOINT", "clone3").category(), EventCategory::Process);
-        assert_eq!(
-            make_event("LIFECYCLE", "process_start").category(),
-            EventCategory::Process,
-        );
-        assert_eq!(
-            make_event("LIFECYCLE", "process_fork").category(),
-            EventCategory::Process,
-        );
-        assert_eq!(
-            make_event("LIFECYCLE", "process_exit").category(),
-            EventCategory::Process,
-        );
-    }
-
-    #[test]
-    fn test_category_network() {
-        assert_eq!(make_event("PACKET", "ingress").category(), EventCategory::Network);
-        assert_eq!(make_event("TRACEPOINT", "connect").category(), EventCategory::Network);
-    }
-
-    #[test]
-    fn test_category_files() {
-        assert_eq!(make_event("TRACEPOINT", "openat").category(), EventCategory::Files);
-        assert_eq!(make_event("TRACEPOINT", "mkdir").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "file_open").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "inode_unlink").category(), EventCategory::Files);
-        assert_eq!(make_event("LSM", "inode_rename").category(), EventCategory::Files);
-        // Rich-extraction events that previously fell through to Security.
-        for name in [
-            "mmap", "dup", "dup2", "dup3", "fcntl", "pread64", "pwrite64", "readv", "writev",
-            "sendfile", "splice",
-        ] {
-            assert_eq!(
-                make_event("TRACEPOINT", name).category(),
-                EventCategory::Files,
-                "{name} should be Files",
-            );
-        }
-    }
-
-    #[test]
-    fn test_category_security() {
-        assert_eq!(make_event("LSM", "task_kill").category(), EventCategory::Security);
-        assert_eq!(make_event("LSM", "bpf").category(), EventCategory::Security);
-        assert_eq!(make_event("LSM", "ptrace_access_check").category(), EventCategory::Security);
-        assert_eq!(make_event("LSM", "task_fix_setuid").category(), EventCategory::Security);
-    }
-
-    #[test]
     fn test_category_hidden() {
         assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
         assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);

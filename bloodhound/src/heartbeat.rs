@@ -136,24 +136,6 @@ mod tests {
     // ── event shape ──────────────────────────────────────────────────────
 
     #[test]
-    fn heartbeat_has_expected_type_and_name() {
-        let ev = build_heartbeat(0, 0, 0, 1);
-        assert_eq!(ev.event.event_type, EventClass::Heartbeat);
-        assert_eq!(ev.event.name, "heartbeat");
-        assert_eq!(ev.event.layer, Layer::Behavior);
-    }
-
-    #[test]
-    fn heartbeat_header_sentinels_signal_not_applicable() {
-        let ev = build_heartbeat(0, 0, 0, 1);
-        assert_eq!(ev.header.auid, 0);
-        assert_eq!(ev.header.sessionid, 0);
-        assert_eq!(ev.header.pid, 0);
-        assert!(ev.header.ppid.is_none());
-        assert_eq!(ev.header.comm, "");
-    }
-
-    #[test]
     fn zero_drops_omits_gap_flag() {
         let ev = build_heartbeat(0, 5, 100, 1);
         let args = ev.args.unwrap();

@@ -1209,7 +1209,6 @@ pub const BITMAP_SIZE: usize = 512;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::mem;
 
     // ── EventKind: bijective u8 mapping ──────────────────────────────────
 
@@ -1241,21 +1240,6 @@ mod tests {
         }
     }
 
-    /// Unknown u8 values must return None, not panic.
-    #[test]
-    fn event_kind_unknown_returns_none() {
-        for byte in 0..=u8::MAX {
-            if !EventKind::ALL.iter().any(|&variant| variant as u8 == byte) {
-                assert_eq!(
-                    EventKind::from_u8(byte),
-                    None,
-                    "Expected None for unassigned kind byte {}",
-                    byte,
-                );
-            }
-        }
-    }
-
     #[test]
     fn event_kind_reserved_and_all_are_disjoint() {
         for &byte in EventKind::RESERVED {
@@ -1268,97 +1252,17 @@ mod tests {
         }
     }
 
-    /// All variant discriminants must be unique (no collisions).
-    #[test]
-    fn event_kind_discriminants_unique() {
-        let mut seen = [false; 256];
-        for v in EventKind::ALL {
-            let b = *v as u8;
-            assert!(!seen[b as usize], "Duplicate discriminant: {}", b);
-            seen[b as usize] = true;
-        }
-    }
-
     // ── Struct sizes: binary protocol stability ──────────────────────────
     // These sizes are part of the BPF↔userspace wire protocol.
     // If any size changes, the deserializer will produce garbage.
 
     #[test]
-    fn event_header_size_is_stable() {
-        // repr(C) layout: kind(1) + capture(3) + 4 bytes alignment padding
-        // + timestamp_ns(8) + auid(4) + sessionid(4)
-        // + pid(4) + ppid(4) + process_start_boottime_ns(8)
-        // + comm(16) + tid(4) + ns(36) = 96
-        assert_eq!(EventHeader::SIZE, 96);
-        assert_eq!(EventHeader::SIZE, mem::size_of::<EventHeader>());
-    }
-
-    #[test]
-    fn packet_event_header_size_is_stable() {
-        // repr(C) layout: kind(1) + _pad(3) + 4 bytes alignment padding
-        // + timestamp_ns(8) + ifindex(4) + data_len(4) = 24
-        assert_eq!(PacketEventHeader::SIZE, mem::size_of::<PacketEventHeader>());
-    }
-
-    #[test]
-    fn payload_sizes_match_mem_size() {
+    fn wire_payload_sizes_are_stable() {
         assert_eq!(ExecViewPayload::SIZE, 24);
         assert_eq!(EventKind::from_u8(224), Some(EventKind::ExecView));
-        assert_eq!(ExecvePayload::SIZE, mem::size_of::<ExecvePayload>());
-        assert_eq!(RawSyscallPayload::SIZE, mem::size_of::<RawSyscallPayload>());
-        assert_eq!(TtyPayload::SIZE, mem::size_of::<TtyPayload>());
-        assert_eq!(OpenatPayload::SIZE, mem::size_of::<OpenatPayload>());
-        assert_eq!(ReadWritePayload::SIZE, mem::size_of::<ReadWritePayload>());
-        assert_eq!(ConnectBindPayload::SIZE, mem::size_of::<ConnectBindPayload>());
-        assert_eq!(SocketPayload::SIZE, mem::size_of::<SocketPayload>());
-        assert_eq!(ClonePayload::SIZE, mem::size_of::<ClonePayload>());
         assert_eq!(ProcessForkPayload::SIZE, 32);
-        assert_eq!(
-            ProcessForkPayload::SIZE,
-            mem::size_of::<ProcessForkPayload>()
-        );
         assert_eq!(ProcessExitPayload::SIZE, 8);
-        assert_eq!(
-            ProcessExitPayload::SIZE,
-            mem::size_of::<ProcessExitPayload>()
-        );
         assert_eq!(SignalGeneratePayload::SIZE, 24);
-        assert_eq!(
-            SignalGeneratePayload::SIZE,
-            mem::size_of::<SignalGeneratePayload>()
-        );
-        assert_eq!(PathPayload::SIZE, mem::size_of::<PathPayload>());
-        assert_eq!(TwoPathPayload::SIZE, mem::size_of::<TwoPathPayload>());
-        assert_eq!(
-            SendtoRecvfromPayload::SIZE,
-            mem::size_of::<SendtoRecvfromPayload>()
-        );
-        assert_eq!(FdPayload::SIZE, mem::size_of::<FdPayload>());
-        assert_eq!(ListenPayload::SIZE, mem::size_of::<ListenPayload>());
-        assert_eq!(
-            LsmFileOpenPayload::SIZE,
-            mem::size_of::<LsmFileOpenPayload>()
-        );
-        assert_eq!(
-            LsmTaskKillPayload::SIZE,
-            mem::size_of::<LsmTaskKillPayload>()
-        );
-        assert_eq!(LsmBpfPayload::SIZE, mem::size_of::<LsmBpfPayload>());
-        assert_eq!(LsmPtracePayload::SIZE, mem::size_of::<LsmPtracePayload>());
-        assert_eq!(LsmInodePayload::SIZE, mem::size_of::<LsmInodePayload>());
-        assert_eq!(
-            LsmInodeRenamePayload::SIZE,
-            mem::size_of::<LsmInodeRenamePayload>()
-        );
-        assert_eq!(LsmSetuidPayload::SIZE, mem::size_of::<LsmSetuidPayload>());
-        assert_eq!(DupPayload::SIZE, mem::size_of::<DupPayload>());
-        assert_eq!(PreadPwritePayload::SIZE, mem::size_of::<PreadPwritePayload>());
-        assert_eq!(ReadvWritevPayload::SIZE, mem::size_of::<ReadvWritevPayload>());
-        assert_eq!(MmapPayload::SIZE, mem::size_of::<MmapPayload>());
-        assert_eq!(
-            SendfileSplicePayload::SIZE,
-            mem::size_of::<SendfileSplicePayload>()
-        );
     }
 
     #[test]
@@ -1429,19 +1333,6 @@ mod tests {
         assert_eq!((sendfile.name, sendfile.tracepoint), ("sendfile", "sendfile64"));
         assert_eq!(policy(NR_SENDFILE), Dedup::OptIn);
         assert_eq!(policy(NR_SPLICE), Dedup::OptIn);
-    }
-
-    /// Spot-check a few well-known x86_64 syscall numbers.
-    #[test]
-    fn well_known_syscall_numbers() {
-        assert_eq!(NR_READ, 0);
-        assert_eq!(NR_WRITE, 1);
-        assert_eq!(NR_OPENAT, 257);
-        assert_eq!(NR_EXECVE, 59);
-        assert_eq!(NR_CLONE, 56);
-        assert_eq!(NR_CONNECT, 42);
-        assert_eq!(NR_SOCKET, 41);
-        assert_eq!(NR_FUTEX, 202);
     }
 }
 

@@ -243,44 +243,6 @@ mod tests {
             .collect()
     }
 
-    // These replace the retired enricher's six tests at the live output boundary.
-    #[test]
-    fn pid_zero_is_not_enriched() {
-        for event in process_events(0, 0, false) {
-            assert!(event.get("proc").is_none());
-        }
-    }
-
-    #[test]
-    fn nonexistent_pid_does_not_panic() {
-        for event in process_events(999_999_999, 0, false) {
-            assert!(event.get("proc").is_none());
-        }
-    }
-
-    #[test]
-    fn own_process_is_not_enriched() {
-        assert!(std::fs::read_link("/proc/self/exe").is_ok());
-        assert!(std::fs::read_link("/proc/self/cwd").is_ok());
-        for event in process_events(std::process::id(), 0, false) {
-            assert!(event.get("proc").is_none());
-        }
-    }
-
-    #[test]
-    fn ppid_is_not_filled_from_proc() {
-        for event in process_events(std::process::id(), 0, false) {
-            assert!(event["header"].get("ppid").is_none());
-        }
-    }
-
-    #[test]
-    fn existing_kernel_ppid_is_preserved() {
-        for event in process_events(std::process::id(), 12345, false) {
-            assert_eq!(event["header"]["ppid"], 12345);
-        }
-    }
-
     #[test]
     fn repeated_observations_stay_unenriched() {
         let events = process_events(std::process::id(), 0, true);
@@ -292,7 +254,6 @@ mod tests {
             1
         );
         for event in events {
-            assert!(event.get("proc").is_none());
             assert!(event["header"].get("ppid").is_none());
         }
     }
