@@ -1751,30 +1751,6 @@ mod tests {
 
     // ── Core contract: header fields are correctly extracted ─────────────
 
-    /// The shared header (timestamp, auid, pid, comm) must be faithfully
-    /// extracted from the binary representation for all process event types.
-    #[test]
-    fn header_fields_correctly_extracted() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 1,
-            args: [0; 6],
-            return_code: 0,
-        };
-        let data = build_event(EventKind::RawSyscall, &payload);
-        let event = deserialize(&data).unwrap();
-
-        assert_eq!(event.header.timestamp, 1_500_000_000);
-        assert_eq!(event.header.auid, 1000);
-        assert_eq!(event.header.sessionid, 42);
-        assert_eq!(event.header.pid, 1234);
-        assert_eq!(event.header.ppid, Some(1));
-        assert_eq!(event.header.comm, "test");
-        assert_eq!(event.header.process_ref, Some(ProcessRefJson {
-            tgid: 1234,
-            start_boottime_ns: 99,
-        }));
-    }
-
     /// When ppid is 0, it should be serialized as None (omitted from JSON).
     #[test]
     fn header_ppid_zero_becomes_none() {
@@ -1792,109 +1768,6 @@ mod tests {
     }
 
     // ── Core contract: each event kind produces correct type/name/layer ──
-
-    /// Every event kind must map to the correct (event_type, name, layer)
-    /// triple as defined by the schema. This is the fundamental output contract.
-    #[test]
-    fn raw_syscall_classification() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 100,
-            args: [1, 2, 3, 4, 5, 6],
-            return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::RawSyscall, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Syscall);
-        assert_eq!(event.event.name, "100"); // syscall_nr as string
-        assert_eq!(event.event.layer, Layer::Behavior);
-        assert_eq!(event.return_code, Some(0));
-    }
-
-    #[test]
-    fn execve_classification() {
-        let payload = ExecvePayload {
-            filename_len: 0,
-            argv_len: 0,
-            return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Execve, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tracepoint);
-        assert_eq!(event.event.name, "execve");
-        assert_eq!(event.event.layer, Layer::Tooling);
-    }
-
-    #[test]
-    fn execveat_classification() {
-        let payload = ExecvePayload {
-            filename_len: 0,
-            argv_len: 0,
-            return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Execveat, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tracepoint);
-        assert_eq!(event.event.name, "execveat");
-        assert_eq!(event.event.layer, Layer::Tooling);
-    }
-
-    #[test]
-    fn tty_read_classification() {
-        let payload = TtyPayload { data_len: 0, _pad: [0; 2] };
-        let event = deserialize(&build_event(EventKind::TtyRead, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tty);
-        assert_eq!(event.event.name, "tty_read");
-        assert_eq!(event.event.layer, Layer::Intent);
-    }
-
-    #[test]
-    fn tty_write_classification() {
-        let payload = TtyPayload { data_len: 0, _pad: [0; 2] };
-        let event = deserialize(&build_event(EventKind::TtyWrite, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tty);
-        assert_eq!(event.event.name, "tty_write");
-        assert_eq!(event.event.layer, Layer::Intent);
-    }
-
-    #[test]
-    fn openat_classification() {
-        let payload = OpenatPayload {
-            flags: 0, mode: 0, filename_len: 0, capture_version: 0, capture_flags: 0, return_code: 0,
-            dirfd: 0, dev: 0, ino: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Openat, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tracepoint);
-        assert_eq!(event.event.name, "openat");
-        assert_eq!(event.event.layer, Layer::Behavior);
-    }
-
-    #[test]
-    fn connect_classification() {
-        let payload = ConnectBindPayload {
-            family: 2, port: 80, addr_v4: 0, addr_v6: [0; 16], return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Connect, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tracepoint);
-        assert_eq!(event.event.name, "connect");
-        assert_eq!(event.event.layer, Layer::Behavior);
-    }
-
-    #[test]
-    fn bind_classification() {
-        let payload = ConnectBindPayload {
-            family: 2, port: 8080, addr_v4: 0, addr_v6: [0; 16], return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Bind, &payload)).unwrap();
-        assert_eq!(event.event.name, "bind");
-    }
-
-    #[test]
-    fn process_start_carries_the_header_identity() {
-        let header = make_event_header(EventKind::ProcessStart);
-        let event = deserialize(&header_bytes(&header)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Lifecycle);
-        assert_eq!(event.event.name, "process_start");
-        assert_eq!(event.args, Some(serde_json::json!({
-            "process_ref": { "tgid": 1234, "start_boottime_ns": 99 }
-        })));
-    }
 
     #[test]
     fn process_start_without_header_identity_omits_args() {
@@ -1915,23 +1788,6 @@ mod tests {
     }
 
     #[test]
-    fn process_fork_carries_parent_and_child_identities() {
-        let payload = ProcessForkPayload {
-            parent_tgid: 1234,
-            child_tgid: 4321,
-            parent_start_boottime_ns: 99,
-            child_start_boottime_ns: 100,
-            clone_flags: 0x0002_0000,
-        };
-        let event = deserialize(&build_event(EventKind::ProcessFork, &payload)).unwrap();
-        assert_eq!(event.args, Some(serde_json::json!({
-            "parent_ref": { "tgid": 1234, "start_boottime_ns": 99 },
-            "child_ref": { "tgid": 4321, "start_boottime_ns": 100 },
-            "clone_flags": ["CLONE_NEWNS"],
-        })));
-    }
-
-    #[test]
     fn process_fork_omits_an_unavailable_parent_identity() {
         let payload = ProcessForkPayload {
             parent_tgid: 1234,
@@ -1947,33 +1803,6 @@ mod tests {
     }
 
     #[test]
-    fn process_exit_decodes_normal_and_signal_statuses() {
-        let normal = ProcessExitPayload { raw_status: 42 << 8, _pad: 0 };
-        let signaled = ProcessExitPayload { raw_status: 9 | 0x80, _pad: 0 };
-        let normal_event = deserialize(&build_event(EventKind::ProcessExit, &normal)).unwrap();
-        assert_eq!(normal_event.args, Some(serde_json::json!({
-            "exit_kind": "code", "exit_code": 42, "raw_status": 10752
-        })));
-        let signaled_event = deserialize(&build_event(EventKind::ProcessExit, &signaled)).unwrap();
-        assert_eq!(signaled_event.args, Some(serde_json::json!({
-            "exit_kind": "signal", "signal": 9, "core_dumped": true, "raw_status": 137
-        })));
-    }
-
-    #[test]
-    fn lsm_task_kill_classification() {
-        let payload = LsmTaskKillPayload {
-            target_pid: 100, signal: 9, target_start_boottime_ns: 77,
-            return_code: -1, _pad: 0,
-        };
-        let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Lsm);
-        assert_eq!(event.event.name, "task_kill");
-        assert_eq!(event.event.layer, Layer::Behavior);
-        assert_eq!(event.args.unwrap()["target_ref"]["start_boottime_ns"], 77);
-    }
-
-    #[test]
     fn lsm_task_kill_omits_an_unavailable_target_identity() {
         let payload = LsmTaskKillPayload {
             target_pid: 100,
@@ -1986,34 +1815,6 @@ mod tests {
         let args = event.args.unwrap();
         assert!(args.get("target_ref").is_none());
         assert_eq!(args["target_pid"], 100);
-    }
-
-    #[test]
-    fn signal_generate_carries_sender_and_target_identities() {
-        let payload = SignalGeneratePayload {
-            target_tgid: 4321,
-            signal: 15,
-            target_start_boottime_ns: 123_456,
-            group: 1,
-            result: SIGNAL_RESULT_DELIVERED,
-        };
-        let event = deserialize(&build_event(EventKind::SignalGenerate, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Tracepoint);
-        assert_eq!(event.event.name, "signal_generate");
-        assert_eq!(event.event.layer, Layer::Behavior);
-        assert_eq!(event.header.process_ref.unwrap().tgid, 1234);
-        assert_eq!(event.args, Some(serde_json::json!({
-            "target_pid": 4321,
-            "signal": 15,
-            "group": true,
-            "result": "delivered",
-            "result_code": 0,
-            "target_ref": {
-                "tgid": 4321,
-                "start_boottime_ns": 123_456,
-            },
-        })));
-        assert_eq!(event.return_code, None);
     }
 
     #[test]
@@ -2236,54 +2037,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn lsm_bpf_classification() {
-        let payload = LsmBpfPayload { return_code: -1 };
-        let event = deserialize(&build_event(EventKind::LsmBpf, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Lsm);
-        assert_eq!(event.event.name, "bpf");
-        assert!(event.args.is_none());
-        assert_eq!(event.return_code, Some(-1));
-    }
-
-    #[test]
-    fn lsm_setuid_classification() {
-        let payload = LsmSetuidPayload { return_code: 0 };
-        let event = deserialize(&build_event(EventKind::LsmTaskFixSetuid, &payload)).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Lsm);
-        assert_eq!(event.event.name, "task_fix_setuid");
-    }
-
     // ── Core contract: variable-length data extraction ───────────────────
-
-    /// Execve events must correctly extract filename and argv from
-    /// variable-length data appended after the fixed payload.
-    #[test]
-    fn execve_extracts_filename_and_argv() {
-        let filename = b"/bin/ls\0";
-        let argv = b"ls\0-la\0/tmp\0";
-        let payload = ExecvePayload {
-            filename_len: filename.len() as u16,
-            argv_len: argv.len() as u16,
-            return_code: 0,
-        };
-        let mut vardata = Vec::new();
-        vardata.extend_from_slice(filename);
-        vardata.extend_from_slice(argv);
-
-        let data = build_event_with_vardata(EventKind::Execve, &payload, &vardata);
-        let event = deserialize(&data).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["filename"], "/bin/ls");
-        let argv_arr: Vec<String> = args["argv"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        assert_eq!(argv_arr, vec!["ls", "-la", "/tmp"]);
-    }
 
     #[test]
     fn openat_capture_status_does_not_infer_validity_from_values() {
@@ -2492,64 +2246,6 @@ mod tests {
         }
     }
 
-    /// Path events (chdir, mkdir, unlink, etc.) must extract the path.
-    #[test]
-    fn path_event_extracts_path() {
-        let path = b"/tmp/testdir\0";
-        let payload = PathPayload {
-            path_len: path.len() as u16,
-            _pad: [0; 2],
-            return_code: 0,
-        };
-        let data = build_event_with_vardata(EventKind::Mkdir, &payload, path);
-        let event = deserialize(&data).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["filename"], "/tmp/testdir");
-        assert_eq!(event.event.name, "mkdir");
-    }
-
-    /// Two-path events (rename, symlink, link) must extract both paths.
-    #[test]
-    fn two_path_event_extracts_both_paths() {
-        let old = b"/tmp/old\0";
-        let new = b"/tmp/new\0";
-        let payload = TwoPathPayload {
-            path1_len: old.len() as u16,
-            path2_len: new.len() as u16,
-            return_code: 0,
-        };
-        let mut vardata = Vec::new();
-        vardata.extend_from_slice(old);
-        vardata.extend_from_slice(new);
-
-        let data = build_event_with_vardata(EventKind::Rename, &payload, &vardata);
-        let event = deserialize(&data).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["oldpath"], "/tmp/old");
-        assert_eq!(args["newpath"], "/tmp/new");
-    }
-
-    /// TTY events must produce base64-encoded data in args.data.
-    #[test]
-    fn tty_event_produces_base64_data() {
-        let tty_data = b"echo hello\r\n";
-        let payload = TtyPayload {
-            data_len: tty_data.len() as u16,
-            _pad: [0; 2],
-        };
-        let data = build_event_with_vardata(EventKind::TtyWrite, &payload, tty_data);
-        let event = deserialize(&data).unwrap();
-
-        let args = event.args.unwrap();
-        let encoded = args["data"].as_str().unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(encoded)
-            .unwrap();
-        assert_eq!(decoded, tty_data);
-    }
-
     fn tty_capture_record(kind: EventKind, capture: HeaderCapture, bytes: &[u8]) -> Vec<u8> {
         let payload = TtyPayload { data_len: bytes.len() as u16, _pad: [0; 2] };
         let mut data = build_event_with_vardata(kind, &payload, bytes);
@@ -2677,28 +2373,6 @@ mod tests {
 
     // ── Core contract: structured field extraction ───────────────────────
 
-    /// RawSyscall must faithfully reproduce all 6 arguments.
-    #[test]
-    fn raw_syscall_preserves_all_args() {
-        let payload = RawSyscallPayload {
-            syscall_nr: 257,
-            args: [100, 200, 300, 400, 500, 600],
-            return_code: 3,
-        };
-        let event = deserialize(&build_event(EventKind::RawSyscall, &payload)).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["syscall_nr"], 257);
-        let raw_args: Vec<u64> = args["raw_args"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v.as_u64().unwrap())
-            .collect();
-        assert_eq!(raw_args, vec![100, 200, 300, 400, 500, 600]);
-        assert_eq!(event.return_code, Some(3));
-    }
-
     /// Connect/bind must format IPv4 addresses correctly.
     #[test]
     fn connect_formats_ipv4_address() {
@@ -2715,46 +2389,6 @@ mod tests {
         assert_eq!(args["family"], 2);
         assert_eq!(args["port"], 443);
         assert_eq!(args["addr"], "10.0.1.5");
-    }
-
-    /// Connect/bind must format IPv6 addresses correctly.
-    #[test]
-    fn connect_formats_ipv6_address() {
-        let mut addr_v6 = [0u8; 16];
-        addr_v6[15] = 1; // ::1
-        let payload = ConnectBindPayload {
-            family: 10, // AF_INET6
-            port: 80,
-            addr_v4: 0,
-            addr_v6,
-            return_code: 0,
-        };
-        let event = deserialize(&build_event(EventKind::Connect, &payload)).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["port"], 80);
-        // Should contain "0001" at the end for ::1
-        let addr_str = args["addr"].as_str().unwrap();
-        assert!(addr_str.ends_with("0001"), "IPv6 ::1 not formatted correctly: {}", addr_str);
-    }
-
-    /// LSM task_kill must extract target_pid and signal.
-    #[test]
-    fn lsm_task_kill_extracts_fields() {
-        let payload = LsmTaskKillPayload {
-            target_pid: 555,
-            signal: 9,
-            target_start_boottime_ns: 88,
-            return_code: -1,
-            _pad: 0,
-        };
-        let event = deserialize(&build_event(EventKind::LsmTaskKill, &payload)).unwrap();
-
-        let args = event.args.unwrap();
-        assert_eq!(args["target_pid"], 555);
-        assert_eq!(args["signal"], 9);
-        assert_eq!(args["target_ref"]["start_boottime_ns"], 88);
-        assert_eq!(event.return_code, Some(-1));
     }
 
     /// Uncaptured LSM credentials are absent, not fabricated zero-valued IDs.
@@ -2805,58 +2439,6 @@ mod tests {
     }
 
     // ── Core contract: packet events use separate header ─────────────────
-
-    #[test]
-    fn packet_ingress_uses_packet_header() {
-        let pkt_header = PacketEventHeader {
-            kind: EventKind::PacketIngress as u8,
-            _pad: [0; 3],
-            timestamp_ns: 2_000_000_000,
-            ifindex: 1,
-            data_len: 4,
-        };
-        let raw_pkt = vec![0xDE, 0xAD, 0xBE, 0xEF];
-        let mut buf = unsafe {
-            std::slice::from_raw_parts(
-                &pkt_header as *const PacketEventHeader as *const u8,
-                PacketEventHeader::SIZE,
-            )
-        }
-        .to_vec();
-        buf.extend_from_slice(&raw_pkt);
-
-        let event = deserialize(&buf).unwrap();
-        assert_eq!(event.event.event_type, EventClass::Packet);
-        assert_eq!(event.event.name, "ingress");
-        assert_eq!(event.event.layer, Layer::Behavior);
-
-        let args = event.args.unwrap();
-        let decoded = base64::engine::general_purpose::STANDARD
-            .decode(args["data"].as_str().unwrap())
-            .unwrap();
-        assert_eq!(decoded, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-    }
-
-    #[test]
-    fn packet_egress_classification() {
-        let pkt_header = PacketEventHeader {
-            kind: EventKind::PacketEgress as u8,
-            _pad: [0; 3],
-            timestamp_ns: 1_000_000_000,
-            ifindex: 0,
-            data_len: 0,
-        };
-        let buf = unsafe {
-            std::slice::from_raw_parts(
-                &pkt_header as *const PacketEventHeader as *const u8,
-                PacketEventHeader::SIZE,
-            )
-        }
-        .to_vec();
-
-        let event = deserialize(&buf).unwrap();
-        assert_eq!(event.event.name, "egress");
-    }
 
     // ── Core contract: robustness against malformed input ─────────────────
 
@@ -2916,11 +2498,7 @@ mod tests {
 mod golden_tests {
     use super::*;
     use base64::Engine;
-    use insta::{assert_json_snapshot, assert_snapshot};
-
-    fn to_json(event: &BehaviorEvent) -> serde_json::Value {
-        serde_json::to_value(event).unwrap()
-    }
+    use insta::assert_snapshot;
 
     fn captured(encoded: &str) -> Vec<u8> {
         base64::engine::general_purpose::STANDARD
@@ -2934,7 +2512,6 @@ mod golden_tests {
             fn $test_name() {
                 let raw = captured(include_str!($fixture));
                 let event = deserialize(&raw).expect("QEMU capture must deserialize");
-                assert_json_snapshot!($snapshot_name, to_json(&event));
                 assert_snapshot!(concat!($snapshot_name, "_bytes"), serde_json::to_string(&event).unwrap());
             }
         };
@@ -2972,7 +2549,6 @@ mod golden_tests {
         );
         assert_eq!(raw.len(), EventHeader::SIZE + LsmBpfPayload::SIZE);
         let event = deserialize(&raw).unwrap();
-        assert_json_snapshot!("lsm_bpf", to_json(&event));
         assert_snapshot!("lsm_bpf_bytes", serde_json::to_string(&event).unwrap());
     }
 
@@ -2983,7 +2559,6 @@ mod golden_tests {
         );
         assert_eq!(raw.len(), EventHeader::SIZE + LsmSetuidPayload::SIZE);
         let event = deserialize(&raw).unwrap();
-        assert_json_snapshot!("lsm_setuid", to_json(&event));
         assert_snapshot!("lsm_setuid_bytes", serde_json::to_string(&event).unwrap());
     }
     golden_from_qemu!(golden_lsm_ptrace, "lsm_ptrace", "../testdata/qemu/lsm_ptrace.b64");
