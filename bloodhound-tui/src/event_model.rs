@@ -365,6 +365,22 @@ mod tests {
     }
 
     #[test]
+    fn test_category_hidden() {
+        assert_eq!(make_event("TTY", "tty_read").category(), EventCategory::Hidden);
+        assert_eq!(make_event("TTY", "tty_write").category(), EventCategory::Hidden);
+        assert_eq!(make_event("SYSCALL", "42").category(), EventCategory::Hidden);
+        assert_eq!(
+            make_event("HEARTBEAT", "heartbeat").category(),
+            EventCategory::Hidden,
+        );
+        // Unknown event names fall through to Hidden, not Security.
+        assert_eq!(
+            make_event("TRACEPOINT", "some_future_event").category(),
+            EventCategory::Hidden,
+        );
+    }
+
+    #[test]
     fn test_is_tty_read() {
         assert!(make_event("TTY", "tty_read").is_tty_read());
         assert!(!make_event("TTY", "tty_write").is_tty_read());
