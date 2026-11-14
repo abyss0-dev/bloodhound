@@ -416,6 +416,7 @@ pub const FD_TYPE_OTHER: u8 = 4;
 pub struct ConnectBindPayload {
     pub family: u16,
     pub port: u16,
+    /// Raw `sin_addr` bytes in network order, read as a native u32.
     pub addr_v4: u32,
     pub addr_v6: [u8; 16],
     pub return_code: i32,
@@ -544,6 +545,7 @@ pub struct SendtoRecvfromPayload {
     pub fd: u32,
     pub family: u16,
     pub port: u16,
+    /// Raw `sin_addr` bytes in network order, read as a native u32.
     pub addr_v4: u32,
     pub addr_v6: [u8; 16],
     pub size: u64,
