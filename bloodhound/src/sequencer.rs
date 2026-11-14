@@ -243,7 +243,6 @@ mod tests {
             .collect()
     }
 
-    // These replace the retired enricher's six tests at the live output boundary.
     #[test]
     fn repeated_observations_stay_unenriched() {
         let events = process_events(std::process::id(), 0, true);
