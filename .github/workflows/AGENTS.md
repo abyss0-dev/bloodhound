@@ -91,7 +91,7 @@ required check が `merge_group` で起動しない場合、Merge Queue は結�
 ## E2E ワークフローの実行ポリシー
 
 ホステッド KVM/QEMU E2E テストおよびローカル重検証は、CI リソースと端末負荷の保護のため、次の運用規則に従います。
-前節「Merge Queue の workflow trigger」は自動実行される required check（`ci.yml` など）に適用される規定であり、本節で定めるホステッド E2E ワークフローは現行設定で required check ではなく、手動起動（`workflow_dispatch`）専用として運用します（将来の設定変更を先取り・禁止したり、正規のゲートを免除したりするものではありません）。
+前節「Merge Queue の workflow trigger」は required check に設定する（設定し得る）自動実行 workflow（`ci.yml` など）に適用される規定であり、本節で定めるホステッド E2E ワークフローは現行設定で required check ではなく、手動起動（`workflow_dispatch`）専用として運用します（将来の設定変更を先取り・禁止したり、正規のゲートを免除したりするものではありません）。
 
 ### 1. ホステッド E2E の手動限定と SHA 検証
 
