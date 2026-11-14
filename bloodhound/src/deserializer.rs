@@ -1349,7 +1349,7 @@ fn extract_argv(data: &[u8]) -> Vec<String> {
 }
 
 fn format_ipv4(addr: u32) -> String {
-    let bytes = addr.to_be_bytes();
+    let bytes = addr.to_ne_bytes();
     format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3])
 }
 
@@ -1704,7 +1704,7 @@ mod tests {
 
     #[test]
     fn test_format_ipv4() {
-        let addr = u32::from_be_bytes([127, 0, 0, 1]);
+        let addr = u32::from_ne_bytes([127, 0, 0, 1]);
         assert_eq!(format_ipv4(addr), "127.0.0.1");
     }
 
@@ -2379,7 +2379,7 @@ mod tests {
         let payload = ConnectBindPayload {
             family: 2, // AF_INET
             port: 443,
-            addr_v4: u32::from_be_bytes([10, 0, 1, 5]),
+            addr_v4: u32::from_ne_bytes([10, 0, 1, 5]),
             addr_v6: [0; 16],
             return_code: 0,
         };
@@ -2389,6 +2389,13 @@ mod tests {
         assert_eq!(args["family"], 2);
         assert_eq!(args["port"], 443);
         assert_eq!(args["addr"], "10.0.1.5");
+
+        // This historical QEMU capture came from a connect to loopback.
+        let captured = base64::engine::general_purpose::STANDARD
+            .decode(include_str!("../testdata/qemu/connect_ipv4.b64").trim())
+            .unwrap();
+        let event = deserialize(&captured).unwrap();
+        assert_eq!(event.args.unwrap()["addr"], "127.0.0.1");
     }
 
     /// Uncaptured LSM credentials are absent, not fabricated zero-valued IDs.
