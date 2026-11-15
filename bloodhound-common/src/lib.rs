@@ -210,7 +210,6 @@ event_kinds! {
     ProcessFork = 221,
     ProcessExit = 222,
     SignalGenerate = 223,
-    ExecView = 224,
 
     // Trusted in-tree USDT collectors. Their payload layouts are collector
     // owned; VM configuration can only select the already compiled program.
@@ -225,9 +224,9 @@ event_kinds! {
 impl EventKind {
     /// Retired wire IDs that must stay unknown and must never be reused.
     pub const RESERVED: &'static [u8] = &[
-        // Reserved: 225 (removed exec stdio), 226 (removed fork-file scan),
+        // Reserved: 224 (removed by D-11), 225 (removed exec stdio), 226 (removed fork-file scan),
         // 227 (removed Bash internal-function probes). Never reuse these wire IDs.
-        225, 226, 227,
+        224, 225, 226, 227,
     ];
 }
 
@@ -1243,6 +1242,12 @@ mod tests {
     }
 
     #[test]
+    fn retired_kind_224_stays_unknown_and_reserved() {
+        assert_eq!(EventKind::from_u8(224), None);
+        assert!(EventKind::RESERVED.contains(&224));
+    }
+
+    #[test]
     fn event_kind_reserved_and_all_are_disjoint() {
         for &byte in EventKind::RESERVED {
             assert!(
@@ -1260,8 +1265,6 @@ mod tests {
 
     #[test]
     fn wire_payload_sizes_are_stable() {
-        assert_eq!(ExecViewPayload::SIZE, 24);
-        assert_eq!(EventKind::from_u8(224), Some(EventKind::ExecView));
         assert_eq!(ProcessForkPayload::SIZE, 32);
         assert_eq!(ProcessExitPayload::SIZE, 8);
         assert_eq!(SignalGeneratePayload::SIZE, 24);
@@ -1338,41 +1341,14 @@ mod tests {
     }
 }
 
-/// Exec-entry filesystem context, paired by immutable actor and header timestamp.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct ExecViewPayload {
-    pub root_inode: u64,
-    pub root_dev: u32,
-    pub mount_namespace: u32,
-    pub root_mount_id: u32,
-    pub version: u8,
-    pub status: u8,
-    pub _pad: [u8; 2],
-}
-impl ExecViewPayload {
-    pub const SIZE: usize = core::mem::size_of::<Self>();
-}
-
-/// Ordered direct-member offsets for the bounded exec view pointer traversal.
-pub const EXEC_VIEW_FIELDS: [(&str, &str); 14] = [
-    ("task_struct", "fs"),
-    ("task_struct", "nsproxy"),
-    ("fs_struct", "root"),
-    ("path", "mnt"),
-    ("path", "dentry"),
-    ("dentry", "d_inode"),
+/// Ordered inode/superblock endpoints for file-descriptor identity.
+pub const FD_IDENTITY_FIELDS: [(&str, &str); 3] = [
     ("inode", "i_ino"),
     ("inode", "i_sb"),
     ("super_block", "s_dev"),
-    ("nsproxy", "mnt_ns"),
-    ("mnt_namespace", "ns"),
-    ("ns_common", "inum"),
-    ("mount", "mnt"),
-    ("mount", "mnt_id"),
 ];
 
-/// Additional fd traversal members. Identity endpoints reuse EXEC_VIEW_FIELDS[6..9].
+/// File-descriptor traversal members leading to FD_IDENTITY_FIELDS.
 pub const FD_CHAIN_FIELDS: [(&str, &str); 5] = [
     ("task_struct", "files"),
     ("files_struct", "fdt"),

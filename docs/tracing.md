@@ -312,8 +312,8 @@ and allows downstream consumers to filter noise from pipe I/O in pipelines.
 from the underlying inode at `sys_exit`. The traversal walks
 `task_struct → files_struct → fdtable → file → inode → super_block` using
 `bpf_probe_read_kernel`. Traversal offsets are resolved at daemon startup
-from the running kernel's BTF (`/sys/kernel/btf/vmlinux`) by the same resolver
-used for `exec_view`. If BTF lacks required fd traversal fields, fd identity is
+from the running kernel's BTF (`/sys/kernel/btf/vmlinux`).
+If BTF lacks required fd traversal fields, fd identity is
 marked unsupported: openat leaves validity bits clear (`file_identity_status: unavailable`),
 mmap emits zero identity (`dev: 0, ino: 0`), and the daemon logs a startup warning.
 Because transient runtime read failures also report `unavailable`, consumers cannot

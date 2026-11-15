@@ -57,8 +57,6 @@ pub fn load_and_attach(
     let offsets = btf_offsets::resolve()?;
 
     // Load BPF programs with global variables set BEFORE loading
-    let view_offsets = offsets.exec_view.unwrap_or([0; 14]);
-    let view_supported = u32::from(offsets.exec_view.is_some());
     let fd_offsets = offsets.fd_ident.unwrap_or([0; 8]);
     let fd_supported = u32::from(offsets.fd_ident.is_some());
     let tty_offsets = offsets.tty.unwrap_or([0; 3]);
@@ -69,8 +67,6 @@ pub fn load_and_attach(
         .set_global("FD_IDENT_SUPPORTED", &fd_supported, true)
         .set_global("OFF_TTY", &tty_offsets, true)
         .set_global("TTY_SUPPORTED", &tty_supported, true)
-        .set_global("OFF_EXEC_VIEW", &view_offsets, true)
-        .set_global("EXEC_VIEW_SUPPORTED", &view_supported, true)
         .set_global("OFF_NS", &offsets.namespaces.offsets, true)
         .set_global("NS_SUPPORTED", &offsets.namespaces.supported, true)
         .set_global("TARGET_AUID", &args.uid, true)

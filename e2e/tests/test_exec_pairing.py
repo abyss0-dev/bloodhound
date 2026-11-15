@@ -43,11 +43,8 @@ def test_nonleader_exec_emits_exactly_one_paired_record(
         record = matches[0]
         assert record["return_code"] == 0, record
         assert record["header"]["auid"] == 1000, record
-        ref = record["header"]["process_ref"]
-        views = [e for e in events if e["event"]["name"] == "exec_view"
-                 and e["header"].get("process_ref") == ref
-                 and e["header"]["timestamp"] == record["header"]["timestamp"]]
-        assert len(views) == 1, (run, views)
+
+    assert not any(e["event"]["name"] == "exec_view" for e in events), events
 
     diagnostics = [e for e in events if e["event"]["name"] == "exec.collection"]
     assert not diagnostics, diagnostics

@@ -279,7 +279,6 @@ fn deserialize_process_event(
             // syscall/TTY deserializer.
             crate::usdt::decode_payload(kind, payload)?
         }
-        EventKind::ExecView => parse_exec_view(payload)?,
         EventKind::Execve => parse_execve(payload, "execve", header.capture)?,
         EventKind::Execveat => parse_execve(payload, "execveat", header.capture)?,
         EventKind::RawSyscall => parse_raw_syscall(payload)?,
@@ -514,52 +513,6 @@ fn parse_execve(payload: &[u8], name: &'static str, capture: HeaderCapture) -> R
         },
         args: Some(args),
         return_code: Some(execve.return_code as i64),
-    })
-}
-
-fn parse_exec_view(payload: &[u8]) -> Result<Payload> {
-    if payload.len() != ExecViewPayload::SIZE {
-        bail!("invalid exec view payload length");
-    }
-    let view = unsafe { core::ptr::read_unaligned(payload.as_ptr().cast::<ExecViewPayload>()) };
-    let status = if view.version != 1 {
-        "unknown"
-    } else {
-        match view.status {
-            0 => "unsupported",
-            1 => "complete",
-            2 => "unavailable",
-            3 => "changed",
-            _ => bail!("invalid exec view status"),
-        }
-    };
-    if view.version == 1
-        && ((view.status == 1 && (view.mount_namespace == 0 || view.root_mount_id == 0))
-            || (view.status != 1
-                && (view.root_inode != 0
-                    || view.root_dev != 0
-                    || view.mount_namespace != 0
-                    || view.root_mount_id != 0)))
-    {
-        bail!("inconsistent exec view fields");
-    }
-    let mut args = serde_json::json!({"view_capture_version":view.version,"view_status":status});
-    if status == "complete" {
-        args["root_inode"] = view.root_inode.into();
-        args["root_dev"] = view.root_dev.into();
-        args["root_dev_major"] = (view.root_dev >> 20).into();
-        args["root_dev_minor"] = (view.root_dev & 0xfffff).into();
-        args["mount_namespace"] = view.mount_namespace.into();
-        args["root_mount_id"] = view.root_mount_id.into();
-    }
-    Ok(Payload {
-        event: EventTypeJson {
-            event_type: EventClass::Tracepoint,
-            name: "exec_view".into(),
-            layer: Layer::Behavior,
-        },
-        args: Some(args),
-        return_code: None,
     })
 }
 
@@ -1569,70 +1522,6 @@ mod tests {
     }
 
     // ── Utility function tests (preserved from original) ────────────────
-
-    #[test]
-    fn exec_view_preserves_complete_identity_and_kernel_device_encoding() {
-        let payload = ExecViewPayload {
-            root_inode: 81,
-            root_dev: (259 << 20) | 513,
-            mount_namespace: 4026531840,
-            root_mount_id: 27,
-            version: 1,
-            status: 1,
-            _pad: [0; 2],
-        };
-        let decoded = parse_exec_view(&payload_bytes(&payload)).unwrap();
-        let args = decoded.args.unwrap();
-        assert_eq!(decoded.event.name, "exec_view");
-        assert_eq!(decoded.return_code, None);
-        assert_eq!(args["view_status"], "complete");
-        assert_eq!(args["root_dev_major"], 259);
-        assert_eq!(args["root_dev_minor"], 513);
-        assert_eq!(args["root_inode"], 81);
-        assert_eq!(args["mount_namespace"], 4026531840u32);
-        assert_eq!(args["root_mount_id"], 27);
-    }
-
-    #[test]
-    fn exec_view_never_exposes_partial_or_unknown_identity() {
-        for (status, expected) in [(0, "unsupported"), (2, "unavailable"), (3, "changed")] {
-            let mut payload = ExecViewPayload {
-                version: 1,
-                status,
-                ..Default::default()
-            };
-            let args = parse_exec_view(&payload_bytes(&payload))
-                .unwrap()
-                .args
-                .unwrap();
-            assert_eq!(args["view_status"], expected);
-            assert!(args.get("root_inode").is_none());
-            payload.root_inode = 81;
-            assert!(parse_exec_view(&payload_bytes(&payload)).is_err());
-        }
-        let payload = ExecViewPayload {
-            version: 2,
-            status: 1,
-            root_inode: 81,
-            ..Default::default()
-        };
-        let args = parse_exec_view(&payload_bytes(&payload))
-            .unwrap()
-            .args
-            .unwrap();
-        assert_eq!(args["view_status"], "unknown");
-        assert!(args.get("root_inode").is_none());
-        for status in [1, 4, 255] {
-            let payload = ExecViewPayload {
-                version: 1,
-                status,
-                ..Default::default()
-            };
-            assert!(parse_exec_view(&payload_bytes(&payload)).is_err());
-        }
-        assert!(parse_exec_view(&[0; 23]).is_err());
-        assert!(parse_exec_view(&[0; 25]).is_err());
-    }
 
     #[test]
     fn test_comm_to_string() {

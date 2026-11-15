@@ -3,7 +3,6 @@
 
 mod fd_ident;
 mod filter;
-mod exec_view;
 mod helpers;
 mod layer1_tty;
 mod layer2_exec;
@@ -81,10 +80,6 @@ fn panic(_info: &core::panic::PanicInfo) -> ! {
     unsafe { core::hint::unreachable_unchecked() }
 }
 
-#[no_mangle]
-pub static mut OFF_EXEC_VIEW: [u32;14] = [0;14];
-#[no_mangle]
-pub static mut EXEC_VIEW_SUPPORTED: u32 = 0;
 #[no_mangle]
 pub static mut OFF_FD_IDENT: [u32; 8] = [0; 8];
 #[no_mangle]
