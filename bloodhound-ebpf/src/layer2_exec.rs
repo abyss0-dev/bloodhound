@@ -191,7 +191,6 @@ unsafe fn capture_exec(kind: EventKind, filename_ptr: u64, argv_ptr: u64) -> Res
         };
         if !copied { entry.argv_len = 0; entry.header.capture.primary = CaptureStatus::ReadError as u8; }
     }
-    crate::exec_view::emit(&entry.header);
     if EXECVE_ENTRY_MAP.insert(&(bpf_get_current_task() as u64), entry, 0).is_err() {
         crate::maps::exec_failure(EXEC_ENTRY_SAVE_FAILED);
     }

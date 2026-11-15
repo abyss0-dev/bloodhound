@@ -17,7 +17,7 @@
    loader startup such as duplicate collector selections abort immediately without
    emitting a stdout diagnostic; in neither failure case is ready emitted).
 6. Resolve running kernel BTF offsets and set global BPF variables (`TARGET_AUID`,
-   `DAEMON_PID`, task_struct offsets, namespace offsets, exec_view offsets).
+   `DAEMON_PID`, task_struct offsets, namespace offsets).
 7. Load eBPF programs, attach required tracepoints (`lifecycle`, `signal`,
    `exec.execve`, `raw_syscalls`), optional tracepoints (`exec.execveat`, Tier 2
    syscalls, sendfile/splice), TTY kprobes, opt-in LSM hooks (`--enable-lsm`),

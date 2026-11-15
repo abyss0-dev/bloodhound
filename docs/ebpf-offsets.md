@@ -1,8 +1,8 @@
 # eBPF Kernel Struct Offset Resolution
 
 Bloodhound resolves all kernel struct member offsets needed for event
-filtering, process instance identity, namespace membership, mount/exec views
-(`exec_view`), file-descriptor identity (`fd_ident`), and TTY classification
+filtering, process instance identity, namespace membership,
+file-descriptor identity (`fd_ident`), and TTY classification
 at daemon startup from the running kernel's BTF (`/sys/kernel/btf/vmlinux`).
 
 ## How It Works: Runtime BTF Offset Resolution
@@ -22,19 +22,16 @@ The pieces:
   - *Namespace membership*: `task_struct::nsproxy` and namespace hierarchy
     offsets (`uts_ns`, `ipc_ns`, `mnt_ns`, `pid_ns_for_children`, `net_ns`,
     `cgroup_ns`, `pid.numbers`, `upid.ns`).
-  - *Exec mount views* (`exec_view`): 14 member offsets across `fs_struct`,
-    `path`, `dentry`, and `mount`.
   - *File-descriptor identity* (`fd_ident`): 5 traversal offsets
     (`task_struct.files`, `files_struct.fdt`, `fdtable.max_fds`, `fdtable.fd`,
     `file.f_inode`) plus 3 shared inode/superblock endpoints (`inode.i_ino`,
-    `inode.i_sb`, `super_block.s_dev`). Shared endpoints are resolved once and
-    reused independently of `exec_view` support.
+    `inode.i_sb`, `super_block.s_dev`).
   - *TTY device classification* (`tty`): 3 direct offsets
     (`tty_struct.driver`, `tty_driver.type`, `tty_driver.subtype`).
 - **Loader injection** (`bloodhound::loader`): The resolved offsets and feature
   support flags are passed via `EbpfLoader::set_global` into corresponding
   global variables (`OFF_FD_IDENT`, `FD_IDENT_SUPPORTED`, `OFF_TTY`,
-  `TTY_SUPPORTED`, `OFF_EXEC_VIEW`, `EXEC_VIEW_SUPPORTED`, `OFF_NS`).
+  `TTY_SUPPORTED`, `OFF_NS`).
 - **eBPF in-kernel reads** (`filter.rs`, `fd_ident.rs`, `layer1_tty.rs`,
   `lsm_hooks.rs`): Fields are read dynamically with `bpf_probe_read_kernel`
   using base pointer plus injected offset. No compile-time layout bindings or

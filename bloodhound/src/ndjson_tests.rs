@@ -269,51 +269,6 @@ fn optional_identity_and_unknown_capture_bytes() {
             tty_capture_record(kind, HeaderCapture::default(), b"legacy\xff\0"),
         );
     }
-    for (version, status) in [(0, 0), (2, 1)] {
-        snapshot(
-            &format!("exec_view_unknown_v{version}_s{status}_bytes"),
-            build_event(
-                EventKind::ExecView,
-                &ExecViewPayload {
-                    version,
-                    status,
-                    ..Default::default()
-                },
-            ),
-        );
-    }
-}
-
-#[test]
-fn exec_view_bytes() {
-    for (status, name) in [
-        (0, "unsupported"),
-        (1, "complete"),
-        (2, "unavailable"),
-        (3, "changed"),
-    ] {
-        let payload = if status == 1 {
-            ExecViewPayload {
-                version: 1,
-                status,
-                root_inode: 81,
-                root_dev: (259 << 20) | 513,
-                mount_namespace: 4026531840,
-                root_mount_id: 27,
-                _pad: [0; 2],
-            }
-        } else {
-            ExecViewPayload {
-                version: 1,
-                status,
-                ..Default::default()
-            }
-        };
-        snapshot(
-            &format!("exec_view_{name}_bytes"),
-            build_event(EventKind::ExecView, &payload),
-        );
-    }
 }
 
 #[test]

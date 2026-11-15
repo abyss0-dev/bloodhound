@@ -61,9 +61,8 @@ state:
 Bloodhound does not emit `proc`, although `schema.json` still allows it.
 
 Live processes rely on authoritative kernel-level facts rather than `/proc`:
-- Executable context at execution entry is authoritatively provided by `exec_view`
-  (root device/inode, mount namespace, root mount ID, and explicit status; see
-  [exec-view.md](development/exec-view.md)), captured directly in the kernel.
+- The exec-time mount namespace is provided by `header.ns.mnt` on the exec record,
+  captured directly in the kernel.
 - Process lineage is provided by kernel lifecycle events (`process_start` / `process_fork`).
   Lineage is never looked up from `/proc`.
 
@@ -665,15 +664,11 @@ In `HeaderCapture`, capture status is encoded in three bytes `[version, primary,
 Any record violating these constraints is rejected via the
 `DIAGNOSTIC/stream.health` deserialization rejection path.
 
-### Exec-entry filesystem view
+### Retired event kinds
 
-`TRACEPOINT/exec_view` carries `view_capture_version` and `view_status`.
-Version 1 complete capture exposes `root_inode`, kernel-encoded `root_dev`,
-normalized `root_dev_major` / `root_dev_minor`, `mount_namespace` and
-`root_mount_id`. Unsupported, unavailable, changed and unknown captures expose
-no identity. Pair only with exec's exact immutable `process_ref` and entry
-`timestamp`; a view record alone proves neither a successful exec nor exit.
-See the [capture contract](development/exec-view.md) for acquisition and limits.
+Wire event kind 224 (`exec_view`) is reserved, removed by D-11, and must never
+be reused. The exec-time mount namespace is `header.ns.mnt` on the exec record;
+no separate filesystem-view record is emitted.
 
 Wire event kinds 225, 226 and 227 are reserved for removed experiments and must
 not be reused. The current producer emits no exec-stdio, fork-file or Bash

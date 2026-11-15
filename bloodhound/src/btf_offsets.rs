@@ -31,7 +31,6 @@ const SYS_BTF: &str = "/sys/kernel/btf/vmlinux";
 /// Byte offsets of the direct kernel struct members the eBPF programs read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TaskStructOffsets {
-    pub exec_view: Option<[u32; 14]>,
     pub fd_ident: Option<[u32; 8]>,
     pub tty: Option<[u32; 3]>,
     pub namespaces: NamespaceOffsets,
@@ -202,7 +201,7 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
     }
 
     let mut task_offsets = None;
-    let mut view_offsets = [None; 14];
+    let mut identity_offsets = [None; 3];
     let mut fd_offsets = [None; 5];
     let mut tty_offsets = [None; 3];
     let mut ns_offsets = [None; NS_FIELDS.len()];
@@ -220,14 +219,9 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
         if kind == BTF_KIND_STRUCT && vlen > 0 {
             let struct_name = r.str_at(str_base, name_off)?;
             let struct_size = r.u32(pos + 8)?;
-            for (i, (owner, field)) in bloodhound_common::EXEC_VIEW_FIELDS.iter().enumerate() {
-                if struct_name == *owner {
-                    view_offsets[i] =
-                        read_named_member(&r, str_base, members_pos, vlen, struct_size, field).ok();
-                }
-            }
             for (fields, resolved) in [
                 (bloodhound_common::FD_CHAIN_FIELDS.as_slice(), fd_offsets.as_mut_slice()),
+                (bloodhound_common::FD_IDENTITY_FIELDS.as_slice(), identity_offsets.as_mut_slice()),
                 (bloodhound_common::TTY_FIELDS.as_slice(), tty_offsets.as_mut_slice()),
             ] {
                 for (i, (owner, field)) in fields.iter().enumerate() {
@@ -282,16 +276,10 @@ pub fn parse_task_offsets(buf: &[u8]) -> Result<TaskStructOffsets> {
     let mut offsets = task_offsets.context("struct task_struct not found in BTF")?;
     let (live, group_exit_code) =
         signal_offsets.context("required signal_struct members not found in BTF")?;
-    // Resolve shared inode/superblock facts once, independently of exec-view support.
-    offsets.fd_ident = fd_offsets.iter().chain(&view_offsets[6..9]).copied()
+    offsets.fd_ident = fd_offsets.iter().chain(&identity_offsets).copied()
         .collect::<Option<Vec<_>>>().and_then(|v| v.try_into().ok());
     offsets.tty = tty_offsets.iter().copied()
         .collect::<Option<Vec<_>>>().and_then(|v| v.try_into().ok());
-    offsets.exec_view = view_offsets
-        .iter()
-        .copied()
-        .collect::<Option<Vec<_>>>()
-        .and_then(|v| v.try_into().ok());
     offsets.namespaces = NamespaceOffsets::from_resolved(&ns_offsets, upid_size);
     offsets.signal_live = live;
     offsets.signal_group_exit_code = group_exit_code;
@@ -348,7 +336,6 @@ fn read_task_members(
     }
 
     let off = TaskStructOffsets {
-        exec_view: None,
         fd_ident: None,
         tty: None,
         namespaces: NamespaceOffsets::from_resolved(&[None; NS_FIELDS.len()], None),
@@ -560,61 +547,13 @@ mod tests {
         assert_eq!(off.sessionid, 0xc8c);
         assert_eq!(off.tgid, 0x9a4);
         assert_eq!(off.comm, 0xb00);
-        assert_eq!(off.exec_view, None);
-    }
-
-    #[test]
-    fn exec_view_requires_every_member_and_resolves_each_running_layout() {
-        for missing in [None, Some("mnt_id"), Some("nsproxy")] {
-            let mut b = BtfBuilder::new();
-            let mut task = vec![
-                ("pid", 8),
-                ("tgid", 12),
-                ("group_leader", 16),
-                ("start_boottime", 24),
-                ("signal", 32),
-                ("exit_code", 40),
-                ("comm", 48),
-                ("loginuid", 64),
-                ("sessionid", 68),
-            ];
-            task.push(("fs", 72));
-            if missing != Some("nsproxy") {
-                task.push(("nsproxy", 80));
-            }
-            add_lifecycle_structs(&mut b, &task);
-            let mut expected = [0; 14];
-            expected[0] = 72;
-            expected[1] = 80;
-            let mut structs = std::collections::BTreeMap::<&str, Vec<(&str, u32)>>::new();
-            for (i, &(owner, member)) in bloodhound_common::EXEC_VIEW_FIELDS
-                .iter()
-                .enumerate()
-                .skip(2)
-            {
-                if missing == Some(member) {
-                    continue;
-                }
-                let offset = (i as u32) * 16;
-                structs.entry(owner).or_default().push((member, offset));
-                expected[i] = offset;
-            }
-            for (owner, members) in structs {
-                b.add_struct(owner, &members, false);
-            }
-            let result = parse_task_offsets(&b.build()).unwrap();
-            if missing.is_none() {
-                assert_eq!(result.exec_view, Some(expected));
-            } else {
-                assert_eq!(result.exec_view, None);
-            }
-        }
     }
 
     #[test]
     fn fd_and_tty_offsets_resolve_drift_and_fail_closed_independently() {
-        use bloodhound_common::{EXEC_VIEW_FIELDS, FD_CHAIN_FIELDS, TTY_FIELDS};
-        let fields: Vec<_> = FD_CHAIN_FIELDS.iter().chain(&EXEC_VIEW_FIELDS[6..9])
+        use bloodhound_common::{FD_IDENTITY_FIELDS, FD_CHAIN_FIELDS, TTY_FIELDS};
+        // This fixture provides only fd/TTY and lifecycle members, not root/path/mount members.
+        let fields: Vec<_> = FD_CHAIN_FIELDS.iter().chain(&FD_IDENTITY_FIELDS)
             .chain(&TTY_FIELDS).copied().collect();
         for shift in [0, 128] {
             for missing in std::iter::once(None).chain(fields.iter().copied().map(Some)) {
@@ -641,7 +580,6 @@ mod tests {
                 assert_eq!(result.tty, if missing.is_none() || !TTY_FIELDS.contains(&missing.unwrap()) {
                     Some(expected[8..].try_into().unwrap())
                 } else { None }, "missing={missing:?}, shift={shift}");
-                assert_eq!(result.exec_view, None, "fd identity must not require exec-view-only fields");
             }
         }
     }

@@ -42,9 +42,6 @@ graph TD
 
 - **Layer 1 — TTY capture**: kprobe hooks on `pty_write` / `n_tty_read` for raw terminal I/O
 - **Layer 2 — Process tracking**: `execve` / `execveat` tracepoints with full argv capture
-- **Exec filesystem view**: root device/inode, mount namespace and root mount ID
-  captured at exec entry, with explicit acquisition status and exact actor/time
-  pairing ([contract](docs/development/exec-view.md))
 - **Layer 3 — Syscall tracing**: raw syscall stream + rich extraction for 40+ syscalls (file, network, process, directory operations)
 - **Signal observation**: non-enforcing `signal_generate` raw tracepoint with immutable sender and target identities
 - **Tamper resistance (opt-in)**: 7 LSM hooks protect the daemon when opted in via `--enable-lsm`
