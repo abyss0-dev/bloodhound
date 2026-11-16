@@ -45,7 +45,7 @@ jobs:
           expires-in-minutes: 60
 
       - name: Start ci-cd sensor
-        uses: cicd-sensor/cicd-sensor-action@a803a7bc1890f85d3f2feb7c29b74b5c730da6c2 # v0.0.37
+        uses: cicd-sensor/cicd-sensor-action@2bc31a18949a77cd5f5bd452f24f00fbb507cdf6 # v0.0.41
         with:
           manager-url: https://manager.cicdsensor.cloud.shisho.dev
           manager-token: ${{ steps.auth.outputs.token }}
