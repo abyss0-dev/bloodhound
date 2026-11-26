@@ -75,7 +75,7 @@ Timestamp domain, clock semantics, and emission ordering are specified in
 ### header.tid and header.ns
 
 Every kernel-captured record with a task context carries `tid` and the
-namespace snapshot `ns` of that task (workspace tracer contract §2.8.1). The
+namespace snapshot `ns` of that task (abyss0 tracer contract §2.8.1). The
 snapshot is read inside the hook, at the same moment as `header.timestamp`.
 Syscall records whose header is taken at entry and emitted at exit, such as
 `execve`, therefore report the entry moment. A kernel-observed
@@ -531,7 +531,7 @@ Path capture status reports the acquisition completeness for all TRACEPOINT
 path-bearing syscall events other than `openat` and `exec` (`execve`/`execveat`),
 which retain their own dedicated capture metadata and public fields. The wire
 layout contract is defined in
-[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+[abyss0 docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
 
 #### Covered Events
 
@@ -606,7 +606,7 @@ non-zero secondary byte on a single-path event is rejected via the
 
 TTY capture status reports the acquisition completeness for TTY intent events
 (`tty_read` and `tty_write`). The wire layout contract is defined in
-[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+[abyss0 docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
 
 #### Covered Events
 
