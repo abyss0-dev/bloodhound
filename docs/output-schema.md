@@ -531,7 +531,7 @@ Path capture status reports the acquisition completeness for all TRACEPOINT
 path-bearing syscall events other than `openat` and `exec` (`execve`/`execveat`),
 which retain their own dedicated capture metadata and public fields. The wire
 layout contract is defined in
-[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
 
 #### Covered Events
 
@@ -606,7 +606,7 @@ non-zero secondary byte on a single-path event is rejected via the
 
 TTY capture status reports the acquisition completeness for TTY intent events
 (`tty_read` and `tty_write`). The wire layout contract is defined in
-[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/workspace/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
+[workspace docs/spec/tracer/README.md §2.4.4](https://github.com/abyss0-dev/abyss0/blob/main/docs/spec/tracer/README.md#244-on-event-completeness-status-present-events).
 
 #### Covered Events
 
