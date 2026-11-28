@@ -14,9 +14,14 @@ job が `queued` のまま進まない場合は、workflow の再実行より先
 
 ## Takumi Guard
 
-npm、PyPI、RubyGems、Go Modules、Packagist から依存を取得する job は、最初の依存取得より前に対応する `flatt-security/setup-takumi-guard-*` Action を置きます。
+Cargo（crates.io）、npm、PyPI、RubyGems、Go Modules、Packagist から依存を取得する job は、最初の依存取得より前に対応する `flatt-security/setup-takumi-guard-*` Action を置きます。
+すべての Guard Action に `bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3` を渡し、その job に `permissions: { contents: read, id-token: write }` を明示します。認証失敗時に匿名モードへ fallback させてはいけません。PyPI v1.1.0 は `set-index-url: false` を指定すると認証失敗で停止し、成功時には認証つき URL を引き続き export します。
 
-Cargo、APT、依存取得を行わない job に、対応しない Guard Action を形式的に追加してはいけません。
+Cargo は `setup-takumi-guard-crates` が生成した source replacement の config と `CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN` を、実際に Cargo を実行する環境に渡します。runner の設定だけでは Docker 内の取得経路は変わりません。
+Docker build の `cargo fetch` と `cargo build` は、config と token を BuildKit secret として mount します。Docker 内の `cargo test` にも同じ config を read-only mount し、token は `docker run -e CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN` で渡します。token を build arg、Dockerfile の `ENV`、イメージレイヤー、ログ、成果物に残してはいけません。
+ローカルビルドは従来どおり secret なしで実行できますが、CI は必ず両方の secret を渡します。
+
+APT、依存取得を行わない job に、対応しない Guard Action を形式的に追加してはいけません。
 すべての job は、対応 Guard を使用するか、対応対象の依存取得がないことを確認してください。
 
 Guard の Action が設定した registry や proxy の環境変数を、後続の script で固定値に上書きしてはいけません。

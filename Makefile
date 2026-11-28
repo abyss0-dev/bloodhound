@@ -1,12 +1,15 @@
 .PHONY: build-docker build-image build clean
 
 DOCKER_OUTPUT ?= target/docker
+# CI passes BuildKit secrets here; local builds need no Guard credentials.
+DOCKER_BUILD_FLAGS ?=
 
 # Build bloodhound binary via Docker (works on any OS)
 build-docker:
 	docker build \
 		--platform linux/amd64 \
 		-f Dockerfile.build \
+		$(DOCKER_BUILD_FLAGS) \
 		--output type=local,dest=$(DOCKER_OUTPUT) \
 		.
 

@@ -56,7 +56,15 @@ RUN mkdir -p bloodhound/src bloodhound-common/src bloodhound-ebpf/src bloodhound
     echo "#![no_std] #![no_main]" > bloodhound-ebpf/src/main.rs && \
     echo "fn main() {}" > bloodhound-tui/src/main.rs
 
-RUN cargo fetch --locked
+# Mount the Action-generated source replacement and token only for Cargo.
+# Neither secret is committed to an image layer; absent secrets preserve local builds.
+RUN --mount=type=secret,id=cargo-config,target=/root/.cargo/config.toml \
+    --mount=type=secret,id=cargo-token \
+    if [ -s /root/.cargo/config.toml ]; then \
+        test -s /run/secrets/cargo-token && \
+        export CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN="$(cat /run/secrets/cargo-token)"; \
+    fi && \
+    cargo fetch --locked
 
 # Remove dummy sources, copy real source code
 RUN rm -rf bloodhound/src bloodhound-common/src bloodhound-ebpf/src bloodhound-tui/src
@@ -66,7 +74,14 @@ COPY bloodhound-ebpf/ bloodhound-ebpf/
 COPY bloodhound-tui/ bloodhound-tui/
 COPY docs/schema.json docs/schema.json
 
-RUN cargo build --package bloodhound --release --target x86_64-unknown-linux-musl --verbose
+# build-std can fetch additional crates, so keep the same registry for the build.
+RUN --mount=type=secret,id=cargo-config,target=/root/.cargo/config.toml \
+    --mount=type=secret,id=cargo-token \
+    if [ -s /root/.cargo/config.toml ]; then \
+        test -s /run/secrets/cargo-token && \
+        export CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN="$(cat /run/secrets/cargo-token)"; \
+    fi && \
+    cargo build --package bloodhound --release --target x86_64-unknown-linux-musl --verbose
 
 # ── Stage 3: output ─────────────────────────────────────────────────
 FROM scratch AS output
