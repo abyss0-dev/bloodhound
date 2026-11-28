@@ -14,19 +14,55 @@ jobs:
   build:
     name: Build & Test
     runs-on: takumi-runner
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Set up Takumi Guard for crates.io
+        uses: flatt-security/setup-takumi-guard-crates@af3d713c6e1b95ae87161d426cce79fffbc57278 # v1.0.0
+        with:
+          bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3
+          expires-in: 3600
+
       - name: Build binary via Docker
-        run: make build-docker
+        run: >-
+          make build-docker
+          DOCKER_BUILD_FLAGS="--secret id=cargo-config,src=${CARGO_HOME:-$HOME/.cargo}/config.toml
+          --secret id=cargo-token,env=CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN"
 
       - name: Build the workspace test image
-        run: docker build --target build -t bloodhound-workspace-test -f Dockerfile.build .
+        run: >-
+          docker build --target build -t bloodhound-workspace-test -f Dockerfile.build
+          --secret "id=cargo-config,src=${CARGO_HOME:-$HOME/.cargo}/config.toml"
+          --secret id=cargo-token,env=CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN .
+
+      - name: Verify Guard credentials are not persisted in the test image
+        run: |
+          python3 - <<'PY'
+          import os
+          import subprocess
+
+          token = os.environ["CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN"].removeprefix("Bearer ")
+          assert token and token != "anonymous", "Authenticated Guard token is required"
+          for command in (
+              ["docker", "history", "--no-trunc", "bloodhound-workspace-test"],
+              ["docker", "inspect", "bloodhound-workspace-test"],
+          ):
+              result = subprocess.check_output(command, text=True)
+              assert token not in result, "Guard credential persisted in image metadata"
+          PY
+          docker run --rm --entrypoint sh bloodhound-workspace-test -c \
+            'test ! -s /root/.cargo/config.toml && test ! -e /root/.cargo/credentials.toml && test ! -s /run/secrets/cargo-token'
+          echo 'Guard credentials absent from image metadata and Cargo credential/config files'
 
       - name: Run workspace unit and replay tests
         run: >-
-          docker run --rm bloodhound-workspace-test
-          cargo test --workspace --locked --target x86_64-unknown-linux-musl
+          docker run --rm
+          --mount "type=bind,src=${CARGO_HOME:-$HOME/.cargo}/config.toml,dst=/root/.cargo/config.toml,readonly"
+          -e CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN
+          bloodhound-workspace-test cargo test --workspace --locked --target x86_64-unknown-linux-musl
 
       - name: Upload binary
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

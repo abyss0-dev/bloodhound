@@ -28,8 +28,17 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
+      - name: Set up Takumi Guard for crates.io
+        uses: flatt-security/setup-takumi-guard-crates@af3d713c6e1b95ae87161d426cce79fffbc57278 # v1.0.0
+        with:
+          bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3
+          expires-in: 3600
+
       - name: Build binary via Docker
-        run: make build-docker
+        run: >-
+          make build-docker
+          DOCKER_BUILD_FLAGS="--secret id=cargo-config,src=${CARGO_HOME:-$HOME/.cargo}/config.toml
+          --secret id=cargo-token,env=CARGO_REGISTRIES_TAKUMI_GUARD_TOKEN"
 
       - name: Enable KVM
         run: |
@@ -79,7 +88,7 @@ jobs:
         run: |
           bash scripts/boot-vm.sh rootfs.ext4 2222 2048 2 &
           echo "Waiting for VM to boot..."
-          for i in $(seq 1 60); do
+          for _ in $(seq 1 60); do
             sshpass -p root ssh \
               -o StrictHostKeyChecking=no \
               -o ConnectTimeout=2 \
@@ -110,6 +119,10 @@ jobs:
 
       - name: Set up Takumi Guard for PyPI
         uses: flatt-security/setup-takumi-guard-pypi@bac24f8a97255d96a277f60de6906154ce0be096 # v1.1.0
+        with:
+          bot-id: BT01M0MFTWGD1BQ2CKEPG92G53Y3
+          # Fail closed on authentication errors; successful auth still exports PIP_INDEX_URL.
+          set-index-url: false
 
       - name: Install test dependencies
         working-directory: e2e
